@@ -17,7 +17,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **E1 — attention sublayer**: `RMSNorm → BitLinear Q/K/V → causal attention → BitLinear O → +residual` (whole-sequence M=T projections; the three Q/K/V `dx` sum; residual fold inside the sublayer bwd).
   - **E2 — MLP sublayer**: `RMSNorm → BitLinear up(C→F) → GELU → BitLinear down(F→C) → +residual`.
   - **E3 — full pre-norm block** = E1 ∘ E2; the per-sublayer residual fold makes `block_bwd` just thread `dout → dxmid → dx` (the rolling residual gradient). 6 BitLinear projections + 2 RMSNorms + GELU + attention + 2 residuals, all gradient-verified.
-- **Remaining M2 bites:** E4 multi-token LM (token-embed + learned pos-embed → block → BitLinear head → per-position softmax-CE) that trains the loss curve → akshara corpus → the v0.3.0 cut.
+- **bite-E4: the ternary transformer LM trains from scratch — the "first loss curve."** token-embed + learned absolute pos-embed (full-precision) → the block → final RMSNorm → a *separate* ternary BitLinear head → per-position next-token softmax-CE; SGD on the latent weights + full-precision embeds/gains.
+  - **E4a** — the full LM forward/backward, **end-to-end FD-gated**: `d_tokemb`/`d_posemb == FD` of the CE loss through the entire chain (embed scatter → block → final RMSNorm → head → softmax-CE).
+  - **E4b** — **trains**: on a synthetic next-token sequence, CE descends `ln 6 ≈ 1.79 → ~0.04` (1500 steps) — the ternary sibling of attn11's first loss curve. Suite → **76**.
+- **M2 functionally complete** (a ternary transformer trains from scratch, FD-gated). Remaining toward the v0.3.0 cut: **bite-F** — swap the synthetic sequence for a real **akshara**-tokenized corpus (tarka 0.2.0→0.2.1 pattern).
 
 ## [0.2.0] — 2026-06-23
 

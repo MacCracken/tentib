@@ -5,9 +5,11 @@
 
 ## Version
 
-**0.2.0** — M1 (BitLinear + STE), cut 2026-06-23. **M2 bite-A (minimal ternary LM
-trains from scratch) built + gated on the 0.2.0 line, staged for the v0.3.0 cut**
-(v0.3.0 = the full ternary transformer; bite-A is its first sub-bite).
+**0.2.0** — M1 (BitLinear + STE), cut 2026-06-23. **M2 functionally COMPLETE on the
+0.2.0 line, staged for the v0.3.0 cut**: a ternary transformer trains from scratch
+(CE 1.86 → 0.04), every component + the full assembly FD-gated. Bites A (minimal
+LM) · B (RMSNorm) · C (GELU) · D (attention) · E1–E3 (block) · E4 (transformer LM
+trains). Remaining before the cut: bite-F (real akshara corpus) — optional.
 Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
 
 ## Toolchain
@@ -31,10 +33,11 @@ Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
 - `src/layers.cyr` — **M2 differentiable layers**: `rmsnorm_fwd`/`bwd` (pre-norm),
   `gelu_fwd`/`bwd` (+ a `_tanh` from `f64_exp`), `attn_fwd`/`bwd` (single-head causal
   scaled-dot-product attention), each with a `*_loss` FD probe.
-- `src/block.cyr` — **M2 full transformer block** (E1-E3): `blk_init(T,C,F)` +
-  `attn_sublayer_fwd`/`bwd` (E1) + `mlp_sublayer_fwd`/`bwd` (E2) + `block_fwd`/`bwd`
-  (E3, pre-norm, E1∘E2 with the rolling residual gradient). Module-global
-  scratch/caches; each level end-to-end dx-FD-gated.
+- `src/block.cyr` — **M2 full transformer block + LM** (E1-E4): `attn_sublayer`
+  (E1) + `mlp_sublayer` (E2) + `block_fwd`/`bwd` (E3, pre-norm) + `tx_*` — the
+  multi-token LM (embed + pos → block → final RMSNorm → ternary head → softmax-CE)
+  with `tx_train` (E4). Module-global scratch; each level FD-gated; the LM trains
+  (CE 1.86 → 0.04 on a synthetic sequence).
 - `src/main.cyr` — demo driver (M0 quantizer + M1 BitLinear + M2 LM-trains-from-scratch).
 
 ## Tests
@@ -44,9 +47,10 @@ Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
   grad vs live loss, falsifier), the **ternary-LM descent** (final CE < initial,
-  argmax ≥ 6/8), **RMSNorm + GELU + attention** fwd/bwd FD gates, and the **E1/E2/E3
-  end-to-end dx gates** (attention sublayer, MLP sublayer, and the full transformer
-  block — every assembled fwd+bwd chain gradient-verified).
+  argmax ≥ 6/8), **RMSNorm + GELU + attention** fwd/bwd FD gates, the **E1/E2/E3
+  end-to-end dx gates** (attention sublayer, MLP sublayer, full block), the **E4a LM
+  embedding-gradient FD gate**, and the **E4b descent** (the ternary transformer
+  trains: final CE < initial, < 0.5).
 - `tests/tentib.bcyr` / `.fcyr` — benchmark / fuzz stubs (no-op).
 
 ## Dependencies
@@ -64,6 +68,7 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**M2 continues** toward the full ternary transformer (v0.3.0). bite-A (minimal LM
-trains from scratch) done; next bites: **RMSNorm → GELU-MLP block → self-attention
-→ full transformer block → akshara corpus**. See [`roadmap.md`](roadmap.md).
+**M2 core done — ready to cut v0.3.0** (the ternary transformer trains from
+scratch). Optional **bite-F**: swap the synthetic sequence for a real akshara
+corpus (tarka 0.2.0→0.2.1 pattern) before or after the cut. Then **M3** — the
+packed-ternary int8 matmul-free inference kernel. See [`roadmap.md`](roadmap.md).

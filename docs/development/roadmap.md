@@ -67,9 +67,11 @@ attn11's first loss curve. Sub-bites:
     BitLinear-down → +residual`), dx == FD. 
   - ✅ **E3 (2026-06-23): full pre-norm block** = E1 ∘ E2; the per-sublayer residual
     fold makes `block_bwd` thread `dout → dxmid → dx`. Whole block dx == FD. 70/70.
-  - ⏳ **E4**: multi-token LM = token-embed + learned pos-embed → block → BitLinear
-    head → per-position softmax-CE; train on a synthetic multi-token task until the
-    loss descends (the v0.3.0 "first loss curve"). Separate ternary head (not tied).
+  - ✅ **E4 (2026-06-23): the ternary transformer LM trains from scratch** —
+    token-embed + learned pos-embed → block → final RMSNorm → separate ternary
+    BitLinear head → per-position softmax-CE. **E4a** fwd/bwd end-to-end FD-gated
+    (`d_tokemb`/`d_posemb == FD`); **E4b** trains: CE `1.86 → 0.04` on a synthetic
+    sequence (the "first loss curve"). 76/76. **M2 core complete.**
 - ⏳ **bite-F**: wire `[deps.akshara]`, swap synthetic for a real tokenized corpus
   (tarka 0.2.0→0.2.1 pattern) → **cut v0.3.0**.
 - Later refinement: swap SGD for Adam once the multi-layer landscape needs it.

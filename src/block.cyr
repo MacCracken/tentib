@@ -153,3 +153,114 @@ fn block_bwd(dout, x, gns, Wa, Wm, dx, dgns, dWa, dWm, T, C, F): i64 {
     attn_sublayer_bwd(blk_dxmid, x, gns, Wa, dx, dgns, dWa, T, C);
     return 0;
 }
+
+# ---- E4: the multi-token ternary transformer LM -----------------------------
+# token-embed (full-precision V*C) + learned absolute pos-embed (full-precision T*C)
+# -> block (E3) -> final RMSNorm -> SEPARATE ternary BitLinear head (C->V) -> per-
+# position softmax cross-entropy (target[t] = next token). SGD trains the latent
+# weights + full-precision embeds/gains; b1.58 ternarizes only the linear layers.
+# All params + grads + scratch are module-global (tx_*), allocated by tx_init.
+
+var tx_tokemb = 0; var tx_posemb = 0; var tx_gns = 0; var tx_gf = 0;
+var tx_Wa = 0; var tx_Wm = 0; var tx_Whead = 0; var tx_bhead = 0;
+var tx_dtokemb = 0; var tx_dposemb = 0; var tx_dgns = 0; var tx_dgf = 0;
+var tx_dWa = 0; var tx_dWm = 0; var tx_dWhead = 0; var tx_dbhead = 0;
+var tx_resid0 = 0; var tx_fnorm = 0; var tx_rstdf = 0;
+var tx_logits = 0; var tx_probs = 0; var tx_dlogits = 0;
+var tx_dfnorm = 0; var tx_dresid1 = 0; var tx_dresid0 = 0;
+var tx_Whq = 0; var tx_Whe = 0; var tx_hdWeff = 0; var tx_ghead = 0;
+
+fn tx_init(V, T, C, F): i64 {
+    blk_init(T, C, F);
+    var TC = T * C; var CC = C * C; var CF = C * F; var CV = C * V; var VC = V * C; var TV = T * V;
+    tx_tokemb = t_alloc(VC); tx_posemb = t_alloc(TC); tx_gns = t_alloc(2 * C); tx_gf = t_alloc(C);
+    tx_Wa = t_alloc(4 * CC); tx_Wm = t_alloc(2 * CF); tx_Whead = t_alloc(CV); tx_bhead = t_alloc(V);
+    tx_dtokemb = t_alloc(VC); tx_dposemb = t_alloc(TC); tx_dgns = t_alloc(2 * C); tx_dgf = t_alloc(C);
+    tx_dWa = t_alloc(4 * CC); tx_dWm = t_alloc(2 * CF); tx_dWhead = t_alloc(CV); tx_dbhead = t_alloc(V);
+    tx_resid0 = t_alloc(TC); tx_fnorm = t_alloc(TC); tx_rstdf = t_alloc(T);
+    tx_logits = t_alloc(TV); tx_probs = t_alloc(TV); tx_dlogits = t_alloc(TV);
+    tx_dfnorm = t_alloc(TC); tx_dresid1 = t_alloc(TC); tx_dresid0 = t_alloc(TC);
+    tx_Whq = t_alloc(CV); tx_Whe = t_alloc(CV); tx_hdWeff = t_alloc(CV);
+    return 0;
+}
+
+fn tx_param_init(V, T, C, F, seed): i64 {
+    rng_seed(seed);
+    var std = f64_div(f64_from(1), f64_from(10));   # 0.1
+    t_randn(tx_tokemb, V * C, std); t_randn(tx_posemb, T * C, std);
+    t_randn(tx_Wa, 4 * C * C, std); t_randn(tx_Wm, 2 * C * F, std); t_randn(tx_Whead, C * V, std);
+    t_fill(tx_gns, 2 * C, f64_from(1)); t_fill(tx_gf, C, f64_from(1)); t_zero(tx_bhead, V);
+    return 0;
+}
+
+fn tx_fwd(tokens, V, T, C, F): i64 {
+    var C8 = C * 8;
+    var t = 0;
+    while (t < T) {                                   # embed: resid0[t] = tokemb[tok] + posemb[t]
+        var tok = load64(tokens + t * 8);
+        t_copy(tx_resid0 + t * C8, tx_tokemb + tok * C8, C);
+        t_add_into(tx_resid0 + t * C8, tx_posemb + t * C8, C);
+        t = t + 1;
+    }
+    block_fwd(tx_resid0, tx_gns, tx_Wa, tx_Wm, T, C, F);   # mlp_out = block(resid0)
+    t = 0;
+    while (t < T) { store64(tx_rstdf + t * 8, rmsnorm_fwd(mlp_out + t * C8, tx_gf, tx_fnorm + t * C8, C)); t = t + 1; }
+    tx_ghead = bl_forward_wonly(tx_fnorm, tx_Whead, tx_bhead, tx_logits, T, C, V, tx_Whq, tx_Whe);
+    return 0;
+}
+
+fn tx_loss(tokens, targets, V, T, C, F): i64 {
+    tx_fwd(tokens, V, T, C, F);
+    return softmax_xent_fwd(tx_logits, targets, tx_probs, T, V);
+}
+
+fn tx_zero_grads(V, T, C, F): i64 {
+    t_zero(tx_dtokemb, V * C); t_zero(tx_dposemb, T * C); t_zero(tx_dgns, 2 * C); t_zero(tx_dgf, C);
+    t_zero(tx_dWa, 4 * C * C); t_zero(tx_dWm, 2 * C * F); t_zero(tx_dWhead, C * V); t_zero(tx_dbhead, V);
+    return 0;
+}
+
+# Full LM backward (grads zeroed once by the caller). Consumes tx_probs from tx_loss.
+fn tx_bwd(tokens, targets, V, T, C, F): i64 {
+    var C8 = C * 8;
+    softmax_xent_bwd(tx_probs, targets, tx_dlogits, T, V);
+    bl_backward_wonly(tx_fnorm, tx_Whe, tx_dlogits, tx_dfnorm, tx_dWhead, tx_dbhead, T, C, V, tx_Whead, tx_ghead, tx_hdWeff);
+    var t = 0;
+    while (t < T) { rmsnorm_bwd(mlp_out + t * C8, tx_gf, tx_dfnorm + t * C8, tx_dresid1 + t * C8, tx_dgf, C, load64(tx_rstdf + t * 8)); t = t + 1; }
+    block_bwd(tx_dresid1, tx_resid0, tx_gns, tx_Wa, tx_Wm, tx_dresid0, tx_dgns, tx_dWa, tx_dWm, T, C, F);
+    t = 0;
+    while (t < T) {                                   # embed scatter (accumulate): tok + pos
+        var tok = load64(tokens + t * 8);
+        t_add_into(tx_dtokemb + tok * C8, tx_dresid0 + t * C8, C);
+        t_add_into(tx_dposemb + t * C8, tx_dresid0 + t * C8, C);
+        t = t + 1;
+    }
+    return 0;
+}
+
+# SGD on the LATENT weights (re-quantized next fwd) + full-precision embeds/gains/bias.
+fn tx_sgd(V, T, C, F, nlr): i64 {
+    t_axpy(tx_Wa, tx_dWa, nlr, 4 * C * C); t_axpy(tx_Wm, tx_dWm, nlr, 2 * C * F); t_axpy(tx_Whead, tx_dWhead, nlr, C * V);
+    t_axpy(tx_tokemb, tx_dtokemb, nlr, V * C); t_axpy(tx_posemb, tx_dposemb, nlr, T * C);
+    t_axpy(tx_gns, tx_dgns, nlr, 2 * C); t_axpy(tx_gf, tx_dgf, nlr, C); t_axpy(tx_bhead, tx_dbhead, nlr, V);
+    return 0;
+}
+
+# Train the ternary transformer LM by SGD for `steps`; stats[0]=loss_initial,
+# stats[1]=loss_final (mean next-token CE over the T positions of the sequence).
+fn tx_train(tokens, targets, V, T, C, F, steps, seed, stats): i64 {
+    tx_init(V, T, C, F);
+    tx_param_init(V, T, C, F, seed);
+    store64(stats + 0, tx_loss(tokens, targets, V, T, C, F));
+    var nlr = f64_div(f64_from(0 - 1), f64_from(10));   # -0.1
+    var s = 0;
+    while (s < steps) {
+        tx_zero_grads(V, T, C, F);
+        tx_loss(tokens, targets, V, T, C, F);
+        tx_bwd(tokens, targets, V, T, C, F);
+        tx_sgd(V, T, C, F, nlr);
+        s = s + 1;
+    }
+    store64(stats + 8, tx_loss(tokens, targets, V, T, C, F));
+    return 0;
+}

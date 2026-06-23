@@ -554,6 +554,52 @@ fn main() {
     }
     assert(f64_lt(u3mr, bl_tol()) == 1, "E3: full block dx == central FD (< 1e-5) — both sublayers + residual threading");
 
+    test_group("M2 bite-E4a: transformer LM fwd/bwd — end-to-end embedding-gradient FD gate");
+    var w4V = 6; var w4T = 4; var w4C = 4; var w4F = 8;
+    tx_init(w4V, w4T, w4C, w4F);
+    tx_param_init(w4V, w4T, w4C, w4F, 41);
+    var w4tok = t_alloc(w4T); var w4tgt = t_alloc(w4T);
+    store64(w4tok + 0, 1); store64(w4tok + 8, 4); store64(w4tok + 16, 2); store64(w4tok + 24, 5);
+    store64(w4tgt + 0, 4); store64(w4tgt + 8, 2); store64(w4tgt + 16, 5); store64(w4tgt + 24, 3);
+    tx_loss(w4tok, w4tgt, w4V, w4T, w4C, w4F);
+    tx_zero_grads(w4V, w4T, w4C, w4F);
+    tx_bwd(w4tok, w4tgt, w4V, w4T, w4C, w4F);
+    assert(f64_is_finite(tget(tx_dtokemb, 4)) == 1, "E4a: d_tokemb finite");
+
+    var w4mr = f64_from(0); var w4k = 0;
+    while (w4k < w4V * w4C) {
+        var w4sv = load64(tx_tokemb + w4k * 8);
+        store64(tx_tokemb + w4k * 8, f64_add(w4sv, bl_eps())); var w4lp = tx_loss(w4tok, w4tgt, w4V, w4T, w4C, w4F);
+        store64(tx_tokemb + w4k * 8, f64_sub(w4sv, bl_eps())); var w4lm = tx_loss(w4tok, w4tgt, w4V, w4T, w4C, w4F);
+        store64(tx_tokemb + w4k * 8, w4sv);
+        var w4re = bl_relerr(f64_div(f64_sub(w4lp, w4lm), f64_mul(f64_from(2), bl_eps())), load64(tx_dtokemb + w4k * 8));
+        if (f64_gt(w4re, w4mr) == 1) { w4mr = w4re; }
+        w4k = w4k + 1;
+    }
+    assert(f64_lt(w4mr, bl_tol()) == 1, "E4a: d_tokemb == FD of CE loss (embed scatter + block + final-norm + head + softmax-CE)");
+
+    var w4mrp = f64_from(0); w4k = 0;
+    while (w4k < w4T * w4C) {
+        var w4s2 = load64(tx_posemb + w4k * 8);
+        store64(tx_posemb + w4k * 8, f64_add(w4s2, bl_eps())); var w4p2 = tx_loss(w4tok, w4tgt, w4V, w4T, w4C, w4F);
+        store64(tx_posemb + w4k * 8, f64_sub(w4s2, bl_eps())); var w4m2 = tx_loss(w4tok, w4tgt, w4V, w4T, w4C, w4F);
+        store64(tx_posemb + w4k * 8, w4s2);
+        var w4r2 = bl_relerr(f64_div(f64_sub(w4p2, w4m2), f64_mul(f64_from(2), bl_eps())), load64(tx_dposemb + w4k * 8));
+        if (f64_gt(w4r2, w4mrp) == 1) { w4mrp = w4r2; }
+        w4k = w4k + 1;
+    }
+    assert(f64_lt(w4mrp, bl_tol()) == 1, "E4a: d_posemb == FD of CE loss");
+
+    test_group("M2 bite-E4b: the ternary transformer LM trains from scratch (the first loss curve)");
+    var w5tok = t_alloc(4); var w5tgt = t_alloc(4);
+    store64(w5tok + 0, 1); store64(w5tok + 8, 4); store64(w5tok + 16, 2); store64(w5tok + 24, 5);
+    store64(w5tgt + 0, 4); store64(w5tgt + 8, 2); store64(w5tgt + 16, 5); store64(w5tgt + 24, 3);
+    var w5st = t_alloc(2);
+    tx_train(w5tok, w5tgt, 6, 4, 4, 8, 1000, 1, w5st);   # V=6, T=4, C=4, F=8, 1000 SGD steps
+    assert(f64_is_finite(tget(w5st, 1)) == 1, "E4b: final CE finite");
+    assert(f64_lt(tget(w5st, 1), tget(w5st, 0)) == 1, "E4b: final CE < initial CE (the transformer descends)");
+    assert(f64_lt(tget(w5st, 1), f64_div(f64_from(1), f64_from(2))) == 1, "E4b: final CE < 0.5 (memorizes the sequence; uniform baseline ln 6 ~ 1.79)");
+
     return assert_summary();
 }
 
