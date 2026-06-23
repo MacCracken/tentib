@@ -26,23 +26,17 @@ jobs:
           test "$FILE_VERSION" = "$TAG_VERSION" || { echo "VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"; exit 1; }
 
       - name: Install Cyrius toolchain
+        # Upstream install.sh lays out $HOME/.cyrius/{bin,lib,versions/<v>} — the
+        # hand-rolled curl+cp-into-bin form skips versions/<v>/ and so fails the
+        # `cyrius deps` pin-check / `cyrius lib sync` once git deps (rosnet/tyche/
+        # akshara at M1) land. Reference: tarka (same dep profile) / patra / sit.
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          TARBALL="cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          BASE="https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION"
-          curl -sfLO "$BASE/$TARBALL"
-          # CVE-21: verify the published .sha256 fail-closed before extracting.
-          curl -sfLO "$BASE/$TARBALL.sha256" || { echo "could not fetch $TARBALL.sha256 - refusing unverified toolchain"; exit 1; }
-          sha256sum -c "$TARBALL.sha256" || { echo "checksum mismatch for $TARBALL - aborting"; exit 1; }
-          tar xzf "$TARBALL"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Build
         run: |

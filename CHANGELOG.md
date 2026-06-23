@@ -25,6 +25,15 @@ so the weight·activation path is **add / subtract / skip**, no multiply.
   values incl. the zero state, and matmul-free dot == γ·(signed sum).
 - Scope + naming ADR (`docs/adr/0001-tentib-scope.md`), roadmap, state.
 
+### CI / Release
+- `ci.yml` declares `on: workflow_call:` so `release.yml`'s `uses: ./.github/workflows/ci.yml`
+  gate resolves (the generated scaffold omitted it — a tag push would otherwise fail the CI
+  gate before building).
+- Both workflows install the toolchain via the upstream `scripts/install.sh` (lays out
+  `~/.cyrius/versions/<v>/`) instead of the generated flat `curl+cp`-into-`~/.cyrius/{bin,lib}`
+  form — the flat layout fails `cyrius deps`'s pin-check / `cyrius lib sync` once the
+  rosnet/tyche/akshara git deps land at M1. Matches tarka (same dep profile) / patra.
+
 ### Notes
 - Sibling reference to attn11 (Transformer) and tarka (RL/reasoning); stands on
   the same f64 substrate (rosnet / tyche / akshara) — those deps wire in at M1+.
