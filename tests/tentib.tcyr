@@ -8,6 +8,7 @@ include "lib/tyche.cyr"     # rng_* (rosnet's t_randn -> rng_normal; link dep)
 include "lib/rosnet.cyr"    # t_alloc / t_zero / linear_fwd / linear_bwd / f64_is_finite
 include "src/ternary.cyr"   # absmean / ternary_one / tload / tstore (M0 core)
 include "src/bitlinear.cyr" # bl_weight_effective / bl_forward_wonly (M1)
+include "src/layers.cyr"    # rmsnorm_fwd/bwd — differentiable layers (M2)
 include "src/model.cyr"     # softmax_xent / lm_* — minimal trainable ternary LM (M2)
 
 # |a-b| < 1e-9 — tolerance compare for f64 results that aren't bit-exact integers
@@ -370,6 +371,66 @@ fn main() {
     assert(f64_lt(tget(tstats, 1), tget(tstats, 0)) == 1, "train: final CE < initial CE (descent)");
     assert(f64_lt(tget(tstats, 1), f64_div(f64_from(3), f64_from(2))) == 1, "train: final CE < 1.5 (well below uniform ln 8 ~ 2.08)");
     assert(tget(tstats, 2) >= 6, "train: argmax memorizes >= 6/8 successor tokens");
+
+    test_group("M2 bite-B: RMSNorm forward/backward FD gate");
+    var nD = 6;
+    var nx = t_alloc(nD); var ng = t_alloc(nD); var ny = t_alloc(nD);
+    var ndy = t_alloc(nD); var ndx = t_alloc(nD); var ndg = t_alloc(nD); var nyscr = t_alloc(nD);
+    rng_seed(5);
+    t_randn(nx, nD, f64_from(1));                       # x ~ N(0,1)
+    var fifth = f64_div(f64_from(1), f64_from(5));
+    var ni = 0;
+    while (ni < nD) { tstore(ng, ni, f64_add(f64_from(1), f64_mul(rng_normal(), fifth))); ni = ni + 1; }   # gain ~ 1 + N(0,0.2)
+    var nrstd = rmsnorm_fwd(nx, ng, ny, nD);
+    t_copy(ndy, ny, nD);                               # dy = y  (loss = 1/2||y||^2)
+    t_zero(ndg, nD);
+    rmsnorm_bwd(nx, ng, ndy, ndx, ndg, nD, nrstd);
+
+    # dx gate — perturbing x changes rstd (all xhat), so this exercises the full reduction
+    var nmrx = f64_from(0); ni = 0;
+    while (ni < nD) {
+        var sv = tload(nx, ni);
+        tstore(nx, ni, f64_add(sv, bl_eps())); var lp = rms_loss(nx, ng, nD, nyscr);
+        tstore(nx, ni, f64_sub(sv, bl_eps())); var lm9 = rms_loss(nx, ng, nD, nyscr);
+        tstore(nx, ni, sv);
+        var re9 = bl_relerr(f64_div(f64_sub(lp, lm9), f64_mul(f64_from(2), bl_eps())), tload(ndx, ni));
+        if (f64_gt(re9, nmrx) == 1) { nmrx = re9; }
+        ni = ni + 1;
+    }
+    assert(f64_lt(nmrx, bl_tol()) == 1, "RMSNorm dx == central FD (< 1e-5)");
+
+    # dg gate
+    var nmrg = f64_from(0); ni = 0;
+    while (ni < nD) {
+        var sg = tload(ng, ni);
+        tstore(ng, ni, f64_add(sg, bl_eps())); var lpg = rms_loss(nx, ng, nD, nyscr);
+        tstore(ng, ni, f64_sub(sg, bl_eps())); var lmg = rms_loss(nx, ng, nD, nyscr);
+        tstore(ng, ni, sg);
+        var reg = bl_relerr(f64_div(f64_sub(lpg, lmg), f64_mul(f64_from(2), bl_eps())), tload(ndg, ni));
+        if (f64_gt(reg, nmrg) == 1) { nmrg = reg; }
+        ni = ni + 1;
+    }
+    assert(f64_lt(nmrg, bl_tol()) == 1, "RMSNorm dg == central FD (< 1e-5)");
+
+    test_group("M2 bite-C: GELU forward/backward FD gate");
+    var ccD = 6;
+    var ccx = t_alloc(ccD); var ccy = t_alloc(ccD); var ccdy = t_alloc(ccD); var ccdx = t_alloc(ccD); var ccyscr = t_alloc(ccD);
+    rng_seed(9);
+    t_randn(ccx, ccD, f64_div(f64_from(3), f64_from(2)));   # x ~ N(0,1.5) — spans both signs
+    gelu_fwd(ccx, ccy, ccD);
+    t_copy(ccdy, ccy, ccD);                                 # dy = y (loss = 1/2||y||^2)
+    gelu_bwd(ccx, ccdy, ccdx, ccD);
+    var ccmr = f64_from(0); var cci = 0;
+    while (cci < ccD) {
+        var ccsv = tload(ccx, cci);
+        tstore(ccx, cci, f64_add(ccsv, bl_eps())); var cclp = gelu_loss(ccx, ccD, ccyscr);
+        tstore(ccx, cci, f64_sub(ccsv, bl_eps())); var cclm = gelu_loss(ccx, ccD, ccyscr);
+        tstore(ccx, cci, ccsv);
+        var ccre = bl_relerr(f64_div(f64_sub(cclp, cclm), f64_mul(f64_from(2), bl_eps())), tload(ccdx, cci));
+        if (f64_gt(ccre, ccmr) == 1) { ccmr = ccre; }
+        cci = cci + 1;
+    }
+    assert(f64_lt(ccmr, bl_tol()) == 1, "GELU dx == central FD (< 1e-5)");
 
     return assert_summary();
 }

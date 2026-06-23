@@ -48,9 +48,12 @@ attn11's first loss curve. Sub-bites:
   on the latent weight. CE 2.07 → ~0.57 on the synthetic successor bigram (7/8 argmax).
   FD-gated end-to-end (head dW vs surrogate w/ the real loss dy, embedding grad vs
   live loss, falsifier). 57/57.
-- ⏳ **bite-B**: RMSNorm (pre-norm, BitNet/Llama choice) fwd+bwd, FD-gated.
-- ⏳ **bite-C**: GELU-MLP block (two BitLinear + GELU), FD-gated. *(verify
-  `f64_tanh`/`f64_sqrt` resolve in Cyrius first.)*
+- ✅ **bite-B (2026-06-23): RMSNorm** fwd+bwd (`src/layers.cyr`), FD-gated (dx + dg).
+  Pre-norm, no centering; backward cross-checked vs attn11's `ln_bwd`.
+- ✅ **bite-C (2026-06-23): GELU** fwd+bwd (`src/layers.cyr`), FD-gated. tanh-approx,
+  ported from attn11; `f64_tanh` isn't a builtin here so `tanh` is built from
+  `f64_exp` (`f64_sqrt` confirmed available). *(MLP = up/down BitLinear + GELU
+  assembles at bite-E.)*
 - ⏳ **bite-D**: single self-attention head (BitLinear Q/K/V/O + scaled-dot softmax,
   causal mask, a real context window + positions), FD-gated.
 - ⏳ **bite-E**: assemble the full transformer block; drive the multi-layer loss
