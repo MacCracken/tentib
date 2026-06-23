@@ -16,10 +16,21 @@ output = "build/tentib"
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math"]
 
 # tentib is a SIBLING reference to attn11 (transformer) and tarka (RL/reasoning),
-# on the same f64 substrate. M1+ wires the latent-weight tensors + grad to rosnet
-# and the tokenizer to akshara (the deps below land then). M0 (v0.1.0) is the
-# self-contained ternary quantizer + matmul-free dot — no external deps yet.
-#
-# [deps.rosnet]  git = "https://github.com/MacCracken/rosnet"  tag = "0.2.0"  (M1)
-# [deps.tyche]   git = "https://github.com/MacCracken/tyche"   tag = "0.1.1"  (M1)
-# [deps.akshara] git = "https://github.com/MacCracken/akshara" tag = "0.1.0"  (M2)
+# on the same f64 substrate. M1 (v0.2.0) wires the latent-weight tensors + grad to
+# rosnet; BitLinear is a quantization wrapper around rosnet's plain f64 matmul, and
+# the STE re-routes the quantizers' gradients back through the same linear_bwd call.
+
+# rosnet's t_randn calls tyche's rng_normal — [deps.tyche] is MANDATORY for link
+# even though tentib only calls rosnet directly.
+[deps.tyche]
+git = "https://github.com/MacCracken/tyche"
+tag = "0.1.1"
+modules = ["dist/tyche.cyr"]
+
+# Dense f64 tensor algebra: storage, BLAS-1, matmul + gradient (linear_fwd/linear_bwd).
+[deps.rosnet]
+git = "https://github.com/MacCracken/rosnet"
+tag = "0.2.0"
+modules = ["dist/rosnet.cyr"]
+
+# [deps.akshara] tag = "0.1.0" — the shared tokenizer, lands at M2 (train-from-scratch corpus).

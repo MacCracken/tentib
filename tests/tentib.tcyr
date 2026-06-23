@@ -1,12 +1,64 @@
-# tentib — ternary quantization correctness suite (M0).
-# Verifies the b1.58 absmean quantizer lands weights in {-1,0,+1} and that the
-# matmul-free signed-accumulate dot equals gamma * (independent signed sum).
-# Stdlib auto-included via cyrius.cyml.
+# tentib — correctness suite.
+# M0: the b1.58 absmean quantizer lands weights in {-1,0,+1}; the matmul-free
+# signed-accumulate dot equals gamma * (independent signed sum).
+# M1: rosnet substrate smoke (linear_fwd layout) — BitLinear + STE land next.
+# Stdlib auto-included via cyrius.cyml; rosnet/tyche materialized to lib/ by `cyrius deps`.
 
-include "src/ternary.cyr"
+include "lib/tyche.cyr"     # rng_* (rosnet's t_randn -> rng_normal; link dep)
+include "lib/rosnet.cyr"    # t_alloc / t_zero / linear_fwd / linear_bwd / f64_is_finite
+include "src/ternary.cyr"   # absmean / ternary_one / tload / tstore (M0 core)
+include "src/bitlinear.cyr" # bl_weight_effective / bl_forward_wonly (M1)
+
+# |a-b| < 1e-9 — tolerance compare for f64 results that aren't bit-exact integers
+fn bl_close(a, b): i64 {
+    return f64_lt(f64_abs(f64_sub(a, b)), f64_div(f64_from(1), f64_from(1000000000)));
+}
+
+# --- finite-difference gate harness (tarka tests/tarka.tcyr pattern) ---
+fn bl_eps(): i64 { return f64_div(f64_from(1), f64_from(10000)); }    # 1e-4
+fn bl_tol(): i64 { return f64_div(f64_from(1), f64_from(100000)); }   # 1e-5
+fn bl_relerr(fd, an): i64 {
+    var num = f64_abs(f64_sub(fd, an));
+    var den = f64_add(f64_abs(an), f64_div(f64_from(1), f64_from(1000000000)));
+    return f64_div(num, den);
+}
+# central FD of the linearized surrogate L_lin(W)=<dyf, x@W> wrt W[idx] (dW gate)
+fn fd_wgrad(x, W, idx, dyf, M, K, N, yscr): i64 {
+    var sv = tload(W, idx);
+    tstore(W, idx, f64_add(sv, bl_eps())); var lp = bl_surr_lin_loss(x, W, dyf, M, K, N, yscr);
+    tstore(W, idx, f64_sub(sv, bl_eps())); var lm = bl_surr_lin_loss(x, W, dyf, M, K, N, yscr);
+    tstore(W, idx, sv);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
+}
+# central FD of 1/2||x@Weff||^2 wrt x[idx], Weff fixed (dx gate)
+fn fd_xgrad(x, idx, Weff, M, K, N, yscr): i64 {
+    var sv = tload(x, idx);
+    tstore(x, idx, f64_add(sv, bl_eps())); var lp = bl_loss_of_x(x, Weff, M, K, N, yscr);
+    tstore(x, idx, f64_sub(sv, bl_eps())); var lm = bl_loss_of_x(x, Weff, M, K, N, yscr);
+    tstore(x, idx, sv);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
+}
+# central FD of the FULL quantized loss wrt W[idx], Weff recomputed (falsifier)
+fn fd_qgrad(x, W, idx, M, K, N, Wq, Weff, yscr): i64 {
+    var sv = tload(W, idx);
+    tstore(W, idx, f64_add(sv, bl_eps())); var lp = bl_quant_loss_wonly(x, W, 0, M, K, N, Wq, Weff, yscr);
+    tstore(W, idx, f64_sub(sv, bl_eps())); var lm = bl_quant_loss_wonly(x, W, 0, M, K, N, Wq, Weff, yscr);
+    tstore(W, idx, sv);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
+}
 
 fn main() {
     alloc_init();
+
+    test_group("rosnet substrate smoke (linear_fwd layout)");
+    # x(1x2)=[1,2], W(2x2) row-major [[3,4],[5,6]], b=0 -> y(1x2) = x@W = [1*3+2*5, 1*4+2*6] = [13,16]
+    var sx = t_alloc(2); var sW = t_alloc(4); var sy = t_alloc(2);
+    tset(sx, 0, f64_from(1)); tset(sx, 1, f64_from(2));
+    tset(sW, 0, f64_from(3)); tset(sW, 1, f64_from(4));
+    tset(sW, 2, f64_from(5)); tset(sW, 3, f64_from(6));
+    linear_fwd(sx, sW, 0, sy, 1, 2, 2);
+    assert(f64_eq(tget(sy, 0), f64_from(13)) == 1, "linear_fwd y[0] = 13 (x@W layout confirmed)");
+    assert(f64_eq(tget(sy, 1), f64_from(16)) == 1, "linear_fwd y[1] = 16");
 
     test_group("ternary quantization (BitNet b1.58 absmean)");
 
@@ -46,6 +98,175 @@ fn main() {
     var approx = ternary_dot(tw, x, N, g);
     var expect = f64_mul(f64_from(2), g);   # same op order as ternary_dot's final mul
     assert(f64_eq(approx, expect) == 1, "matmul-free dot == gamma * 2");
+
+    test_group("BitLinear forward (weight-only ternary, on rosnet linear_fwd)");
+    # latent W(K=2,N=2) row-major [[0.6,-0.6],[0.2,1.8]]; |W| sum=3.2, gamma=0.8
+    # W/gamma=[0.75,-0.75,0.25,2.25] -> round/clip -> Wq=[1,-1,0,1]; Weff=[0.8,-0.8,0,0.8]
+    var bK = 2; var bN = 2; var bKN = bK * bN;
+    var bW = t_alloc(bKN); var bWq = t_alloc(bKN); var bWeff = t_alloc(bKN);
+    tstore(bW, 0, f64_div(f64_from(6), f64_from(10)));
+    tstore(bW, 1, f64_div(f64_from(0 - 6), f64_from(10)));
+    tstore(bW, 2, f64_div(f64_from(2), f64_from(10)));
+    tstore(bW, 3, f64_div(f64_from(18), f64_from(10)));
+    # x(M=1,K=2)=[1,2]; y = x @ Weff = [1*0.8+2*0, 1*(-0.8)+2*0.8] = [0.8, 0.8]
+    var bx = t_alloc(bK); tstore(bx, 0, f64_from(1)); tstore(bx, 1, f64_from(2));
+    var by = t_alloc(bN);
+    var bg = bl_forward_wonly(bx, bW, 0, by, 1, bK, bN, bWq, bWeff);
+
+    assert(bl_close(bg, f64_div(f64_from(8), f64_from(10))) == 1, "gamma = absmean = 0.8");
+    assert(tload(bWq, 0) == 1, "Wq0  0.75 -> +1");
+    assert(tload(bWq, 1) == (0 - 1), "Wq1 -0.75 -> -1");
+    assert(tload(bWq, 2) == 0, "Wq2  0.25 ->  0");
+    assert(tload(bWq, 3) == 1, "Wq3  2.25 -> +1 (clipped from round 2)");
+    assert(bl_close(tget(by, 0), f64_div(f64_from(8), f64_from(10))) == 1, "y[0] = 0.8 (dequantized matmul)");
+    assert(bl_close(tget(by, 1), f64_div(f64_from(8), f64_from(10))) == 1, "y[1] = 0.8");
+
+    test_group("BitLinear STE backward — finite-difference gate (prove the surrogate, not the discontinuity)");
+    var gK = 4; var gN = 2; var gKN = 8; var gM = 1;
+    var gW = t_alloc(gKN); var gWq = t_alloc(gKN); var gWeff = t_alloc(gKN);
+    var gx = t_alloc(gK); var gy = t_alloc(gN); var gdy = t_alloc(gN);
+    var gdx = t_alloc(gK); var gdW = t_alloc(gKN); var gdb = t_alloc(gN);
+    var gscr = t_alloc(gKN); var gyscr = t_alloc(gN);
+    # latent W (K=4,N=2), sum|W| = 8 -> gamma = 1.0; mid-bin so +-EPS can't cross a round step.
+    # unsaturated (|W/g|<1): idx 0,1,2,3,6 ; saturated: 4,5,7
+    tstore(gW, 0, f64_div(f64_from(3),  f64_from(10)));   #  0.3  -> Wq 0
+    tstore(gW, 1, f64_div(f64_from(0-8),  f64_from(10))); # -0.8  -> Wq -1
+    tstore(gW, 2, f64_div(f64_from(7),  f64_from(10)));   #  0.7  -> Wq 1
+    tstore(gW, 3, f64_div(f64_from(0-2),  f64_from(10))); # -0.2  -> Wq 0
+    tstore(gW, 4, f64_div(f64_from(19), f64_from(10)));   #  1.9  -> Wq 1  (saturated)
+    tstore(gW, 5, f64_div(f64_from(0-21), f64_from(10))); # -2.1  -> Wq -1 (saturated)
+    tstore(gW, 6, f64_div(f64_from(6),  f64_from(10)));   #  0.6  -> Wq 1
+    tstore(gW, 7, f64_div(f64_from(0-14), f64_from(10))); # -1.4  -> Wq -1 (saturated, |W/g|=1.4>1)
+    tstore(gx, 0, f64_from(1)); tstore(gx, 1, f64_from(2));
+    tstore(gx, 2, f64_from(0-1)); tstore(gx, 3, f64_div(f64_from(1), f64_from(2)));
+
+    # real quantized forward -> dy = y_quant (the frozen upstream gradient of 1/2||y||^2)
+    var gg = bl_forward_wonly(gx, gW, 0, gy, gM, gK, gN, gWq, gWeff);
+    assert(bl_close(gg, f64_from(1)) == 1, "gate: gamma = 1.0 (sum|W|/8)");
+    t_copy(gdy, gy, gN);
+    t_zero(gdW, gKN); t_zero(gdb, gN);
+    bl_backward_wonly(gx, gWeff, gdy, gdx, gdW, gdb, gM, gK, gN, gW, gg, gscr);
+
+    # dW gate: analytic STE dW == FD of the linearized surrogate, UNSATURATED entries only.
+    # saturated entries: assert analytic dW == 0 (the clip-mask).
+    var mrw = f64_from(0); var nsat = 0; var i = 0;
+    while (i < gKN) {
+        if (f64_lt(f64_abs(f64_div(tload(gW, i), gg)), f64_from(1)) == 1) {
+            var re = bl_relerr(fd_wgrad(gx, gW, i, gdy, gM, gK, gN, gyscr), tload(gdW, i));
+            if (f64_gt(re, mrw) == 1) { mrw = re; }
+        } else {
+            nsat = nsat + 1;
+            assert(bl_close(tload(gdW, i), f64_from(0)) == 1, "gate: saturated entry dW = 0 (clip-mask)");
+        }
+        i = i + 1;
+    }
+    assert(f64_lt(mrw, bl_tol()) == 1, "gate: STE dW == FD(surrogate) on unsaturated entries");
+    assert(nsat == 3, "gate: 3 entries saturated + masked");
+
+    # dx gate: analytic dx == FD of 1/2||x@Weff||^2 (Weff fixed) — catches passing latent W to linear_bwd
+    var mrx = f64_from(0); i = 0;
+    while (i < gK) {
+        var re2 = bl_relerr(fd_xgrad(gx, i, gWeff, gM, gK, gN, gyscr), tload(gdx, i));
+        if (f64_gt(re2, mrx) == 1) { mrx = re2; }
+        i = i + 1;
+    }
+    assert(f64_lt(mrx, bl_tol()) == 1, "gate: dx == FD through Weff (real forward weight)");
+
+    # FALSIFIER 1: FD through the FULL quantized loss DIVERGES from the STE dW (surrogate is required)
+    var mrq = f64_from(0); i = 0;
+    while (i < gKN) {
+        if (f64_lt(f64_abs(f64_div(tload(gW, i), gg)), f64_from(1)) == 1) {
+            var re3 = bl_relerr(fd_qgrad(gx, gW, i, gM, gK, gN, gWq, gWeff, gyscr), tload(gdW, i));
+            if (f64_gt(re3, mrq) == 1) { mrq = re3; }
+        }
+        i = i + 1;
+    }
+    assert(f64_gt(mrq, f64_div(f64_from(1), f64_from(2))) == 1, "falsifier: FD-through-quantized diverges (>0.5) -> surrogate necessary");
+
+    # FALSIFIER 2: a masked (saturated) entry's surrogate FD is NONZERO (the mask wasn't vacuous)
+    assert(f64_gt(f64_abs(fd_wgrad(gx, gW, 4, gdy, gM, gK, gN, gyscr)), bl_tol()) == 1, "falsifier: surrogate FD nonzero at a masked entry");
+
+    # gamma != 1 — exercises the gamma-CANCELLATION. A spurious gamma factor in dW (the
+    # rejected Lens-1 derivation) is invisible at gamma=1 but fails here by exactly gamma.
+    # Scale W by 3 -> gamma=3, identical ternary structure (W*3/3 == W/1).
+    var gW3 = t_alloc(gKN); var j = 0;
+    while (j < gKN) { tstore(gW3, j, f64_mul(tload(gW, j), f64_from(3))); j = j + 1; }
+    var gg3 = bl_forward_wonly(gx, gW3, 0, gy, gM, gK, gN, gWq, gWeff);
+    assert(bl_close(gg3, f64_from(3)) == 1, "gate(g!=1): gamma = 3.0");
+    t_copy(gdy, gy, gN);
+    t_zero(gdW, gKN); t_zero(gdb, gN);
+    bl_backward_wonly(gx, gWeff, gdy, gdx, gdW, gdb, gM, gK, gN, gW3, gg3, gscr);
+    var mrw3 = f64_from(0); j = 0;
+    while (j < gKN) {
+        if (f64_lt(f64_abs(f64_div(tload(gW3, j), gg3)), f64_from(1)) == 1) {
+            var re4 = bl_relerr(fd_wgrad(gx, gW3, j, gdy, gM, gK, gN, gyscr), tload(gdW, j));
+            if (f64_gt(re4, mrw3) == 1) { mrw3 = re4; }
+        }
+        j = j + 1;
+    }
+    assert(f64_lt(mrw3, bl_tol()) == 1, "gate(g!=1): STE dW == FD(surrogate) at gamma=3 (gamma cancels, NO gamma factor)");
+
+    # descent: a few STE-SGD steps reduce the quantized loss (the surrogate trains)
+    var loss0 = bl_quant_loss_wonly(gx, gW, 0, gM, gK, gN, gWq, gWeff, gyscr);
+    var step = 0;
+    while (step < 5) {
+        var gs = bl_forward_wonly(gx, gW, 0, gy, gM, gK, gN, gWq, gWeff);
+        t_copy(gdy, gy, gN);
+        t_zero(gdW, gKN); t_zero(gdb, gN);
+        bl_backward_wonly(gx, gWeff, gdy, gdx, gdW, gdb, gM, gK, gN, gW, gs, gscr);
+        t_axpy(gW, gdW, f64_div(f64_from(0-1), f64_from(20)), gKN);   # W -= 0.05 * dW
+        step = step + 1;
+    }
+    var loss1 = bl_quant_loss_wonly(gx, gW, 0, gM, gK, gN, gWq, gWeff, gyscr);
+    assert(f64_is_finite(loss1) == 1, "descent: loss finite");
+    assert(f64_lt(loss1, loss0) == 1, "descent: STE-SGD reduces the quantized loss");
+
+    test_group("BitLinear int8 activation quant + full forward (b1.58: ternary W AND int8 x)");
+    var oneK = f64_div(f64_from(1), f64_from(127));   # one int8 step at absmax=1
+    var ax = t_alloc(3); var axeff = t_alloc(3); var asx = t_alloc(1);
+    tstore(ax, 0, f64_div(f64_from(1), f64_from(2)));   #  0.5
+    tstore(ax, 1, f64_from(0 - 1));                     # -1.0  (the absmax)
+    tstore(ax, 2, f64_div(f64_from(1), f64_from(4)));   #  0.25
+    bl_act_quant(ax, 1, 3, axeff, asx);
+    assert(bl_close(tget(asx, 0), oneK) == 1, "act: per-row scale s = absmax/127");
+    assert(bl_close(tget(axeff, 1), f64_from(0 - 1)) == 1, "act: max-magnitude activation dequantizes exactly (-1.0)");
+    assert(f64_lt(f64_abs(f64_sub(tget(axeff, 0), f64_div(f64_from(1), f64_from(2)))), oneK) == 1, "act: round-trip error < one int8 step");
+    # absmax==0 guard (zero token row) — must not 127/0
+    var zx = t_alloc(2); var zxeff = t_alloc(2); var zsx = t_alloc(1);
+    tstore(zx, 0, f64_from(0)); tstore(zx, 1, f64_from(0));
+    bl_act_quant(zx, 1, 2, zxeff, zsx);
+    assert(f64_is_finite(tget(zxeff, 0)) == 1, "act: zero-row guard (no 127/0 Inf)");
+
+    # full forward (ternary W + int8 x) runs and is finite. At THIS tiny scale the
+    # ternary-W error vs full precision is large (honest-scale: b1.58 matches fp16 at 3B+).
+    var fK = 4; var fN = 2; var fKN = 8;
+    var hW = t_alloc(fKN); var hWq = t_alloc(fKN); var hWeff = t_alloc(fKN);
+    var hx = t_alloc(fK); var hxeff = t_alloc(fK); var hsx = t_alloc(1);
+    var hy = t_alloc(fN); var hdy = t_alloc(fN); var hdx = t_alloc(fK);
+    var hdW = t_alloc(fKN); var hdb = t_alloc(fN); var hscr = t_alloc(fKN); var hyscr = t_alloc(fN);
+    tstore(hW, 0, f64_div(f64_from(3), f64_from(10)));   tstore(hW, 1, f64_div(f64_from(0-8), f64_from(10)));
+    tstore(hW, 2, f64_div(f64_from(7), f64_from(10)));   tstore(hW, 3, f64_div(f64_from(0-2), f64_from(10)));
+    tstore(hW, 4, f64_div(f64_from(19), f64_from(10)));  tstore(hW, 5, f64_div(f64_from(0-21), f64_from(10)));
+    tstore(hW, 6, f64_div(f64_from(6), f64_from(10)));   tstore(hW, 7, f64_div(f64_from(0-14), f64_from(10)));
+    tstore(hx, 0, f64_from(1)); tstore(hx, 1, f64_from(2));
+    tstore(hx, 2, f64_from(0-1)); tstore(hx, 3, f64_div(f64_from(1), f64_from(2)));
+    var hg = bl_forward_full(hx, hW, 0, hy, 1, fK, fN, hWq, hWeff, hxeff, hsx);
+    assert(f64_is_finite(tget(hy, 0)) == 1, "full forward: y finite (ternary W + int8 x)");
+
+    # the WEIGHT STE still passes with activation quant on (surrogate uses the FROZEN xeff)
+    t_copy(hdy, hy, fN);
+    t_zero(hdW, fKN); t_zero(hdb, fN);
+    bl_backward_wonly(hxeff, hWeff, hdy, hdx, hdW, hdb, 1, fK, fN, hW, hg, hscr);
+    bl_ste_mask_x(hdx, hx, 1, fK, hsx);
+    var mrwa = f64_from(0); var ia = 0;
+    while (ia < fKN) {
+        if (f64_lt(f64_abs(f64_div(tload(hW, ia), hg)), f64_from(1)) == 1) {
+            var rea = bl_relerr(fd_wgrad(hxeff, hW, ia, hdy, 1, fK, fN, hyscr), tload(hdW, ia));
+            if (f64_gt(rea, mrwa) == 1) { mrwa = rea; }
+        }
+        ia = ia + 1;
+    }
+    assert(f64_lt(mrwa, bl_tol()) == 1, "gate: weight STE dW == FD(surrogate) with int8 activations frozen");
 
     return assert_summary();
 }

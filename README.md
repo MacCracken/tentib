@@ -19,31 +19,38 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — v0.1.0 (M0)
+## Status — M1 built (BitLinear + STE), staged for v0.2.0
 
-Self-contained **ternary quantizer + matmul-free dot** on raw f64:
+- **M0 (v0.1.0, released)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
+- **M1 (built + finite-difference-gated, 34/34)** — **BitLinear**: ternary weights
+  + int8 activations over rosnet's matmul ([`src/bitlinear.cyr`](src/bitlinear.cyr)),
+  trainable via the **straight-through estimator**, every gradient FD-gated — *prove
+  the surrogate, not the discontinuity* (incl. the γ-cancellation, and a falsifier
+  that FD through the *quantized* forward diverges). Gate in [`tests/tentib.tcyr`](tests/tentib.tcyr).
 
 ```
 tentib - ternary (1.58-bit) quantization demo
 weights -> {-1,0,+1}; the weight.activation path is add/sub/skip, no multiply.
 
-  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]
-  gamma (absmean scale) = 0.40
-  matmul-free dot       = 1.09
-  full-precision  dot   = 1.20
-  |error|               = 0.10
+M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]
+    gamma (absmean scale) = 0.39
+    matmul-free dot       = 1.09
+    full-precision  dot   = 1.20
+    |error|               = 0.10
+
+M1  BitLinear (ternary weights, int8 activations, matmul-free):
+    ternary W = [ 1 -1 0 1 ]  gamma = 0.80
+    BitLinear y = [ 0.80 -1.60 ]
+    (trainable via the straight-through estimator; gradients finite-difference-gated)
 ```
 
-The quantizer (`absmean → round → clip` to {−1,0,+1}) and the signed-accumulate
-dot are in [`src/ternary.cyr`](src/ternary.cyr); the demo driver is
-[`src/main.cyr`](src/main.cyr). No external deps yet — rosnet/tyche/akshara land
-at M1+.
+Deps: rosnet 0.2.0 + tyche 0.1.1 (akshara lands at M2).
 
 See [`docs/development/roadmap.md`](docs/development/roadmap.md) for the M0→v1.0
-plan (M1 BitLinear + straight-through estimator on rosnet, M2 a ternary
-transformer trained from scratch, M3 the packed int8 matmul-free inference
-kernel) and [`docs/adr/0001-tentib-scope.md`](docs/adr/0001-tentib-scope.md) for
-the scope + naming rationale.
+plan (M2 a ternary transformer trained from scratch over an akshara corpus, M3 the
+packed int8 matmul-free inference kernel) and
+[`docs/adr/0001-tentib-scope.md`](docs/adr/0001-tentib-scope.md) for the scope +
+naming rationale.
 
 ## Build
 

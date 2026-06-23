@@ -1,0 +1,190 @@
+# tentib — BitLinear (M1): a BitNet b1.58 quantization wrapper around rosnet's
+# plain f64 matmul. Weights quantize to ternary {-1,0,+1} via a per-tensor absmean
+# scale gamma; the forward runs on the DEQUANTIZED effective weight Weff = gamma*Wq
+# through rosnet's linear_fwd, so y is numerically identical (up to f64 rounding) to
+# the matmul-free packed kernel (M2) while reusing the exact (M,K,N) layout the
+# gradient is checked against. The STE backward re-routes the quantizer's gradient
+# straight through to the LATENT weight.
+#
+# THE STE, precisely. The weight path is  W -> r=W/gamma -> round -> clip -> Wq
+# -> Weff=gamma*Wq.  With gamma DETACHED (stop-gradient) and round'/clip-interior
+# STE'd to 1, the chain dWeff/dW = gamma*(1/gamma)*mask = mask: the gamma (from
+# Weff=gamma*Wq) and the 1/gamma (from r=W/gamma) EXACTLY CANCEL, so dW carries NO
+# gamma factor — only the clip-mask (zero where |W/gamma|>=1). That cancellation is
+# exactly why the analytic dW equals the gradient of the un-quantized (plain-linear-
+# in-latent-W) surrogate, which is what the finite-difference gate validates. You
+# cannot FD through round/clip (flat between steps, undefined at them); you FD the
+# SURROGATE. Keeping a gamma factor would fail the gate by exactly gamma.
+#
+# Depends, in the includer's scope and IN THIS ORDER: src/ternary.cyr (absmean,
+# ternary_one, tload, tstore) then lib/rosnet.cyr (t_alloc, t_zero, linear_fwd,
+# linear_bwd, f64_is_finite). bitlinear.cyr self-includes nothing to avoid a
+# double-include of ternary.cyr in the test/main consumers.
+
+# ---- forward ---------------------------------------------------------------
+
+# Dequantize latent weight W(K*N) -> ternary Wq + effective Weff = gamma*Wq.
+# Returns gamma (f64 bits). gamma==0 (fresh / all-zero init W) guard: zero both,
+# skip the divide (never divide by zero); the backward mask then contributes nothing.
+fn bl_weight_effective(W, KN, Wq, Weff): i64 {
+    var g = absmean(W, KN);
+    if (f64_eq(g, f64_from(0)) == 1) {
+        var i = 0;
+        while (i < KN) { tstore(Wq, i, 0); tstore(Weff, i, f64_from(0)); i = i + 1; }
+        return f64_from(0);
+    }
+    var i = 0;
+    while (i < KN) {
+        var q = ternary_one(tload(W, i), g);          # clip(round(W/g),-1,+1) in {-1,0,+1}
+        tstore(Wq, i, q);
+        tstore(Weff, i, f64_mul(f64_from(q), g));      # dequantized effective weight = gamma*Wq
+        i = i + 1;
+    }
+    return g;
+}
+
+# Weight-only BitLinear forward (M1 first cut, no activation quant): y = x @ Weff + b.
+# Returns gamma (needed by the backward STE mask). Wq/Weff are caller-allocated
+# scratch buffers of K*N f64 slots each. Pass b = 0 for no bias.
+fn bl_forward_wonly(x, W, b, y, M, K, N, Wq, Weff): i64 {
+    var g = bl_weight_effective(W, K * N, Wq, Weff);
+    linear_fwd(x, Weff, b, y, M, K, N);
+    return g;
+}
+
+# ---- backward (STE) --------------------------------------------------------
+
+# STE weight clip-mask: dW += dWeff where |W/gamma| < 1 (unsaturated), else nothing
+# (saturated entries are pinned at +-gamma -> no gradient signal). NO gamma factor
+# (gamma cancels, see header). dW ACCUMULATES (caller zeroes it once per step).
+# gamma==0 short-circuits (|W/gamma| is Inf/NaN, and dWeff is ~0 anyway): add nothing.
+fn bl_ste_mask_w(W, dWeff, dW, KN, gamma): i64 {
+    if (f64_eq(gamma, f64_from(0)) == 1) { return 0; }
+    var i = 0;
+    while (i < KN) {
+        if (f64_lt(f64_abs(f64_div(tload(W, i), gamma)), f64_from(1)) == 1) {
+            tstore(dW, i, f64_add(tload(dW, i), tload(dWeff, i)));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Weight-only BitLinear backward, given upstream dy(M*N).
+#   dx  = dy . (Weff)^T   — flows through the REAL forward weight Weff (NOT latent W)
+#   dW  = (x^T . dy) clip-masked to the latent W   — the STE
+#   db  = sum_m dy        — identity (linear_bwd accumulates it)
+# dWeff_scratch (K*N) receives linear_bwd's raw dW=x^T.dy and MUST be t_zero'd first
+# (linear_bwd accumulates). dW/db are caller-zeroed once per step; dx is written fresh.
+# Passing Weff (not latent W) is load-bearing: latent W silently corrupts dx while dW
+# still passes — the dx gate catches that.
+fn bl_backward_wonly(x, Weff, dy, dx, dW, db, M, K, N, W, gamma, dWeff_scratch): i64 {
+    t_zero(dWeff_scratch, K * N);
+    linear_bwd(x, Weff, dy, dx, dWeff_scratch, db, M, K, N);
+    bl_ste_mask_w(W, dWeff_scratch, dW, K * N, gamma);
+    return 0;
+}
+
+# ---- losses for the finite-difference gate ---------------------------------
+
+# Full quantized forward loss = 1/2 * sum y^2, y = x @ Weff(W) with gamma + round/clip
+# RECOMPUTED live each call. This is the FALSIFIER target: FD through it must DIVERGE
+# from the analytic STE dW (perturbing W barely moves Weff except through gamma, so the
+# true quantized gradient differs from the surrogate the STE follows).
+fn bl_quant_loss_wonly(x, W, b, M, K, N, Wq, Weff, y): i64 {
+    bl_forward_wonly(x, W, b, y, M, K, N, Wq, Weff);
+    var acc = f64_from(0);
+    var i = 0; var MN = M * N;
+    while (i < MN) { var v = tload(y, i); acc = f64_add(acc, f64_mul(v, v)); i = i + 1; }
+    return f64_mul(f64_div(f64_from(1), f64_from(2)), acc);
+}
+
+# Loss as a function of x with Weff FIXED: 1/2 * sum (x @ Weff)^2. The forward is
+# smooth (linear) in x, so FD of this wrt x exactly matches the analytic dx. Used by
+# the dx gate (Weff is passed in, NOT recomputed — x-perturbation never re-quantizes W).
+fn bl_loss_of_x(x, Weff, M, K, N, yscr): i64 {
+    linear_fwd(x, Weff, 0, yscr, M, K, N);
+    var acc = f64_from(0);
+    var i = 0; var MN = M * N;
+    while (i < MN) { var v = tload(yscr, i); acc = f64_add(acc, f64_mul(v, v)); i = i + 1; }
+    return f64_mul(f64_div(f64_from(1), f64_from(2)), acc);
+}
+
+# The STE SURROGATE loss, linearized: L_lin(W) = <dy_frozen, x @ W>, raw latent W,
+# dy_frozen held constant (= the quantized output at the operating point). Its gradient
+# dL_lin/dW = x^T . dy_frozen is EXACTLY the analytic STE dW (before masking). FD of
+# this (smooth, linear in W) is what the dW gate checks the analytic STE dW against.
+# (With activation quant on, pass x = the FROZEN quantized activations x_eff.)
+fn bl_surr_lin_loss(x, W, dyf, M, K, N, yscr): i64 {
+    linear_fwd(x, W, 0, yscr, M, K, N);
+    var acc = f64_from(0);
+    var i = 0; var MN = M * N;
+    while (i < MN) { acc = f64_add(acc, f64_mul(tload(dyf, i), tload(yscr, i))); i = i + 1; }
+    return acc;
+}
+
+# ---- activation int8 quant (the second quantizer; completes b1.58) ---------
+
+# Per-token (per-ROW, since each row of x is one token's K-vector) absmax int8 quant.
+# xeff = round(x * 127/absmax) clamped to [-127,+127], times s = absmax/127 (dequant).
+# sx[m] = s (the per-row scale, kept for the backward activation STE mask). The clamp
+# is SYMMETRIC (+-127, NOT -128) so s is a symmetric reciprocal. absmax==0 (zero token
+# row) guard: s=0, xeff row=0 (skip 127/0 = Inf).
+fn bl_act_quant(x, M, K, xeff, sx): i64 {
+    var m = 0;
+    while (m < M) {
+        var a = f64_from(0); var k = 0;
+        while (k < K) { var v = f64_abs(tload(x, m * K + k)); if (f64_gt(v, a) == 1) { a = v; } k = k + 1; }
+        if (f64_eq(a, f64_from(0)) == 1) {
+            tstore(sx, m, f64_from(0));
+            k = 0;
+            while (k < K) { tstore(xeff, m * K + k, f64_from(0)); k = k + 1; }
+        } else {
+            var s = f64_div(a, f64_from(127));
+            tstore(sx, m, s);
+            var inv = f64_div(f64_from(127), a);
+            k = 0;
+            while (k < K) {
+                var q = f64_round(f64_mul(tload(x, m * K + k), inv));
+                if (f64_gt(q, f64_from(127)) == 1) { q = f64_from(127); }
+                if (f64_lt(q, f64_from(0 - 127)) == 1) { q = f64_from(0 - 127); }
+                tstore(xeff, m * K + k, f64_mul(q, s));
+                k = k + 1;
+            }
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# Activation STE clip-mask: zero dx where the int8 quant saturated (|x/s| > 127).
+# For per-row absmax only the single max element sits at the boundary (measure-zero),
+# so this is near-all-identity; it exists for correctness/symmetry. s==0 row -> skip.
+fn bl_ste_mask_x(dx, x, M, K, sx): i64 {
+    var m = 0;
+    while (m < M) {
+        var s = tload(sx, m);
+        if (f64_eq(s, f64_from(0)) == 0) {
+            var k = 0;
+            while (k < K) {
+                if (f64_gt(f64_abs(f64_div(tload(x, m * K + k), s)), f64_from(127)) == 1) {
+                    tstore(dx, m * K + k, f64_from(0));
+                }
+                k = k + 1;
+            }
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# Full BitLinear forward (b1.58): ternary weights AND int8 activations.
+# y = x_eff @ W_eff + b, with both scales baked into the dequantized operands (no
+# trailing rescale). Returns gamma. Backward: bl_backward_wonly(xeff, Weff, ...) then
+# bl_ste_mask_x(dx, x_real, M, K, sx) — dW = xeff^T.dy masked, dx through Weff masked.
+fn bl_forward_full(x, W, b, y, M, K, N, Wq, Weff, xeff, sx): i64 {
+    var g = bl_weight_effective(W, K * N, Wq, Weff);
+    bl_act_quant(x, M, K, xeff, sx);
+    linear_fwd(xeff, Weff, b, y, M, K, N);
+    return g;
+}

@@ -23,17 +23,21 @@
   `ternary_quantize` (clip(round(w/γ),−1,+1)), `ternary_dot` (matmul-free
   signed-accumulate), `ref_dot` (baseline). Demo + 6/6 correctness suite.
 
-### M1 — BitLinear + the straight-through estimator (v0.2.0)
+### M1 — BitLinear + the straight-through estimator (v0.2.0) — ✅ built + gated 2026-06-23 (staged for the cut)
 
-- Wire `[deps.rosnet]` (latent f64 weights + `linear` fwd/bwd) + `[deps.tyche]`.
-- **BitLinear forward**: ternary weight quant (absmean) + int8 activation quant
-  (absmax per token) + signed-accumulate + rescale; RMSNorm/SubLN before quant.
-- **STE backward**: gradient to the latent weights as identity, masked where the
-  weight saturated to ±1; activation-quant STE likewise.
-- **Gate (the headline correctness story):** FD-check every *differentiable*
-  sub-op of BitLinear; define the STE surrogate explicitly and verify it matches
-  the non-quantized surrogate's gradient within tolerance. Prove the *surrogate*,
-  not the discontinuity. (`tests/tentib.tcyr` grows the grad-check block.)
+- ✅ Wired `[deps.rosnet]` 0.2.0 + `[deps.tyche]` 0.1.1.
+- ✅ **BitLinear forward**: per-tensor absmean ternary weight quant + per-token
+  absmax int8 activation quant; scales baked into the dequantized operands (no
+  trailing rescale), matmul via rosnet `linear_fwd`. (RMSNorm/SubLN deferred — the
+  bare layer is enough to prove the STE; the norm lands with the M2 block.)
+- ✅ **STE backward**: `dW` straight-through to the latent weight, clip-masked
+  (`|W/γ|<1`), **no γ factor** (γ cancels); `dx` through `Weff`; activation STE mask.
+- ✅ **Gate (the headline):** analytic STE `dW` == FD of the linearized surrogate
+  on unsaturated entries; `dx` == FD through `Weff`; **γ-cancellation exercised at
+  γ=3**; falsifiers (FD-through-quantized diverges; masked-entry surrogate FD
+  nonzero); descent. Suite **34/34**. *Prove the surrogate, not the discontinuity.*
+- ⏳ Remaining for the cut: bump `VERSION`→0.2.0 + finalize the CHANGELOG 0.2.0
+  header (user tags). RMSNorm carried into M2.
 
 ### M2 — Ternary transformer trains from scratch (v0.3.0)
 
