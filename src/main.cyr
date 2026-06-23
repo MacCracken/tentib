@@ -128,7 +128,7 @@ fn main() {
     t_randn(kx, kK, f64_from(1)); t_randn(kW, kKN, f64_div(f64_from(1), f64_from(2)));
     var kg = bl_forward_full(kx, kW, 0, kyf, 1, kK, kN, kWq, kWe, kxe, ksf);
     act_quant_int(kx, 1, kK, kqx, ksi);
-    ternary_matmul_free(kqx, ksi, kWq, kg, kyi, 1, kK, kN);
+    ternary_matmul_free(kqx, ksi, kWq, kg, 0, kyi, 1, kK, kN);
     var kmx = f64_from(0); var ki = 0;
     while (ki < kN) { var e = f64_abs(f64_sub(tget(kyi, ki), tget(kyf, ki))); if (f64_gt(e, kmx) == 1) { kmx = e; } ki = ki + 1; }
     puts("    parity vs f64 forward (128x128): max |int - f64| = ");
@@ -137,14 +137,62 @@ fn main() {
     var kpk = alloc((kKN + 3) / 4);
     tpack2(kWq, kKN, kpk);
     puts("    packed ternary weights = "); fmt_int((kKN + 3) / 4); puts(" bytes (2 bits/wt) vs "); fmt_int(kKN * 8); puts(" bytes f64 = 32x smaller\n");
+    # M3b: the branchless variant — same accumulate, mask arithmetic instead of the
+    # unpredictable per-weight branch. Bit-identical output; benchmarked below.
+    var kyb = t_alloc(kN);
+    ternary_matmul_free_bl(kqx, ksi, kWq, kg, 0, kyb, 1, kK, kN);
+    var kbok = 1; ki = 0;
+    while (ki < kN) { if (tget(kyb, ki) != tget(kyi, ki)) { kbok = 0; } ki = ki + 1; }
+    puts("    branchless kernel output bit-identical to branchy: "); if (kbok == 1) { puts("yes"); } else { puts("NO"); } _putc(10);
     var iters = 100; var it = 0;
     var t0 = now_ns();
-    while (it < iters) { ternary_matmul_free(kqx, ksi, kWq, kg, kyi, 1, kK, kN); it = it + 1; }
+    while (it < iters) { ternary_matmul_free(kqx, ksi, kWq, kg, 0, kyi, 1, kK, kN); it = it + 1; }
     var t1 = now_ns(); it = 0;
+    while (it < iters) { ternary_matmul_free_bl(kqx, ksi, kWq, kg, 0, kyb, 1, kK, kN); it = it + 1; }
+    var tb = now_ns(); it = 0;
     while (it < iters) { linear_fwd(kxe, kWe, 0, kyf, 1, kK, kN); it = it + 1; }
     var t2 = now_ns();
-    puts("    timing: branchy scalar kernel = "); fmt_int((t1 - t0) / iters); puts(" ns ; rosnet SIMD-f64 matmul = "); fmt_int((t2 - t1) / iters); puts(" ns/call\n");
-    puts("    (the wins are the eliminated multiplies + 32x memory; a branchless int-SIMD kernel is the throughput lever — next)\n");
+    puts("    timing/call: branchy = "); fmt_int((t1 - t0) / iters); puts(" ns ; branchless (M3b) = "); fmt_int((tb - t1) / iters);
+    puts(" ns ; rosnet SIMD-f64 = "); fmt_int((t2 - tb) / iters); puts(" ns\n");
+    puts("    (today's wins: multiply-free accumulate + branch elimination + 32x memory. The b1.58\n");
+    puts("     CPU throughput payoff over SIMD-f64 needs INTEGER-SIMD lanes (int8 x sign-select, 16-32/instr),\n");
+    puts("     which this Cyrius toolchain (f64-only SIMD, 2-wide SSE2) does not yet expose — the M3b gate.)\n");
+
+    # ---- M3c: whole-model integer inference — the kernel through the TRAINED model ----
+    # Reuse the bite-F transformer (trained on "hello world" just above): run it three
+    # ways and compare. mode-0 = matmul-free integer, mode-1 = full-quant f64 reference,
+    # tx_fwd = the weight-only f64 model that was actually trained.
+    puts("\nM3c matmul-free kernel through EVERY BitLinear of the trained transformer (Q/K/V/O + up/down + head):\n");
+    tx_int_init(cV, cT, 4, 8);
+    var ciTV = cT * cV;
+    tx_fwd(ctok, cV, cT, 4, 8);                          # weight-only f64 — the trained model
+    var li_wo = t_alloc(ciTV); t_copy(li_wo, tx_logits, ciTV);
+    tx_fwd_q(1, ctok, cV, cT, 4, 8);                     # full-quant f64 reference
+    var li_fq = t_alloc(ciTV); t_copy(li_fq, ki_logits, ciTV);
+    tx_fwd_q(0, ctok, cV, cT, 4, 8);                     # integer kernel — the payoff
+    var cmx = f64_from(0); var cdx = f64_from(0); var ci2 = 0;
+    while (ci2 < ciTV) {
+        var e = f64_abs(f64_sub(tget(ki_logits, ci2), tget(li_fq, ci2)));
+        if (f64_gt(e, cmx) == 1) { cmx = e; }
+        var d = f64_abs(f64_sub(tget(ki_logits, ci2), tget(li_wo, ci2)));
+        if (f64_gt(d, cdx) == 1) { cdx = d; }
+        ci2 = ci2 + 1;
+    }
+    puts("    exact parity vs full-quant f64 (integer accumulate has no rounding): max|int-f64| = ");
+    fmt_int(f64_to(f64_mul(cmx, f64_from(1000000000000)))); puts(" e-12\n");
+    puts("    activation-quant delta vs the weight-only trained model: max|int-trained| = "); print_f2(cdx); _putc(10);
+    var cag = 0; var ct = 0;
+    while (ct < cT) {
+        if (logits_argmax(ki_logits + ct * cV * 8, cV) == logits_argmax(li_wo + ct * cV * 8, cV)) { cag = cag + 1; }
+        ct = ct + 1;
+    }
+    puts("    next-token argmax: integer model agrees with the trained f64 model at "); fmt_int(cag); puts(" / "); fmt_int(cT); puts(" positions\n");
+    var nit = 200; var iti = 0; var tt0 = now_ns();
+    while (iti < nit) { tx_fwd_q(0, ctok, cV, cT, 4, 8); iti = iti + 1; }
+    var tt1 = now_ns(); iti = 0;
+    while (iti < nit) { tx_fwd(ctok, cV, cT, 4, 8); iti = iti + 1; }
+    var tt2 = now_ns();
+    puts("    forward latency: integer kernel = "); fmt_int((tt1 - tt0) / nit); puts(" ns ; weight-only f64 = "); fmt_int((tt2 - tt1) / nit); puts(" ns\n");
     return 0;
 }
 

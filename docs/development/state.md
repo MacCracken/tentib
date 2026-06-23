@@ -5,11 +5,14 @@
 
 ## Version
 
-**0.3.0** — M2 (a ternary transformer trains from scratch), released 2026-06-23.
-**M3a (the matmul-free integer inference kernel) built + gated on the 0.3.0 line,
-staged for v0.4.0**: int8 activations + ternary weights → integer signed-accumulate
-(no multiply), logit-parity < 1e-9 vs the f64 forward, 2-bit packed weights (32×).
-82/82. Prior: **0.2.0** (M1 — BitLinear + STE), **0.1.0** (M0 — ternary quantizer).
+**0.4.0** — M3 (the matmul-free integer inference kernel, **whole-model**), cut
+2026-06-23 (user tags). The kernel runs through every BitLinear of the trained
+transformer: int8 activations + ternary weights → integer signed-accumulate (no
+multiply), **exact parity < 1e-9** vs the full-quant f64 forward, **argmax 10/10** vs
+the trained model, 2-bit packed weights (32×), + a **branchless scalar kernel** (~25%
+over branchy). The SIMD throughput lever is deferred to **0.4.1**, gated on cyrius
+integer SIMD (proposal filed). **86/86.** Prior: **0.3.0** (M2 — ternary transformer
+trains), **0.2.0** (M1 — BitLinear + STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Toolchain
 
@@ -37,15 +40,19 @@ staged for v0.4.0**: int8 activations + ternary weights → integer signed-accum
   multi-token LM (embed + pos → block → final RMSNorm → ternary head → softmax-CE)
   with `tx_train` (E4). Module-global scratch; each level FD-gated; the LM trains
   (CE 1.86 → 0.04 on a synthetic sequence).
-- `src/kernel.cyr` — **M3 matmul-free kernel**: `act_quant_int` (int8 codes) +
-  `ternary_matmul_free` (i64 signed-accumulate, no multiply, dequant) +
-  `tpack2`/`tunpack2` (2-bit packed ternary storage).
+- `src/kernel.cyr` — **M3 matmul-free kernel + whole-model integer inference**:
+  `act_quant_int` (int8 codes) + `ternary_matmul_free` (i64 signed-accumulate, no
+  multiply, dequant + bias) + **M3b** `ternary_matmul_free_bl` (branchless mask
+  arithmetic, bit-identical) + `tpack2`/`tunpack2` (2-bit packed storage). **M3c**
+  whole-model integer inference: `bl_forward_q` (mode 0 integer / mode 1 full-quant-f64
+  reference) + `attn_sublayer_q`/`mlp_sublayer_q`/`block_q`/`tx_fwd_q` (the trained
+  transformer's 7 BitLinears, integer) + `tx_int_init` + `logits_argmax`.
 - `src/main.cyr` — demo driver (M0 quantizer · M1 BitLinear · M2 transformer-trains ·
-  M3 matmul-free kernel).
+  M3 matmul-free kernel · M3b branchless bench · M3c whole-model integer inference).
 
 ## Tests
 
-- `tests/tentib.tcyr` — **60/60** green: rosnet smoke, M0 quantization, BitLinear
+- `tests/tentib.tcyr` — **86/86** green: rosnet smoke, M0 quantization, BitLinear
   forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
@@ -53,8 +60,10 @@ staged for v0.4.0**: int8 activations + ternary weights → integer signed-accum
   argmax ≥ 6/8), **RMSNorm + GELU + attention** fwd/bwd FD gates, the **E1/E2/E3
   end-to-end dx gates** (attention sublayer, MLP sublayer, full block), the **E4a LM
   embedding-gradient FD gate**, the **E4b descent** + **bite-F** (trains on akshara
-  text), and **M3** (matmul-free integer kernel: logit-parity < 1e-9, 2-bit pack
-  round-trip).
+  text), **M3** (matmul-free integer kernel: logit-parity < 1e-9, 2-bit pack
+  round-trip), **M3b** (branchless kernel bit-identical to branchy), and **M3c**
+  (whole-model integer inference: < 1e-9 relerr vs the full-quant f64 forward,
+  finite activation-quant delta vs the trained model, argmax agreement at all T).
 - `tests/tentib.bcyr` / `.fcyr` — benchmark / fuzz stubs (no-op).
 
 ## Dependencies
@@ -64,7 +73,7 @@ Direct (declared in `cyrius.cyml`):
 - stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math
 - **rosnet** 0.2.0 (latent f64 weights + `linear_fwd`/`linear_bwd`) — M1, active
 - **tyche** 0.1.1 (PRNG; rosnet's `t_randn` → `rng_normal`) — M1, active
-- **akshara** (tokenizer) → M2 (commented in `cyrius.cyml`)
+- **akshara** 0.1.0 (tokenizer; `corpus_set`/`gd_ld` byte-vocab path) — M2, active
 
 ## Consumers
 
@@ -72,6 +81,11 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**M3 continues toward v0.4.0**: M3a (the matmul-free integer kernel) done; next is
-**M3b** (a branchless int-SIMD kernel — the throughput lever) and **M3c** (the kernel
-through the whole trained transformer + a tok/s benchmark). See [`roadmap.md`](roadmap.md).
+**v0.4.0 cut (M3 complete).** Next is **v0.4.1 — the integer-SIMD ternary kernel**, the
+b1.58 wall-clock throughput lever. It is **gated on the cyrius toolchain** gaining
+integer SIMD (typed `iNxM` vectors + int8/16/32 ops); the proposal is filed at
+[`proposals/2026-06-23-cyrius-integer-simd.md`](proposals/2026-06-23-cyrius-integer-simd.md)
+(+ the arity-check issue at [`issues/2026-06-23-cyrius-call-arity-no-check.md`](issues/2026-06-23-cyrius-call-arity-no-check.md)).
+Until then the scalar matmul-free kernel (multiply-free + branchless + 32× memory) is
+the shipped surface. Then **M4** (allocation-clean + API freeze + benchmarks → v1.0).
+See [`roadmap.md`](roadmap.md).

@@ -4,11 +4,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added — M3 (in progress): the matmul-free inference kernel
-- `src/kernel.cyr` — the payoff. `ternary_matmul_free(qx, sx, Wq, γ, ...)`: ternary weights + int8 activations, **integer signed-accumulate** in the inner loop (`+qx / −qx / skip` over i64 — *no multiply*), then one dequant per output (`γ·sx`). `act_quant_int` produces the int8 codes (same quantization as M1's `bl_act_quant`, kept integer). The M0 `ternary_dot` generalized to a full layer + carried to genuine integers.
-- **Logit parity** (gated): the integer kernel reproduces `bl_forward_full`'s f64 logits to **< 1e-9** (the integer accumulate is exact; the f64 path is what rounds) — a 128×128 demo shows `max|int−f64| < 1e-12`.
-- **2-bit packed ternary storage** (gated round-trip): `tpack2`/`tunpack2` pack `{−1,0,+1}` to 2 bits/weight — **32× smaller** than an f64 slot (≈ the b1.58 1.58-bit claim; trit-packing reaches ~1.6). Suite → **82**.
-- **Honest throughput:** on a 128×128 layer the kernel eliminates all **16384** inner-loop multiplies (only 128 dequant scalings remain), but the *branchy scalar* reference is slower than rosnet's SIMD-f64 matmul — the wall-clock payoff needs a **branchless int-SIMD kernel** (the next M3 lever; the matmul-free property + 32× memory are the wins today).
+### Deferred → 0.4.1 (gated on the toolchain)
+- **M3b integer-SIMD kernel** — the wall-clock throughput lever. b1.58's CPU speedup
+  over SIMD-f64 needs INTEGER-SIMD lanes (int8 × sign-select / VNNI, 16–32 per instr);
+  this Cyrius (6.2.37) has **f64-only SIMD** (2-wide SSE2). Lands when cyrius adds
+  integer SIMD — see the proposal
+  [`docs/development/proposals/2026-06-23-cyrius-integer-simd.md`](docs/development/proposals/2026-06-23-cyrius-integer-simd.md).
+
+## [0.4.0] — 2026-06-23
+
+**M3 — the matmul-free integer inference kernel, whole-model.** The payoff: ternary
+weights {−1, 0, +1} × int8 activations run as integer signed-accumulate (add / sub /
+skip — *no multiply*) through **every BitLinear of the trained transformer**,
+reproducing the f64 forward's logits. The scalar throughput lever (branch elimination)
+lands here; the SIMD lever is gated on toolchain integer-SIMD (→ 0.4.1). Suite **86/86**.
+
+### Added — M3a: the matmul-free integer kernel
+- `src/kernel.cyr` — the payoff. `ternary_matmul_free(qx, sx, Wq, γ, b, y, M, K, N)`:
+  ternary weights + int8 activations, **integer signed-accumulate** in the inner loop
+  (`+qx / −qx / skip` over i64 — *no multiply*), then one dequant per output (`γ·sx`) +
+  optional bias. `act_quant_int` produces the int8 codes (same quantization as M1's
+  `bl_act_quant`, kept integer). The M0 `ternary_dot` generalized to a full layer +
+  carried to genuine integers.
+- **Logit parity** (gated): the integer kernel reproduces `bl_forward_full`'s f64
+  logits to **< 1e-9** (the integer accumulate is exact; the f64 path is what rounds)
+  — a 128×128 demo shows `max|int−f64| < 1e-12`.
+- **2-bit packed ternary storage** (gated round-trip): `tpack2`/`tunpack2` pack
+  `{−1,0,+1}` to 2 bits/weight — **32× smaller** than an f64 slot.
+
+### Added — M3b: branchless scalar kernel (the achievable throughput lever)
+- `ternary_matmul_free_bl` — the same matmul-free accumulate, but the data-dependent
+  per-weight branch (unpredictable on random ±1/0 weights) is replaced by mask
+  arithmetic (`pm = −(w==+1)`, `nm = −(w==−1)`, `acc += (qv & pm) − (qv & nm)`). Still
+  genuinely multiply-free (AND / ADD / SUB only). **Bit-identical** to the branchy
+  kernel (gated).
+- **Measured (128×128 layer):** branchy 112.6 µs → branchless **84.5 µs** (~25%
+  faster). rosnet's SIMD-f64 matmul is 16.5 µs — branch elimination helps but cannot
+  beat SIMD.
+- **The int-SIMD gate (honest):** the b1.58 CPU throughput win over SIMD-f64 needs
+  INTEGER-SIMD lanes; this Cyrius has f64-only SIMD (2-wide SSE2, `f64v_*` →
+  `movupd`/`mulpd`/`addpd`). Filed as a cyrius proposal; the SIMD kernel is **0.4.1**,
+  gated on it. Today's wins: multiply-free + branch elimination + 32× memory.
+
+### Added — M3c: whole-model integer inference
+- `tx_fwd_q` (+ `bl_forward_q` / `attn_sublayer_q` / `mlp_sublayer_q` / `block_q` /
+  `tx_int_init` / `logits_argmax`, `src/kernel.cyr`) — the matmul-free kernel runs
+  through **every BitLinear of the trained transformer** (attention Q/K/V/O + MLP
+  up/down + the head with bias); RMSNorm / GELU / attention stay f64 (b1.58 ternarizes
+  only the linear layers). One mode-parameterized chain serves both the integer payoff
+  (mode 0) and a full-quant-f64 reference (mode 1).
+- **Whole-model parity** (gated): the integer logits reproduce the full-quant f64
+  forward to **< 1e-9 relerr** across all 7 BitLinears (the M3a per-layer parity,
+  composed); a trained "hello world" model shows `max|int−f64| < 1e-12`.
+- **Honest activation-quant delta:** vs the weight-only **trained** model (which never
+  saw int8-quantized activations), `max|int−trained| ≈ 0.01` — and the integer model's
+  **next-token argmax matches the trained f64 model at 10/10 positions** (the small
+  logit delta doesn't flip the rank). The honest small-scale gap, reported not hidden.
+- **Latency:** the integer whole-model forward is 24 µs vs 16.5 µs weight-only f64
+  (slower without integer-SIMD — the 0.4.1 gate).
+- Suite **82 → 86**.
+
+### Fixed
+- `ternary_matmul_free` gained a bias param (8 → 9) for the M3c head; three stale
+  8-arg call sites compiled clean (Cyrius does not check call arity) but failed the M3
+  parity test at runtime — call sites corrected.
+
+### Filed (toolchain)
+- **cyrius issue** — call-site arity mismatch silently accepted (no arg-count check):
+  compiles `OK`, binds garbage. The M3c bias-param regression above is the trigger.
+  [`docs/development/issues/2026-06-23-cyrius-call-arity-no-check.md`](docs/development/issues/2026-06-23-cyrius-call-arity-no-check.md).
+- **cyrius proposal** — integer SIMD (typed `iNxM` vectors + int8/16/32 ops), the
+  quantized-ML throughput floor; unblocks the 0.4.1 int-SIMD kernel.
+  [`docs/development/proposals/2026-06-23-cyrius-integer-simd.md`](docs/development/proposals/2026-06-23-cyrius-integer-simd.md).
 
 ## [0.3.0] — 2026-06-23
 

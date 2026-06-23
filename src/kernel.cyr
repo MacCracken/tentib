@@ -38,7 +38,8 @@ fn act_quant_int(x, M, K, qx, sx): i64 {
 
 # The matmul-free kernel. Inner loop: i64 add / subtract / skip — no multiply.
 # The only f64 multiplies are the M*N dequant scalings (vs M*K*N in a real matmul).
-fn ternary_matmul_free(qx, sx, Wq, gamma, y, M, K, N): i64 {
+# y[m,n] = gamma*sx[m] * (signed-acc) + b[n]  (pass b = 0 for no bias).
+fn ternary_matmul_free(qx, sx, Wq, gamma, b, y, M, K, N): i64 {
     var m = 0;
     while (m < M) {
         var scale = f64_mul(load64(sx + m * 8), gamma);
@@ -53,7 +54,50 @@ fn ternary_matmul_free(qx, sx, Wq, gamma, y, M, K, N): i64 {
                 if (w == (0 - 1)) { acc = acc - load64(qrow + k * 8); }
                 k = k + 1;
             }
-            store64(y + (m * N + n) * 8, f64_mul(f64_from(acc), scale));   # integer -> dequant f64
+            var yv = f64_mul(f64_from(acc), scale);                       # integer -> dequant f64
+            if (b != 0) { yv = f64_add(yv, load64(b + n * 8)); }
+            store64(y + (m * N + n) * 8, yv);
+            n = n + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# ---- M3b: branchless variant (the throughput lever, scalar) ------------------
+# The same matmul-free accumulate, but the data-dependent `if (w==+1)/(w==-1)`
+# branches — UNPREDICTABLE on random ternary weights (~1/3 each of -1/0/+1), so
+# the predictor misses constantly — are replaced by mask arithmetic:
+#   pm = -(w==+1)  -> all-ones (i64 -1) when w==+1 else 0
+#   nm = -(w==-1)  -> all-ones when w==-1 else 0
+#   acc += (qv & pm) - (qv & nm)      # +qv / -qv / 0, NO branch, NO multiply
+# Still genuinely multiply-free (the spirit of the kernel): only AND / ADD / SUB.
+# Bit-identical output to ternary_matmul_free (the integer accumulate is the same
+# value, reordered). On the current toolchain the SIMD-f64 matmul still wins on
+# wall-clock — see the M3b note: the real b1.58 CPU payoff needs INTEGER-SIMD lanes
+# (int8 x sign-select, 16-32 per instr), which this Cyrius (6.2.x) does not expose —
+# its only SIMD is f64 (f64v2/f64v4, lowering to 2-wide SSE2 packed-double; f64v4 is
+# two SSE2 iterations, no AVX/FMA). Branch elimination is the achievable scalar lever.
+fn ternary_matmul_free_bl(qx, sx, Wq, gamma, b, y, M, K, N): i64 {
+    var m = 0;
+    while (m < M) {
+        var scale = f64_mul(load64(sx + m * 8), gamma);
+        var qrow = qx + m * K * 8;
+        var n = 0;
+        while (n < N) {
+            var acc = 0;                          # i64 INTEGER accumulator
+            var k = 0;
+            while (k < K) {
+                var w = load64(Wq + (k * N + n) * 8);
+                var qv = load64(qrow + k * 8);
+                var pm = 0 - (w == 1);            # 0 or -1 (all-ones) — no branch
+                var nm = 0 - (w == (0 - 1));
+                acc = acc + (qv & pm) - (qv & nm);
+                k = k + 1;
+            }
+            var yv = f64_mul(f64_from(acc), scale);
+            if (b != 0) { yv = f64_add(yv, load64(b + n * 8)); }
+            store64(y + (m * N + n) * 8, yv);
             n = n + 1;
         }
         m = m + 1;
@@ -86,4 +130,107 @@ fn tunpack2(packed, i): i64 {
     if (code == 1) { return 1; }
     if (code == 2) { return 0 - 1; }
     return 0;
+}
+
+# ---- M3c: whole-model integer inference -------------------------------------
+# Run the matmul-free kernel through EVERY BitLinear of the TRAINED transformer:
+# the 6 projections (attention Q/K/V/O + MLP up/down) and the head all go integer
+# (act_quant_int -> ternary_matmul_free). RMSNorm / GELU / attention stay f64 —
+# b1.58 ternarizes ONLY the linear layers; norms + the attention core keep higher
+# precision. This is INFERENCE: no backward, so it is leaner than block.cyr's
+# training forward (no caches), and it reuses block.cyr's f64 scratch (blk_*/mlp_*/
+# tx_fnorm) for the shared f64 ops + the trained weights (tx_Wa/tx_Wm/tx_Whead/...).
+#
+# `mode` selects the BitLinear kernel so the SAME chain serves both roles:
+#   mode 0 = integer  (the payoff: ternary W + int8 acts, integer signed-accumulate)
+#   mode 1 = full-quant f64 (bl_forward_full per layer — the EXACT reference the
+#            integer path must reproduce whole-model, extending the M3a per-layer gate)
+# Both write logits to ki_logits; the caller copies between calls to compare.
+
+var ki_Wq = 0; var ki_We = 0; var ki_q = 0; var ki_xe = 0; var ki_sx = 0; var ki_logits = 0;
+
+# Allocate the integer-inference scratch (call AFTER tx_init). ki_Wq/ki_We size to
+# the largest single projection (max of C*C, C*F, C*V); ki_q/ki_xe to T*max(C,F)
+# (the down-proj reads F-wide rows); ki_sx per-token; ki_logits = T*V.
+fn tx_int_init(V, T, C, F): i64 {
+    var mkn = C * C;
+    if (C * F > mkn) { mkn = C * F; }
+    if (C * V > mkn) { mkn = C * V; }
+    var kf = C; if (F > kf) { kf = F; }
+    ki_Wq = t_alloc(mkn); ki_We = t_alloc(mkn);
+    ki_q = t_alloc(T * kf); ki_xe = t_alloc(T * kf); ki_sx = t_alloc(T);
+    ki_logits = t_alloc(T * V);
+    return 0;
+}
+
+# One BitLinear, integer (mode 0) or full-quant-f64 reference (mode 1). The latent
+# weight W re-quantizes to ternary each call (deployment pre-quantizes once; here we
+# match the f64 forward's per-call cost for a fair benchmark). Returns gamma.
+fn bl_forward_q(mode, x, W, b, y, M, K, N): i64 {
+    if (mode == 0) {
+        var g = bl_weight_effective(W, K * N, ki_Wq, ki_We);   # ternary ki_Wq + gamma (ki_We unused)
+        act_quant_int(x, M, K, ki_q, ki_sx);
+        ternary_matmul_free(ki_q, ki_sx, ki_Wq, g, b, y, M, K, N);
+        return g;
+    }
+    return bl_forward_full(x, W, b, y, M, K, N, ki_Wq, ki_We, ki_xe, ki_sx);
+}
+
+fn attn_sublayer_q(mode, x, g1, W, T, C): i64 {
+    var TC = T * C; var CC = C * C;
+    var Wq = W; var Wk = W + CC * 8; var Wv = W + 2 * CC * 8; var Wo = W + 3 * CC * 8;
+    var t = 0;
+    while (t < T) { rmsnorm_fwd(x + t * C * 8, g1, blk_a + t * C * 8, C); t = t + 1; }
+    bl_forward_q(mode, blk_a, Wq, 0, blk_Q, T, C, C);
+    bl_forward_q(mode, blk_a, Wk, 0, blk_K, T, C, C);
+    bl_forward_q(mode, blk_a, Wv, 0, blk_V, T, C, C);
+    attn_fwd(blk_Q, blk_K, blk_V, blk_P, blk_ctx, T, C);
+    bl_forward_q(mode, blk_ctx, Wo, 0, blk_attn_out, T, C, C);
+    t_copy(blk_out, x, TC); t_add_into(blk_out, blk_attn_out, TC);
+    return 0;
+}
+
+fn mlp_sublayer_q(mode, x, g2, W, T, C, F): i64 {
+    var TC = T * C; var CF = C * F;
+    var Wup = W; var Wdn = W + CF * 8;
+    var t = 0;
+    while (t < T) { rmsnorm_fwd(x + t * C * 8, g2, mlp_b2 + t * C * 8, C); t = t + 1; }
+    bl_forward_q(mode, mlp_b2, Wup, 0, mlp_fc, T, C, F);
+    gelu_fwd(mlp_fc, mlp_gg, T * F);
+    bl_forward_q(mode, mlp_gg, Wdn, 0, mlp_branch, T, F, C);
+    t_copy(mlp_out, x, TC); t_add_into(mlp_out, mlp_branch, TC);
+    return 0;
+}
+
+fn block_q(mode, x, gns, Wa, Wm, T, C, F): i64 {
+    var TC = T * C;
+    attn_sublayer_q(mode, x, gns, Wa, T, C);
+    t_copy(blk_xmid, blk_out, TC);
+    mlp_sublayer_q(mode, blk_xmid, gns + C * 8, Wm, T, C, F);
+    return 0;
+}
+
+# Whole-model forward over `tokens` using the TRAINED weights. Writes logits to
+# ki_logits. mode 0 = matmul-free integer kernel; mode 1 = full-quant f64 reference.
+fn tx_fwd_q(mode, tokens, V, T, C, F): i64 {
+    var C8 = C * 8;
+    var t = 0;
+    while (t < T) {                                   # embed: resid0[t] = tokemb[tok] + posemb[t]
+        var tok = load64(tokens + t * 8);
+        t_copy(tx_resid0 + t * C8, tx_tokemb + tok * C8, C);
+        t_add_into(tx_resid0 + t * C8, tx_posemb + t * C8, C);
+        t = t + 1;
+    }
+    block_q(mode, tx_resid0, tx_gns, tx_Wa, tx_Wm, T, C, F);
+    t = 0;
+    while (t < T) { rmsnorm_fwd(mlp_out + t * C8, tx_gf, tx_fnorm + t * C8, C); t = t + 1; }
+    bl_forward_q(mode, tx_fnorm, tx_Whead, tx_bhead, ki_logits, T, C, V);   # head carries bias
+    return 0;
+}
+
+# argmax over a V-length logits row (the next-token prediction). Ties -> first index.
+fn logits_argmax(logits, V): i64 {
+    var best = 0; var bv = load64(logits + 0); var i = 1;
+    while (i < V) { var v = load64(logits + i * 8); if (f64_gt(v, bv) == 1) { bv = v; best = i; } i = i + 1; }
+    return best;
 }

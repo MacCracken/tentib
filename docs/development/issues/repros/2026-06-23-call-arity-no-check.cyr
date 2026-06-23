@@ -1,0 +1,26 @@
+# Repro: Cyrius silently accepts a call with the WRONG argument count.
+#
+# add3 declares 3 params; the call below passes only 2. A compiler with arg-count
+# checking would reject this ("add3 expects 3 args, got 2"). Cyrius instead reports
+# `OK` and runs the program with the 3rd parameter UNBOUND — it reads whatever is in
+# the arg register/slot (here 0, so 10+20+0 = 30; in a real call site it is whatever
+# the previous code left there).
+#
+#   $ cyrius build 2026-06-23-call-arity-no-check.cyr arity && ./arity ; echo $?
+#   compile ... OK
+#   30                     # <- no error; c silently 0/garbage
+#
+# This is how tentib's M3c miscompiled: ternary_matmul_free grew an 8th->9th param
+# (bias b), but three call sites still passed 8 args. `cyrius build` said OK; the
+# shifted binding (b <- y_ptr, y <- M, ..., N unbound) only surfaced as a FAILED
+# runtime parity test. With no test it would have shipped as silent garbage.
+
+fn add3(a, b, c): i64 { return a + b + c; }
+
+fn main(): i64 {
+    var r = add3(10, 20);          # MISSING the 3rd arg — should be a compile error
+    return r;                      # if checked: never compiles. else: 30 (+ garbage)
+}
+
+var r = main();
+syscall(60, r);

@@ -638,7 +638,7 @@ fn main() {
     var m3g = bl_forward_full(m3x, m3W, 0, m3yf, m3M, m3K, m3N, m3Wq, m3We, m3xe, m3sf);
     # integer path: same quantization, but integer signed-accumulate + a single dequant
     act_quant_int(m3x, m3M, m3K, m3qx, m3si);
-    ternary_matmul_free(m3qx, m3si, m3Wq, m3g, m3yi, m3M, m3K, m3N);
+    ternary_matmul_free(m3qx, m3si, m3Wq, m3g, 0, m3yi, m3M, m3K, m3N);
     var m3mr = f64_from(0); var m3i = 0;
     while (m3i < m3MN) {
         var re = bl_relerr(tget(m3yi, m3i), tget(m3yf, m3i));
@@ -653,6 +653,58 @@ fn main() {
     var m3ok = 1; m3i = 0;
     while (m3i < m3KN) { if (tunpack2(m3pk, m3i) != tload(m3Wq, m3i)) { m3ok = 0; } m3i = m3i + 1; }
     assert(m3ok == 1, "M3: tpack2/tunpack2 round-trip exact (2 bits/weight, 32x smaller than f64)");
+
+    test_group("M3b: branchless kernel is bit-identical to the branchy kernel (branch elimination only)");
+    # same inputs as the M3 parity group (m3qx/m3si/m3Wq/m3g); m3yi holds the branchy output.
+    var m3yb = t_alloc(m3MN);
+    ternary_matmul_free_bl(m3qx, m3si, m3Wq, m3g, 0, m3yb, m3M, m3K, m3N);
+    var m3bok = 1; m3i = 0;
+    while (m3i < m3MN) { if (tget(m3yb, m3i) != tget(m3yi, m3i)) { m3bok = 0; } m3i = m3i + 1; }
+    assert(m3bok == 1, "M3b: ternary_matmul_free_bl == ternary_matmul_free bit-for-bit (mask arithmetic, no value change)");
+
+    test_group("M3c: whole-model integer inference reproduces the f64 forward (parity + activation-quant delta)");
+    # Train a tiny transformer, then run it three ways: the weight-only f64 model that
+    # was trained, the full-quant f64 reference (int8 acts, f64 matmul), and the integer
+    # matmul-free kernel. The kernel runs through ALL 7 BitLinears (Q/K/V/O + up/down + head).
+    var ciV = 6; var ciT = 4; var ciC = 4; var ciF = 8; var ciTV = ciT * ciV;
+    var citok = t_alloc(ciT); var citgt = t_alloc(ciT);
+    store64(citok + 0, 1); store64(citok + 8, 4); store64(citok + 16, 2); store64(citok + 24, 5);
+    store64(citgt + 0, 4); store64(citgt + 8, 2); store64(citgt + 16, 5); store64(citgt + 24, 3);
+    var cist = t_alloc(2);
+    tx_train(citok, citgt, ciV, ciT, ciC, ciF, 1000, 1, cist);   # trains (the bite-E4b config)
+    tx_int_init(ciV, ciT, ciC, ciF);
+    tx_fwd(citok, ciV, ciT, ciC, ciF);                           # weight-only f64 — the trained model
+    var li_wo = t_alloc(ciTV); t_copy(li_wo, tx_logits, ciTV);
+    tx_fwd_q(1, citok, ciV, ciT, ciC, ciF);                      # full-quant f64 reference
+    var li_fq = t_alloc(ciTV); t_copy(li_fq, ki_logits, ciTV);
+    tx_fwd_q(0, citok, ciV, ciT, ciC, ciF);                      # integer kernel — the payoff
+    # EXACT gate: whole-model integer logits reproduce the full-quant f64 forward (the
+    # integer accumulate adds no rounding; only the f64 reference rounds) — the M3a
+    # per-layer parity, now composed through all 7 BitLinears + the f64 interludes.
+    var ci_mx = f64_from(0); var cii = 0;
+    while (cii < ciTV) {
+        var ce = bl_relerr(tget(ki_logits, cii), tget(li_fq, cii));
+        if (f64_gt(ce, ci_mx) == 1) { ci_mx = ce; }
+        cii = cii + 1;
+    }
+    assert(f64_lt(ci_mx, f64_div(f64_from(1), f64_from(1000000000))) == 1, "M3c: whole-model integer logits match full-quant f64 (< 1e-9 relerr; integer accumulate adds no rounding, all 7 BitLinears)");
+    # HONEST delta: integer vs the weight-only TRAINED model (int8-quantizing activations
+    # the model never saw at train time) — a small nonzero gap (reported, not hidden).
+    var ci_d = f64_from(0); cii = 0;
+    while (cii < ciTV) {
+        var cd = f64_abs(f64_sub(tget(ki_logits, cii), tget(li_wo, cii)));
+        if (f64_gt(cd, ci_d) == 1) { ci_d = cd; }
+        cii = cii + 1;
+    }
+    assert(f64_is_finite(ci_d) == 1, "M3c: integer-vs-trained activation-quant delta is finite (the honest small-scale gap)");
+    # argmax agreement: the int8-activation integer model predicts the same next token as
+    # the trained f64 model at every position (the small logit delta doesn't flip the rank).
+    var ci_ag = 0; var ci_t = 0;
+    while (ci_t < ciT) {
+        if (logits_argmax(ki_logits + ci_t * ciV * 8, ciV) == logits_argmax(li_wo + ci_t * ciV * 8, ciV)) { ci_ag = ci_ag + 1; }
+        ci_t = ci_t + 1;
+    }
+    assert(ci_ag == ciT, "M3c: integer inference argmax matches the trained f64 model at all T positions");
 
     return assert_summary();
 }

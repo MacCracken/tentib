@@ -78,17 +78,38 @@ Sub-bites:
   next-token, CE `2.08 → 0.11`. **v0.3.0 cut.**
 - Later refinement: swap SGD for Adam once the multi-layer landscape needs it.
 
-### M3 — Packed-ternary + int8 matmul-free inference kernel (v0.4.0) — in progress
+### M3 — Packed-ternary + int8 matmul-free inference kernel (v0.4.0) — ✅ cut 2026-06-23
+
+The matmul-free kernel, carried through the whole trained transformer. **86/86.**
 
 - ✅ **M3a (2026-06-23): the matmul-free integer kernel** (`src/kernel.cyr`):
   `ternary_matmul_free` (int8 activations + ternary weights → i64 signed-accumulate,
-  no multiply → dequant) + `act_quant_int` + `tpack2`/`tunpack2` (2-bit storage).
+  no multiply → dequant + bias) + `act_quant_int` + `tpack2`/`tunpack2` (2-bit storage).
   **Logit parity < 1e-9** vs `bl_forward_full`; round-trip-exact 2-bit packing
-  (32× smaller). 16384 → 0 inner-loop multiplies on a 128×128 layer. 82/82.
-- ⏳ **M3b: branchless int-SIMD kernel** — the throughput lever (the scalar reference
-  is slower than SIMD-f64; the b1.58 speedup needs vectorized int8 × sign-select).
-- ⏳ **M3c: whole-model integer inference** (the kernel through every BitLinear of
-  the trained transformer; logit-parity vs the f64 forward) + a tok/s benchmark.
+  (32× smaller). 16384 → 0 inner-loop multiplies on a 128×128 layer.
+- ◐ **M3b: the throughput lever — scalar half done (0.4.0), SIMD half → 0.4.1.**
+  - ✅ **branchless scalar kernel** (`ternary_matmul_free_bl`): mask arithmetic replaces
+    the unpredictable per-weight branch; bit-identical output; **84.5 µs vs branchy
+    112.6 µs (~25%)** on a 128×128 layer. Still multiply-free (AND / ADD / SUB).
+  - ⏳ **integer-SIMD kernel → v0.4.1, gated on the toolchain.** rosnet's SIMD-f64
+    matmul (16.5 µs) still beats the scalar integer path; the b1.58 win needs
+    INTEGER-SIMD lanes (int8 × sign-select, 16–32 / instr), which this Cyrius lacks
+    (f64-only, 2-wide SSE2). Filed:
+    [`proposals/2026-06-23-cyrius-integer-simd.md`](proposals/2026-06-23-cyrius-integer-simd.md).
+- ✅ **M3c (2026-06-23): whole-model integer inference** — the kernel through every
+  BitLinear of the trained transformer (`tx_fwd_q`): exact parity < 1e-9 vs the
+  full-quant f64 forward (all 7 BitLinears integer), an honest activation-quant delta
+  (~0.01) vs the weight-only trained model, **argmax agreement 10/10** positions, and
+  a forward-latency benchmark (24 µs integer vs 16.5 µs f64).
+- **Toolchain footgun filed:** Cyrius does not check call arity (an 8→9 param change
+  silently miscompiled three call sites — `cyrius build` said `OK`).
+  [`issues/2026-06-23-cyrius-call-arity-no-check.md`](issues/2026-06-23-cyrius-call-arity-no-check.md).
+
+### M3.1 — integer-SIMD kernel (v0.4.1) — gated on cyrius integer SIMD
+
+The vectorized int8 × ternary kernel — the b1.58 *"multiply-free is also faster"*
+demonstration vs bitnet.cpp / the b1.58 paper under the B-series fairness rules. Opens
+when the cyrius integer-SIMD proposal lands (typed `iNxM` vectors + int8/16/32 ops).
 
 (original M3 acceptance below)
 
