@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — v0.3.0: a ternary transformer trains from scratch (80/80 gated)
+## Status — v0.4.0: matmul-free integer inference through the trained transformer (86/86 gated)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -32,6 +32,13 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   — trained end-to-end via the STE on real **akshara**-tokenized text. *Every*
   component and the full assembly is finite-difference-gated; the model trains
   (CE → ~0.1). The ternary sibling of attn11's first loss curve.
+- **M3 (v0.4.0)** — **the matmul-free integer inference kernel, whole-model.** The
+  kernel runs through every BitLinear of the trained transformer
+  ([`src/kernel.cyr`](src/kernel.cyr)): ternary weights × int8 activations →
+  integer signed-accumulate (add / subtract / skip, *no multiply*) → **exact parity
+  < 1e-9** vs the f64 forward, next-token **argmax 10/10**, plus a branchless scalar
+  kernel (~25% over branchy) and 2-bit packed weights (**32×** smaller). The SIMD
+  throughput lever is deferred to **0.4.1**, gated on cyrius integer SIMD.
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39
@@ -42,6 +49,9 @@ M1  BitLinear (ternary weights, int8 activations, matmul-free):
 
 M2  ternary transformer trains on akshara-tokenized text "hello world":
     V = 8 tokens, T = 10 positions   initial CE = 2.02   final CE = 0.11
+
+M3  matmul-free integer inference through the trained transformer:
+    exact parity vs f64 < 1e-12   next-token argmax 10/10   (weights 32x smaller)
 ```
 
 Deps: rosnet 0.2.0 + tyche 0.1.1 + akshara 0.1.0 (the shared sovereign tokenizer).
