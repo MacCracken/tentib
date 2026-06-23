@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ['[0-9]*']
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    name: CI Gate
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Build & Release
+    needs: [ci]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned 2026-06-19)
+
+      - name: Verify version
+        run: |
+          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
+          TAG_VERSION="${GITHUB_REF_NAME}"
+          test "$FILE_VERSION" = "$TAG_VERSION" || { echo "VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"; exit 1; }
+
+      - name: Install Cyrius toolchain
+        run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          TARBALL="cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          BASE="https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION"
+          curl -sfLO "$BASE/$TARBALL"
+          # CVE-21: verify the published .sha256 fail-closed before extracting.
+          curl -sfLO "$BASE/$TARBALL.sha256" || { echo "could not fetch $TARBALL.sha256 - refusing unverified toolchain"; exit 1; }
+          sha256sum -c "$TARBALL.sha256" || { echo "checksum mismatch for $TARBALL - aborting"; exit 1; }
+          tar xzf "$TARBALL"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+
+      - name: Build
+        run: |
+          cyrius deps
+          mkdir -p build
+          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+
+      - name: Create release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2 (pinned 2026-06-19)
+        with:
+          generate_release_notes: true
+          files: build/*

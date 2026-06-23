@@ -1,0 +1,11 @@
+# tentib — top-level test entry (referenced by cyrius.cyml [build].test).
+# For unit tests, prefer adding cases to tests/tentib.tcyr.
+
+include "lib/syscalls.cyr"
+
+fn main() {
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

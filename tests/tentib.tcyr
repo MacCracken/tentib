@@ -1,0 +1,54 @@
+# tentib — ternary quantization correctness suite (M0).
+# Verifies the b1.58 absmean quantizer lands weights in {-1,0,+1} and that the
+# matmul-free signed-accumulate dot equals gamma * (independent signed sum).
+# Stdlib auto-included via cyrius.cyml.
+
+include "src/ternary.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("ternary quantization (BitNet b1.58 absmean)");
+
+    var N = 4;
+    var w = alloc(N * 8);
+    var tw = alloc(N * 8);
+    var x = alloc(N * 8);
+
+    # w = [0.9, -0.1, 0.5, -0.8]; |w| sum = 2.3; gamma = 2.3/4 = 0.575
+    # w/gamma = [1.57, -0.17, 0.87, -1.39] -> round+clip -> [1, 0, 1, -1]
+    tstore(w, 0, f64_div(f64_from(9), f64_from(10)));
+    tstore(w, 1, f64_div(f64_from(0 - 1), f64_from(10)));
+    tstore(w, 2, f64_div(f64_from(5), f64_from(10)));
+    tstore(w, 3, f64_div(f64_from(0 - 8), f64_from(10)));
+
+    var g = ternary_quantize(w, N, tw);
+
+    # gamma = 0.575, within 1e-9
+    var gexp = f64_div(f64_from(575), f64_from(1000));
+    var gtol = f64_div(f64_from(1), f64_from(1000000000));
+    assert(f64_lt(f64_abs(f64_sub(g, gexp)), gtol) == 1, "gamma = absmean = 0.575");
+
+    # ternary values
+    assert(tload(tw, 0) == 1, "w0  0.9 -> +1");
+    assert(tload(tw, 1) == 0, "w1 -0.1 ->  0 (the b1.58 zero state)");
+    assert(tload(tw, 2) == 1, "w2  0.5 -> +1");
+    assert(tload(tw, 3) == (0 - 1), "w3 -0.8 -> -1");
+
+    test_group("matmul-free dot = gamma * signed-sum (no multiply in the accumulate)");
+
+    # x = [1, 2, 4, 3]; ternary [1,0,1,-1] -> signed sum = +1 +0 +4 -3 = 2
+    tstore(x, 0, f64_from(1));
+    tstore(x, 1, f64_from(2));
+    tstore(x, 2, f64_from(4));
+    tstore(x, 3, f64_from(3));
+
+    var approx = ternary_dot(tw, x, N, g);
+    var expect = f64_mul(f64_from(2), g);   # same op order as ternary_dot's final mul
+    assert(f64_eq(approx, expect) == 1, "matmul-free dot == gamma * 2");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

@@ -1,0 +1,71 @@
+# tentib — ternary quantization core (M0).
+#
+# The BitNet b1.58 weight quantizer and the matmul-free signed-accumulate dot,
+# on raw f64. A weight is quantized to {-1, 0, +1} (log2(3) ~ 1.58 bits), so the
+# weight*activation path has NO multiply left — only add / subtract / skip. This
+# is attn11's everything-is-i64 thesis applied to the weights themselves.
+#
+# f64 values live as i64 bit patterns (the sovereign convention); arrays are
+# 8-byte slots indexed the rosnet way: load64(p + i*8) / store64(p + i*8, v).
+
+fn tload(p, i): i64 { return load64(p + i * 8); }
+fn tstore(p, i, v): i64 { store64(p + i * 8, v); return 0; }
+
+# absmean scale gamma = mean(|w_i|) — the b1.58 per-tensor ternary scale.
+fn absmean(w, n): i64 {
+    var s = f64_from(0);
+    var i = 0;
+    while (i < n) {
+        s = f64_add(s, f64_abs(tload(w, i)));
+        i = i + 1;
+    }
+    return f64_div(s, f64_from(n));
+}
+
+# quantize one weight to a ternary integer in {-1, 0, +1}:
+#   clip(round(w / gamma), -1, +1)
+fn ternary_one(w, gamma): i64 {
+    var r = f64_to(f64_round(f64_div(w, gamma)));
+    if (r > 1) { r = 1; }
+    if (r < (0 - 1)) { r = 0 - 1; }
+    return r;
+}
+
+# quantize a weight vector w[n] (f64) into tw[n] (i64 ternary). Returns gamma
+# (f64 bits) — the scale that reconstructs the weight as ~ gamma * ternary.
+fn ternary_quantize(w, n, tw): i64 {
+    var g = absmean(w, n);
+    var i = 0;
+    while (i < n) {
+        tstore(tw, i, ternary_one(tload(w, i), g));
+        i = i + 1;
+    }
+    return g;
+}
+
+# matmul-free dot: sum over i of (tw==+1 ? +x : tw==-1 ? -x : skip), then * gamma.
+# The accumulate has NO f64 multiply — only add / subtract / skip. Reconstructs
+# the dequantized W . x (the matmul-free claim, made concrete).
+fn ternary_dot(tw, x, n, gamma): i64 {
+    var acc = f64_from(0);
+    var i = 0;
+    while (i < n) {
+        var t = tload(tw, i);
+        if (t == 1) { acc = f64_add(acc, tload(x, i)); }
+        if (t == (0 - 1)) { acc = f64_sub(acc, tload(x, i)); }
+        i = i + 1;
+    }
+    return f64_mul(acc, gamma);
+}
+
+# full-precision reference dot W . x (with f64 multiplies) — the baseline the
+# matmul-free path is judged against.
+fn ref_dot(w, x, n): i64 {
+    var acc = f64_from(0);
+    var i = 0;
+    while (i < n) {
+        acc = f64_add(acc, f64_mul(tload(w, i), tload(x, i)));
+        i = i + 1;
+    }
+    return acc;
+}

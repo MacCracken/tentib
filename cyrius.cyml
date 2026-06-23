@@ -1,0 +1,25 @@
+[package]
+name = "tentib"
+version = "${file:VERSION}"
+description = "tentib — sovereign integer-native / ternary (1.58-bit) ML reference in Cyrius (BitNet reversed; the i64 thesis applied to the weights)"
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "6.2.37"
+repository = "https://github.com/MacCracken/tentib"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "build/tentib"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math"]
+
+# tentib is a SIBLING reference to attn11 (transformer) and tarka (RL/reasoning),
+# on the same f64 substrate. M1+ wires the latent-weight tensors + grad to rosnet
+# and the tokenizer to akshara (the deps below land then). M0 (v0.1.0) is the
+# self-contained ternary quantizer + matmul-free dot — no external deps yet.
+#
+# [deps.rosnet]  git = "https://github.com/MacCracken/rosnet"  tag = "0.2.0"  (M1)
+# [deps.tyche]   git = "https://github.com/MacCracken/tyche"   tag = "0.1.1"  (M1)
+# [deps.akshara] git = "https://github.com/MacCracken/akshara" tag = "0.1.0"  (M2)
