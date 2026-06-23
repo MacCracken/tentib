@@ -78,7 +78,20 @@ Sub-bites:
   next-token, CE `2.08 → 0.11`. **v0.3.0 cut.**
 - Later refinement: swap SGD for Adam once the multi-layer landscape needs it.
 
-### M3 — Packed-ternary + int8 matmul-free inference kernel (v0.4.0)
+### M3 — Packed-ternary + int8 matmul-free inference kernel (v0.4.0) — in progress
+
+- ✅ **M3a (2026-06-23): the matmul-free integer kernel** (`src/kernel.cyr`):
+  `ternary_matmul_free` (int8 activations + ternary weights → i64 signed-accumulate,
+  no multiply → dequant) + `act_quant_int` + `tpack2`/`tunpack2` (2-bit storage).
+  **Logit parity < 1e-9** vs `bl_forward_full`; round-trip-exact 2-bit packing
+  (32× smaller). 16384 → 0 inner-loop multiplies on a 128×128 layer. 82/82.
+- ⏳ **M3b: branchless int-SIMD kernel** — the throughput lever (the scalar reference
+  is slower than SIMD-f64; the b1.58 speedup needs vectorized int8 × sign-select).
+- ⏳ **M3c: whole-model integer inference** (the kernel through every BitLinear of
+  the trained transformer; logit-parity vs the f64 forward) + a tok/s benchmark.
+
+(original M3 acceptance below)
+
 
 - Packed {−1,0,+1} storage (2-bit / trit-packed) + the integer signed-accumulate
   inference kernel — where "no multiply" becomes a measured **tok/s**.

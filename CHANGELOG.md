@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M3 (in progress): the matmul-free inference kernel
+- `src/kernel.cyr` — the payoff. `ternary_matmul_free(qx, sx, Wq, γ, ...)`: ternary weights + int8 activations, **integer signed-accumulate** in the inner loop (`+qx / −qx / skip` over i64 — *no multiply*), then one dequant per output (`γ·sx`). `act_quant_int` produces the int8 codes (same quantization as M1's `bl_act_quant`, kept integer). The M0 `ternary_dot` generalized to a full layer + carried to genuine integers.
+- **Logit parity** (gated): the integer kernel reproduces `bl_forward_full`'s f64 logits to **< 1e-9** (the integer accumulate is exact; the f64 path is what rounds) — a 128×128 demo shows `max|int−f64| < 1e-12`.
+- **2-bit packed ternary storage** (gated round-trip): `tpack2`/`tunpack2` pack `{−1,0,+1}` to 2 bits/weight — **32× smaller** than an f64 slot (≈ the b1.58 1.58-bit claim; trit-packing reaches ~1.6). Suite → **82**.
+- **Honest throughput:** on a 128×128 layer the kernel eliminates all **16384** inner-loop multiplies (only 128 dequant scalings remain), but the *branchy scalar* reference is slower than rosnet's SIMD-f64 matmul — the wall-clock payoff needs a **branchless int-SIMD kernel** (the next M3 lever; the matmul-free property + 32× memory are the wins today).
+
 ## [0.3.0] — 2026-06-23
 
 **M2 — a ternary transformer trains from scratch.** The full milestone: BitLinear

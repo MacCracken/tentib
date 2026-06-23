@@ -1,0 +1,89 @@
+# tentib — the matmul-free inference kernel (M3). The payoff: ternary weights +
+# int8 activations, INTEGER signed-accumulate (the inner loop is add / subtract /
+# skip over i64 — NO multiply), then a single dequant per output by gamma * the
+# per-row activation scale. y[m,n] = gamma * sx[m] * SUM_k qx[m,k] * Wq[k,n], with
+# Wq in {-1,0,+1} so the product is +qx / -qx / 0. This is the M0 ternary_dot
+# generalized to a full layer + carried to genuine integers; it reproduces
+# bl_forward_full's f64 logits exactly (the integer accumulate has no rounding;
+# the f64 path does, so they agree to ~f64 epsilon). Depends: src/ternary.cyr +
+# lib/rosnet.cyr in scope.
+
+# Per-row absmax int8 quant -> INTEGER codes qx (i64 in [-127,+127]) + per-row
+# scale sx = absmax/127. Same q as bl_act_quant (M1), but keeps the integer code
+# instead of dequantizing — so the kernel can accumulate in pure integer.
+fn act_quant_int(x, M, K, qx, sx): i64 {
+    var m = 0;
+    while (m < M) {
+        var a = f64_from(0); var k = 0;
+        while (k < K) { var v = f64_abs(load64(x + (m * K + k) * 8)); if (f64_gt(v, a) == 1) { a = v; } k = k + 1; }
+        if (f64_eq(a, f64_from(0)) == 1) {
+            store64(sx + m * 8, f64_from(0));
+            k = 0; while (k < K) { store64(qx + (m * K + k) * 8, 0); k = k + 1; }
+        } else {
+            store64(sx + m * 8, f64_div(a, f64_from(127)));
+            var inv = f64_div(f64_from(127), a);
+            k = 0;
+            while (k < K) {
+                var q = f64_to(f64_round(f64_mul(load64(x + (m * K + k) * 8), inv)));
+                if (q > 127) { q = 127; }
+                if (q < (0 - 127)) { q = 0 - 127; }
+                store64(qx + (m * K + k) * 8, q);     # i64 int8 code
+                k = k + 1;
+            }
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# The matmul-free kernel. Inner loop: i64 add / subtract / skip — no multiply.
+# The only f64 multiplies are the M*N dequant scalings (vs M*K*N in a real matmul).
+fn ternary_matmul_free(qx, sx, Wq, gamma, y, M, K, N): i64 {
+    var m = 0;
+    while (m < M) {
+        var scale = f64_mul(load64(sx + m * 8), gamma);
+        var qrow = qx + m * K * 8;
+        var n = 0;
+        while (n < N) {
+            var acc = 0;                          # i64 INTEGER accumulator
+            var k = 0;
+            while (k < K) {
+                var w = load64(Wq + (k * N + n) * 8);
+                if (w == 1) { acc = acc + load64(qrow + k * 8); }
+                if (w == (0 - 1)) { acc = acc - load64(qrow + k * 8); }
+                k = k + 1;
+            }
+            store64(y + (m * N + n) * 8, f64_mul(f64_from(acc), scale));   # integer -> dequant f64
+            n = n + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# ---- 2-bit packed ternary storage (the memory payoff: log2(3)~1.58 -> 2 bits) ---
+# Pack n ternary weights {-1,0,+1} -> 2-bit codes (0->0, +1->1, -1->2), 4 per byte.
+# 2 bits/weight is 32x smaller than an f64 slot; trit-packing (5/byte) reaches ~1.6.
+
+fn tpack2(Wq, n, packed): i64 {
+    var nbytes = (n + 3) / 4;
+    var b = 0; while (b < nbytes) { store8(packed + b, 0); b = b + 1; }
+    var i = 0;
+    while (i < n) {
+        var w = load64(Wq + i * 8);
+        var code = 0;
+        if (w == 1) { code = 1; }
+        if (w == (0 - 1)) { code = 2; }
+        var bi = i / 4; var sh = (i % 4) * 2;
+        store8(packed + bi, load8(packed + bi) | (code << sh));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn tunpack2(packed, i): i64 {
+    var code = (load8(packed + i / 4) >> ((i % 4) * 2)) & 3;
+    if (code == 1) { return 1; }
+    if (code == 2) { return 0 - 1; }
+    return 0;
+}

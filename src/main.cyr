@@ -11,6 +11,7 @@ include "src/layers.cyr"     # rmsnorm / gelu / attention (M2)
 include "src/model.cyr"      # softmax_xent / lm_train — minimal trainable ternary LM (M2)
 include "lib/akshara.cyr"    # corpus_set / gd_ld — sovereign tokenizer (M2 bite-F)
 include "src/block.cyr"      # the full transformer block + tx_train (M2 bite-E)
+include "src/kernel.cyr"     # the matmul-free integer inference kernel (M3)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
@@ -116,6 +117,34 @@ fn main() {
     puts(" tokens, T = "); fmt_int(cT); puts(" positions)\n");
     puts("    initial CE = "); print_f2(tget(st2, 0)); _putc(10);
     puts("    final   CE = "); print_f2(tget(st2, 1)); _putc(10);
+
+    # ---- M3: the matmul-free inference kernel — the payoff ----
+    puts("\nM3  matmul-free kernel: ternary W + int8 activations, INTEGER accumulate (no multiply):\n");
+    var kK = 128; var kN = 128; var kKN = kK * kN;
+    var kx = t_alloc(kK); var kW = t_alloc(kKN); var kWq = t_alloc(kKN); var kWe = t_alloc(kKN);
+    var kxe = t_alloc(kK); var ksf = t_alloc(1); var kyf = t_alloc(kN);
+    var kqx = t_alloc(kK); var ksi = t_alloc(1); var kyi = t_alloc(kN);
+    rng_seed(9);
+    t_randn(kx, kK, f64_from(1)); t_randn(kW, kKN, f64_div(f64_from(1), f64_from(2)));
+    var kg = bl_forward_full(kx, kW, 0, kyf, 1, kK, kN, kWq, kWe, kxe, ksf);
+    act_quant_int(kx, 1, kK, kqx, ksi);
+    ternary_matmul_free(kqx, ksi, kWq, kg, kyi, 1, kK, kN);
+    var kmx = f64_from(0); var ki = 0;
+    while (ki < kN) { var e = f64_abs(f64_sub(tget(kyi, ki), tget(kyf, ki))); if (f64_gt(e, kmx) == 1) { kmx = e; } ki = ki + 1; }
+    puts("    parity vs f64 forward (128x128): max |int - f64| = ");
+    fmt_int(f64_to(f64_mul(kmx, f64_from(1000000000000)))); puts(" e-12 (integer accumulate is exact)\n");
+    puts("    multiplies: f64 matmul = "); fmt_int(kKN); puts(" ; matmul-free inner loop = 0  (+ "); fmt_int(kN); puts(" dequant scalings)\n");
+    var kpk = alloc((kKN + 3) / 4);
+    tpack2(kWq, kKN, kpk);
+    puts("    packed ternary weights = "); fmt_int((kKN + 3) / 4); puts(" bytes (2 bits/wt) vs "); fmt_int(kKN * 8); puts(" bytes f64 = 32x smaller\n");
+    var iters = 100; var it = 0;
+    var t0 = now_ns();
+    while (it < iters) { ternary_matmul_free(kqx, ksi, kWq, kg, kyi, 1, kK, kN); it = it + 1; }
+    var t1 = now_ns(); it = 0;
+    while (it < iters) { linear_fwd(kxe, kWe, 0, kyf, 1, kK, kN); it = it + 1; }
+    var t2 = now_ns();
+    puts("    timing: branchy scalar kernel = "); fmt_int((t1 - t0) / iters); puts(" ns ; rosnet SIMD-f64 matmul = "); fmt_int((t2 - t1) / iters); puts(" ns/call\n");
+    puts("    (the wins are the eliminated multiplies + 32x memory; a branchless int-SIMD kernel is the throughput lever — next)\n");
     return 0;
 }
 

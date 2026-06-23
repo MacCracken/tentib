@@ -12,6 +12,7 @@ include "src/layers.cyr"    # rmsnorm / gelu / attention — differentiable laye
 include "src/model.cyr"     # softmax_xent / lm_* — minimal trainable ternary LM (M2)
 include "lib/akshara.cyr"   # corpus_set / gd_ld — sovereign tokenizer (M2 bite-F)
 include "src/block.cyr"     # attn_sublayer_* / tx_* — transformer block + LM (M2 bite-E/F)
+include "src/kernel.cyr"    # ternary_matmul_free / act_quant_int / tpack2 — matmul-free kernel (M3)
 
 # akshara consumer symbols (unused — we drive the pure corpus_set/gd_ld path)
 fn _putc(ch): i64 { return 0; }
@@ -624,6 +625,34 @@ fn main() {
     assert(f64_is_finite(tget(fcst, 1)) == 1, "bite-F: final CE finite");
     assert(f64_lt(tget(fcst, 1), tget(fcst, 0)) == 1, "bite-F: final CE < initial (trains on real akshara-tokenized text)");
     assert(f64_lt(tget(fcst, 1), f64_div(f64_from(1), f64_from(2))) == 1, "bite-F: final CE < 0.5 (learns the corpus; baseline ln 8 ~ 2.08)");
+
+    test_group("M3: matmul-free integer kernel reproduces the f64-latent forward (logit parity)");
+    var m3M = 2; var m3K = 4; var m3N = 3; var m3MK = m3M * m3K; var m3KN = m3K * m3N; var m3MN = m3M * m3N;
+    var m3x = t_alloc(m3MK); var m3W = t_alloc(m3KN); var m3Wq = t_alloc(m3KN); var m3We = t_alloc(m3KN);
+    var m3xe = t_alloc(m3MK); var m3sf = t_alloc(m3M); var m3yf = t_alloc(m3MN);
+    var m3qx = t_alloc(m3MK); var m3si = t_alloc(m3M); var m3yi = t_alloc(m3MN);
+    rng_seed(51);
+    t_randn(m3x, m3MK, f64_from(1));
+    t_randn(m3W, m3KN, f64_div(f64_from(1), f64_from(2)));
+    # f64 path: bl_forward_full (int8-dequant activations @ dequant ternary weights)
+    var m3g = bl_forward_full(m3x, m3W, 0, m3yf, m3M, m3K, m3N, m3Wq, m3We, m3xe, m3sf);
+    # integer path: same quantization, but integer signed-accumulate + a single dequant
+    act_quant_int(m3x, m3M, m3K, m3qx, m3si);
+    ternary_matmul_free(m3qx, m3si, m3Wq, m3g, m3yi, m3M, m3K, m3N);
+    var m3mr = f64_from(0); var m3i = 0;
+    while (m3i < m3MN) {
+        var re = bl_relerr(tget(m3yi, m3i), tget(m3yf, m3i));
+        if (f64_gt(re, m3mr) == 1) { m3mr = re; }
+        m3i = m3i + 1;
+    }
+    assert(f64_lt(m3mr, f64_div(f64_from(1), f64_from(1000000000))) == 1, "M3: integer kernel logits == f64 forward (< 1e-9; integer accumulate is exact)");
+
+    test_group("M3: 2-bit packed ternary storage round-trips (the ~1.58-bit memory payoff)");
+    var m3pk = alloc((m3KN + 3) / 4);
+    tpack2(m3Wq, m3KN, m3pk);
+    var m3ok = 1; m3i = 0;
+    while (m3i < m3KN) { if (tunpack2(m3pk, m3i) != tload(m3Wq, m3i)) { m3ok = 0; } m3i = m3i + 1; }
+    assert(m3ok == 1, "M3: tpack2/tunpack2 round-trip exact (2 bits/weight, 32x smaller than f64)");
 
     return assert_summary();
 }

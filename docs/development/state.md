@@ -5,11 +5,11 @@
 
 ## Version
 
-**0.3.0** — **M2: a ternary transformer trains from scratch**, cut 2026-06-23
-(awaiting user tag). Bites A (minimal LM) · B (RMSNorm) · C (GELU) · D (attention) ·
-E1–E3 (full block) · E4 (transformer LM trains) · F (real akshara corpus, CE → 0.11).
-Every component + the full assembly FD-gated; 80/80. Prior: **0.2.0** (M1 — BitLinear
-+ STE), **0.1.0** (M0 — ternary quantizer).
+**0.3.0** — M2 (a ternary transformer trains from scratch), released 2026-06-23.
+**M3a (the matmul-free integer inference kernel) built + gated on the 0.3.0 line,
+staged for v0.4.0**: int8 activations + ternary weights → integer signed-accumulate
+(no multiply), logit-parity < 1e-9 vs the f64 forward, 2-bit packed weights (32×).
+82/82. Prior: **0.2.0** (M1 — BitLinear + STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Toolchain
 
@@ -37,7 +37,11 @@ Every component + the full assembly FD-gated; 80/80. Prior: **0.2.0** (M1 — Bi
   multi-token LM (embed + pos → block → final RMSNorm → ternary head → softmax-CE)
   with `tx_train` (E4). Module-global scratch; each level FD-gated; the LM trains
   (CE 1.86 → 0.04 on a synthetic sequence).
-- `src/main.cyr` — demo driver (M0 quantizer + M1 BitLinear + M2 LM-trains-from-scratch).
+- `src/kernel.cyr` — **M3 matmul-free kernel**: `act_quant_int` (int8 codes) +
+  `ternary_matmul_free` (i64 signed-accumulate, no multiply, dequant) +
+  `tpack2`/`tunpack2` (2-bit packed ternary storage).
+- `src/main.cyr` — demo driver (M0 quantizer · M1 BitLinear · M2 transformer-trains ·
+  M3 matmul-free kernel).
 
 ## Tests
 
@@ -48,8 +52,9 @@ Every component + the full assembly FD-gated; 80/80. Prior: **0.2.0** (M1 — Bi
   grad vs live loss, falsifier), the **ternary-LM descent** (final CE < initial,
   argmax ≥ 6/8), **RMSNorm + GELU + attention** fwd/bwd FD gates, the **E1/E2/E3
   end-to-end dx gates** (attention sublayer, MLP sublayer, full block), the **E4a LM
-  embedding-gradient FD gate**, and the **E4b descent** (the ternary transformer
-  trains: final CE < initial, < 0.5).
+  embedding-gradient FD gate**, the **E4b descent** + **bite-F** (trains on akshara
+  text), and **M3** (matmul-free integer kernel: logit-parity < 1e-9, 2-bit pack
+  round-trip).
 - `tests/tentib.bcyr` / `.fcyr` — benchmark / fuzz stubs (no-op).
 
 ## Dependencies
@@ -67,6 +72,6 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**M3 (v0.4.0)** — the packed-ternary + int8 **matmul-free inference kernel** (where
-"no multiply" becomes a measured tok/s; logit-parity vs the f64-latent forward).
-See [`roadmap.md`](roadmap.md).
+**M3 continues toward v0.4.0**: M3a (the matmul-free integer kernel) done; next is
+**M3b** (a branchless int-SIMD kernel — the throughput lever) and **M3c** (the kernel
+through the whole trained transformer + a tok/s benchmark). See [`roadmap.md`](roadmap.md).
