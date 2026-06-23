@@ -31,9 +31,10 @@ Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
 - `src/layers.cyr` — **M2 differentiable layers**: `rmsnorm_fwd`/`bwd` (pre-norm),
   `gelu_fwd`/`bwd` (+ a `_tanh` from `f64_exp`), `attn_fwd`/`bwd` (single-head causal
   scaled-dot-product attention), each with a `*_loss` FD probe.
-- `src/block.cyr` — **M2 block assembly** (E1): `blk_init` + `attn_sublayer_fwd`/
-  `bwd`/`loss` — `RMSNorm → BitLinear Q/K/V → attention → BitLinear O → +residual`,
-  module-global scratch/caches, end-to-end dx-FD-gated.
+- `src/block.cyr` — **M2 full transformer block** (E1-E3): `blk_init(T,C,F)` +
+  `attn_sublayer_fwd`/`bwd` (E1) + `mlp_sublayer_fwd`/`bwd` (E2) + `block_fwd`/`bwd`
+  (E3, pre-norm, E1∘E2 with the rolling residual gradient). Module-global
+  scratch/caches; each level end-to-end dx-FD-gated.
 - `src/main.cyr` — demo driver (M0 quantizer + M1 BitLinear + M2 LM-trains-from-scratch).
 
 ## Tests
@@ -43,9 +44,9 @@ Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
   grad vs live loss, falsifier), the **ternary-LM descent** (final CE < initial,
-  argmax ≥ 6/8), **RMSNorm + GELU + attention** fwd/bwd FD gates, and the **E1
-  attention-sublayer end-to-end dx gate** (the assembled BitLinear-Q/K/V/O + attn +
-  residual chain).
+  argmax ≥ 6/8), **RMSNorm + GELU + attention** fwd/bwd FD gates, and the **E1/E2/E3
+  end-to-end dx gates** (attention sublayer, MLP sublayer, and the full transformer
+  block — every assembled fwd+bwd chain gradient-verified).
 - `tests/tentib.bcyr` / `.fcyr` — benchmark / fuzz stubs (no-op).
 
 ## Dependencies

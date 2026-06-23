@@ -472,7 +472,7 @@ fn main() {
 
     test_group("M2 bite-E1: attention sublayer (BitLinear Q/K/V/O + attn + residual) — end-to-end dx gate");
     var qC = 4; var qT = 3; var qTC = qT * qC; var qCC = qC * qC;
-    blk_init(qT, qC);
+    blk_init(qT, qC, 8);
     var qx = t_alloc(qTC); var qg1 = t_alloc(qC); var qW = t_alloc(4 * qCC);
     var qdx = t_alloc(qTC); var qdg1 = t_alloc(qC); var qdW = t_alloc(4 * qCC); var qdout = t_alloc(qTC);
     rng_seed(21);
@@ -500,6 +500,59 @@ fn main() {
     var qdwnz = 0; qk = 0;
     while (qk < 4 * qCC) { if (f64_gt(f64_abs(tload(qdW, qk)), bl_tol()) == 1) { qdwnz = 1; } qk = qk + 1; }
     assert(qdwnz == 1, "E1: projection weight grads nonzero (STE accumulated through the block)");
+
+    test_group("M2 bite-E2: MLP sublayer (RMSNorm + BitLinear up/GELU/down + residual) — end-to-end dx gate");
+    var u2C = 4; var u2T = 3; var u2F = 8; var u2TC = u2T * u2C; var u2CF = u2C * u2F;
+    blk_init(u2T, u2C, u2F);
+    var u2x = t_alloc(u2TC); var u2g = t_alloc(u2C); var u2W = t_alloc(2 * u2CF);
+    var u2dx = t_alloc(u2TC); var u2dg = t_alloc(u2C); var u2dW = t_alloc(2 * u2CF); var u2dout = t_alloc(u2TC);
+    rng_seed(31);
+    t_randn(u2x, u2TC, f64_from(1));
+    var u2j = 0; while (u2j < u2C) { tstore(u2g, u2j, f64_from(1)); u2j = u2j + 1; }
+    t_randn(u2W, 2 * u2CF, f64_div(f64_from(1), f64_from(2)));
+    mlp_sublayer_fwd(u2x, u2g, u2W, u2T, u2C, u2F);
+    t_copy(u2dout, mlp_out, u2TC);
+    t_zero(u2dW, 2 * u2CF); t_zero(u2dg, u2C);
+    mlp_sublayer_bwd(u2dout, u2x, u2g, u2W, u2dx, u2dg, u2dW, u2T, u2C, u2F);
+    assert(f64_is_finite(tget(u2dx, 0)) == 1, "E2: dx finite");
+    var u2mr = f64_from(0); var u2k = 0;
+    while (u2k < u2TC) {
+        var u2sv = tload(u2x, u2k);
+        tstore(u2x, u2k, f64_add(u2sv, bl_eps())); var u2lp = mlp_sublayer_loss(u2x, u2g, u2W, u2T, u2C, u2F);
+        tstore(u2x, u2k, f64_sub(u2sv, bl_eps())); var u2lm = mlp_sublayer_loss(u2x, u2g, u2W, u2T, u2C, u2F);
+        tstore(u2x, u2k, u2sv);
+        var u2re = bl_relerr(f64_div(f64_sub(u2lp, u2lm), f64_mul(f64_from(2), bl_eps())), tload(u2dx, u2k));
+        if (f64_gt(u2re, u2mr) == 1) { u2mr = u2re; }
+        u2k = u2k + 1;
+    }
+    assert(f64_lt(u2mr, bl_tol()) == 1, "E2: MLP sublayer dx == central FD (< 1e-5) — full fwd+bwd chain");
+
+    test_group("M2 bite-E3: full pre-norm block (attention + MLP sublayers) — end-to-end dx gate");
+    var u3C = 4; var u3T = 3; var u3F = 8; var u3TC = u3T * u3C; var u3CC = u3C * u3C; var u3CF = u3C * u3F;
+    blk_init(u3T, u3C, u3F);
+    var u3x = t_alloc(u3TC); var u3gns = t_alloc(2 * u3C); var u3Wa = t_alloc(4 * u3CC); var u3Wm = t_alloc(2 * u3CF);
+    var u3dx = t_alloc(u3TC); var u3dgns = t_alloc(2 * u3C); var u3dWa = t_alloc(4 * u3CC); var u3dWm = t_alloc(2 * u3CF); var u3dout = t_alloc(u3TC);
+    rng_seed(37);
+    t_randn(u3x, u3TC, f64_from(1));
+    var u3j = 0; while (u3j < 2 * u3C) { tstore(u3gns, u3j, f64_from(1)); u3j = u3j + 1; }   # g1, g2 = 1
+    t_randn(u3Wa, 4 * u3CC, f64_div(f64_from(1), f64_from(2)));
+    t_randn(u3Wm, 2 * u3CF, f64_div(f64_from(1), f64_from(2)));
+    block_fwd(u3x, u3gns, u3Wa, u3Wm, u3T, u3C, u3F);
+    t_copy(u3dout, mlp_out, u3TC);
+    t_zero(u3dWa, 4 * u3CC); t_zero(u3dWm, 2 * u3CF); t_zero(u3dgns, 2 * u3C);
+    block_bwd(u3dout, u3x, u3gns, u3Wa, u3Wm, u3dx, u3dgns, u3dWa, u3dWm, u3T, u3C, u3F);
+    assert(f64_is_finite(tget(u3dx, 0)) == 1, "E3: dx finite");
+    var u3mr = f64_from(0); var u3k = 0;
+    while (u3k < u3TC) {
+        var u3sv = tload(u3x, u3k);
+        tstore(u3x, u3k, f64_add(u3sv, bl_eps())); var u3lp = block_loss(u3x, u3gns, u3Wa, u3Wm, u3T, u3C, u3F);
+        tstore(u3x, u3k, f64_sub(u3sv, bl_eps())); var u3lm = block_loss(u3x, u3gns, u3Wa, u3Wm, u3T, u3C, u3F);
+        tstore(u3x, u3k, u3sv);
+        var u3re = bl_relerr(f64_div(f64_sub(u3lp, u3lm), f64_mul(f64_from(2), bl_eps())), tload(u3dx, u3k));
+        if (f64_gt(u3re, u3mr) == 1) { u3mr = u3re; }
+        u3k = u3k + 1;
+    }
+    assert(f64_lt(u3mr, bl_tol()) == 1, "E3: full block dx == central FD (< 1e-5) — both sublayers + residual threading");
 
     return assert_summary();
 }

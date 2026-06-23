@@ -63,10 +63,10 @@ attn11's first loss curve. Sub-bites:
   - ✅ **E1 (2026-06-23): attention sublayer** — `RMSNorm → BitLinear Q/K/V →
     causal attention → BitLinear O → +residual`, M=T whole-sequence projections;
     dx == FD over the full chain. 66/66.
-  - ⏳ **E2**: MLP sublayer (`RMSNorm → BitLinear-up → GELU → BitLinear-down →
-    +residual`), dx-FD-gated.
-  - ⏳ **E3**: full block = E1 ∘ E2 (the residual fold lives inside each sublayer
-    bwd, so the block bwd just threads `dout → dxmid → dx`), dx-FD-gated.
+  - ✅ **E2 (2026-06-23): MLP sublayer** (`RMSNorm → BitLinear-up → GELU →
+    BitLinear-down → +residual`), dx == FD. 
+  - ✅ **E3 (2026-06-23): full pre-norm block** = E1 ∘ E2; the per-sublayer residual
+    fold makes `block_bwd` thread `dout → dxmid → dx`. Whole block dx == FD. 70/70.
   - ⏳ **E4**: multi-token LM = token-embed + learned pos-embed → block → BitLinear
     head → per-position softmax-CE; train on a synthetic multi-token task until the
     loss descends (the v0.3.0 "first loss curve"). Separate ternary head (not tied).

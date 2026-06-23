@@ -19,9 +19,16 @@ var blk_rstd = 0; var blk_gam = 0;
 var blk_dctx = 0; var blk_dQ = 0; var blk_dK = 0; var blk_dV = 0; var blk_dprow = 0;
 var blk_da = 0; var blk_dnorm = 0; var blk_dxq = 0; var blk_dxk = 0; var blk_dxv = 0;
 var blk_dWeff = 0; var blk_db = 0;
+# MLP sublayer scratch/caches (Wup: C*F, Wdn: F*C; fc/gg: T*F pre/post-GELU)
+var mlp_b2 = 0; var mlp_fc = 0; var mlp_gg = 0; var mlp_branch = 0; var mlp_out = 0;
+var mlp_Wupq = 0; var mlp_Wupe = 0; var mlp_Wdnq = 0; var mlp_Wdne = 0;
+var mlp_rstd2 = 0; var mlp_gam = 0;
+var mlp_dgg = 0; var mlp_dfc = 0; var mlp_db2 = 0; var mlp_dnorm2 = 0; var mlp_dWeff = 0; var mlp_db = 0;
+# block-level (E3): the inter-sublayer residual stream
+var blk_xmid = 0; var blk_dxmid = 0;
 
-fn blk_init(T, C): i64 {
-    var TC = T * C; var CC = C * C;
+fn blk_init(T, C, F): i64 {
+    var TC = T * C; var CC = C * C; var TF = T * F; var CF = C * F;
     blk_a = t_alloc(TC); blk_Q = t_alloc(TC); blk_K = t_alloc(TC); blk_V = t_alloc(TC);
     blk_P = t_alloc(T * T); blk_ctx = t_alloc(TC); blk_attn_out = t_alloc(TC); blk_out = t_alloc(TC);
     blk_Wqq = t_alloc(CC); blk_Wqe = t_alloc(CC); blk_Wkq = t_alloc(CC); blk_Wke = t_alloc(CC);
@@ -30,6 +37,12 @@ fn blk_init(T, C): i64 {
     blk_dctx = t_alloc(TC); blk_dQ = t_alloc(TC); blk_dK = t_alloc(TC); blk_dV = t_alloc(TC); blk_dprow = t_alloc(T);
     blk_da = t_alloc(TC); blk_dnorm = t_alloc(TC); blk_dxq = t_alloc(TC); blk_dxk = t_alloc(TC); blk_dxv = t_alloc(TC);
     blk_dWeff = t_alloc(CC); blk_db = t_alloc(C);
+    mlp_b2 = t_alloc(TC); mlp_fc = t_alloc(TF); mlp_gg = t_alloc(TF); mlp_branch = t_alloc(TC); mlp_out = t_alloc(TC);
+    mlp_Wupq = t_alloc(CF); mlp_Wupe = t_alloc(CF); mlp_Wdnq = t_alloc(CF); mlp_Wdne = t_alloc(CF);
+    mlp_rstd2 = t_alloc(T); mlp_gam = t_alloc(2);
+    mlp_dgg = t_alloc(TF); mlp_dfc = t_alloc(TF); mlp_db2 = t_alloc(TC); mlp_dnorm2 = t_alloc(TC);
+    mlp_dWeff = t_alloc(CF); mlp_db = t_alloc(F);
+    blk_xmid = t_alloc(TC); blk_dxmid = t_alloc(TC);
     return 0;
 }
 
@@ -76,5 +89,67 @@ fn attn_sublayer_bwd(dout, x, g1, W, dx, dg1, dW, T, C): i64 {
     var t = 0;
     while (t < T) { rmsnorm_bwd(x + t * C * 8, g1, blk_da + t * C * 8, blk_dnorm + t * C * 8, dg1, C, load64(blk_rstd + t * 8)); t = t + 1; }
     t_copy(dx, dout, TC); t_add_into(dx, blk_dnorm, TC);
+    return 0;
+}
+
+# ---- E2: MLP sublayer (RMSNorm -> BitLinear up -> GELU -> BitLinear down -> +res) --
+# mlp_out = x + down(GELU(up(RMSNorm(x,g2)))). W is the 2*C*F arena (Wup C*F | Wdn F*C).
+
+fn mlp_sublayer_fwd(x, g2, W, T, C, F): i64 {
+    var TC = T * C; var TF = T * F; var CF = C * F;
+    var Wup = W; var Wdn = W + CF * 8;
+    var t = 0;
+    while (t < T) { store64(mlp_rstd2 + t * 8, rmsnorm_fwd(x + t * C * 8, g2, mlp_b2 + t * C * 8, C)); t = t + 1; }
+    store64(mlp_gam + 0, bl_forward_wonly(mlp_b2, Wup, 0, mlp_fc, T, C, F, mlp_Wupq, mlp_Wupe));
+    gelu_fwd(mlp_fc, mlp_gg, TF);
+    store64(mlp_gam + 8, bl_forward_wonly(mlp_gg, Wdn, 0, mlp_branch, T, F, C, mlp_Wdnq, mlp_Wdne));
+    t_copy(mlp_out, x, TC); t_add_into(mlp_out, mlp_branch, TC);
+    return 0;
+}
+
+fn mlp_sublayer_loss(x, g2, W, T, C, F): i64 {
+    mlp_sublayer_fwd(x, g2, W, T, C, F);
+    var acc = f64_from(0); var i = 0; var TC = T * C;
+    while (i < TC) { var v = load64(mlp_out + i * 8); acc = f64_add(acc, f64_mul(v, v)); i = i + 1; }
+    return f64_mul(f64_div(f64_from(1), f64_from(2)), acc);
+}
+
+fn mlp_sublayer_bwd(dout, x, g2, W, dx, dg2, dW, T, C, F): i64 {
+    var TC = T * C; var TF = T * F; var CF = C * F;
+    var Wup = W; var Wdn = W + CF * 8;
+    var dWup = dW; var dWdn = dW + CF * 8;
+    bl_backward_wonly(mlp_gg, mlp_Wdne, dout, mlp_dgg, dWdn, mlp_db, T, F, C, Wdn, load64(mlp_gam + 8), mlp_dWeff);
+    gelu_bwd(mlp_fc, mlp_dgg, mlp_dfc, TF);
+    bl_backward_wonly(mlp_b2, mlp_Wupe, mlp_dfc, mlp_db2, dWup, mlp_db, T, C, F, Wup, load64(mlp_gam + 0), mlp_dWeff);
+    var t = 0;
+    while (t < T) { rmsnorm_bwd(x + t * C * 8, g2, mlp_db2 + t * C * 8, mlp_dnorm2 + t * C * 8, dg2, C, load64(mlp_rstd2 + t * 8)); t = t + 1; }
+    t_copy(dx, dout, TC); t_add_into(dx, mlp_dnorm2, TC);
+    return 0;
+}
+
+# ---- E3: full pre-norm block = attention sublayer then MLP sublayer ----------
+# out (= mlp_out) = block(x). gns = [g1|g2] (2*C). Wa = 4*C*C attn arena, Wm = 2*C*F.
+# Each sublayer folds its own residual, so the block just threads x -> xmid -> out.
+
+fn block_fwd(x, gns, Wa, Wm, T, C, F): i64 {
+    var TC = T * C;
+    attn_sublayer_fwd(x, gns, Wa, T, C);            # blk_out = x + attn(RMSNorm(x,g1))
+    t_copy(blk_xmid, blk_out, TC);                  # xmid persists as the MLP input (for bwd)
+    mlp_sublayer_fwd(blk_xmid, gns + C * 8, Wm, T, C, F);   # mlp_out = xmid + mlp(RMSNorm(xmid,g2))
+    return 0;
+}
+
+fn block_loss(x, gns, Wa, Wm, T, C, F): i64 {
+    block_fwd(x, gns, Wa, Wm, T, C, F);
+    var acc = f64_from(0); var i = 0; var TC = T * C;
+    while (i < TC) { var v = load64(mlp_out + i * 8); acc = f64_add(acc, f64_mul(v, v)); i = i + 1; }
+    return f64_mul(f64_div(f64_from(1), f64_from(2)), acc);
+}
+
+# Reversed order (MLP was last forward). Each sublayer_bwd folds the skip internally,
+# so the block just threads dout -> dxmid -> dx. dgns=[dg1|dg2], dWa/dWm ACCUMULATE.
+fn block_bwd(dout, x, gns, Wa, Wm, dx, dgns, dWa, dWm, T, C, F): i64 {
+    mlp_sublayer_bwd(dout, blk_xmid, gns + C * 8, Wm, blk_dxmid, dgns + C * 8, dWm, T, C, F);
+    attn_sublayer_bwd(blk_dxmid, x, gns, Wa, dx, dgns, dWa, T, C);
     return 0;
 }

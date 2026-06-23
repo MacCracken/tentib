@@ -13,8 +13,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **RMSNorm** (pre-norm, the BitNet/Llama choice — no mean-subtraction; backward = LayerNorm minus the centering term, cross-checked vs attn11's `ln_bwd`).
   - **GELU** (tanh approximation, ported from attn11; `tanh` implemented from `f64_exp` since `f64_tanh` is not a builtin in this toolchain).
   - **Causal scaled-dot-product self-attention** (`attn_fwd`/`attn_bwd`) — single-head, `score = Q·K/√d`, causal softmax, value-sum; the full backward (`dQ`/`dK`/`dV` incl. the softmax-attention `P·(dP − ΣP·dP)` term) cross-checked vs attn11's `attn_core_bwd`, all three FD-gated.
-- `src/block.cyr` — transformer-block assembly. **bite-E1: the attention sublayer** — `x → RMSNorm → BitLinear Q/K/V → causal attention → BitLinear O → + residual`, multi-token (whole-sequence M=T projections), module-global scratch + caches. The full forward/backward chain is **end-to-end FD-gated** (`dx == central FD` of `½‖out‖²`, exact since the quantizers freeze under an x-perturbation — catches any wiring bug: the Q/K/V dx-sum, the residual fold, per-row RMSNorm, the four STE projections). Suite 63 → **66**.
-- **Remaining M2 bites:** E2 MLP sublayer (RMSNorm → BitLinear-up → GELU → BitLinear-down → residual) → E3 full block → E4 multi-token LM (+ positions) that trains the loss curve → akshara corpus → the v0.3.0 cut.
+- `src/block.cyr` — the **full ternary transformer block, assembled and end-to-end FD-gated** (module-global scratch + caches; suite 63 → **70**). Each level's dx gate (`dx == central FD` of `½‖out‖²`, exact since quantizers freeze under an x-perturbation) validates the entire fwd+bwd chain, catching any wiring bug:
+  - **E1 — attention sublayer**: `RMSNorm → BitLinear Q/K/V → causal attention → BitLinear O → +residual` (whole-sequence M=T projections; the three Q/K/V `dx` sum; residual fold inside the sublayer bwd).
+  - **E2 — MLP sublayer**: `RMSNorm → BitLinear up(C→F) → GELU → BitLinear down(F→C) → +residual`.
+  - **E3 — full pre-norm block** = E1 ∘ E2; the per-sublayer residual fold makes `block_bwd` just thread `dout → dxmid → dx` (the rolling residual gradient). 6 BitLinear projections + 2 RMSNorms + GELU + attention + 2 residuals, all gradient-verified.
+- **Remaining M2 bites:** E4 multi-token LM (token-embed + learned pos-embed → block → BitLinear head → per-position softmax-CE) that trains the loss curve → akshara corpus → the v0.3.0 cut.
 
 ## [0.2.0] — 2026-06-23
 
