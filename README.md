@@ -19,10 +19,10 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — M1 built (BitLinear + STE), staged for v0.2.0
+## Status — v0.2.0 (M1: BitLinear + STE)
 
-- **M0 (v0.1.0, released)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
-- **M1 (built + finite-difference-gated, 34/34)** — **BitLinear**: ternary weights
+- **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
+- **M1 (v0.2.0, finite-difference-gated, 34/34)** — **BitLinear**: ternary weights
   + int8 activations over rosnet's matmul ([`src/bitlinear.cyr`](src/bitlinear.cyr)),
   trainable via the **straight-through estimator**, every gradient FD-gated — *prove
   the surrogate, not the discontinuity* (incl. the γ-cancellation, and a falsifier

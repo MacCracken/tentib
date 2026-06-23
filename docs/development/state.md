@@ -5,8 +5,8 @@
 
 ## Version
 
-**0.1.0** released 2026-06-23 (M0). **M1 (BitLinear + STE) built + gated on the
-0.1.0 line, staged for the 0.2.0 cut** (VERSION file still 0.1.0 pending tag).
+**0.2.0** — M1 (BitLinear + STE), cut 2026-06-23 (awaiting user tag). 34/34 green.
+Prior: **0.1.0** (M0 — scaffold + ternary quantizer), 2026-06-23.
 
 ## Toolchain
 

@@ -23,7 +23,7 @@
   `ternary_quantize` (clip(round(w/γ),−1,+1)), `ternary_dot` (matmul-free
   signed-accumulate), `ref_dot` (baseline). Demo + 6/6 correctness suite.
 
-### M1 — BitLinear + the straight-through estimator (v0.2.0) — ✅ built + gated 2026-06-23 (staged for the cut)
+### M1 — BitLinear + the straight-through estimator (v0.2.0) — ✅ cut 2026-06-23
 
 - ✅ Wired `[deps.rosnet]` 0.2.0 + `[deps.tyche]` 0.1.1.
 - ✅ **BitLinear forward**: per-tensor absmean ternary weight quant + per-token
@@ -36,8 +36,7 @@
   on unsaturated entries; `dx` == FD through `Weff`; **γ-cancellation exercised at
   γ=3**; falsifiers (FD-through-quantized diverges; masked-entry surrogate FD
   nonzero); descent. Suite **34/34**. *Prove the surrogate, not the discontinuity.*
-- ⏳ Remaining for the cut: bump `VERSION`→0.2.0 + finalize the CHANGELOG 0.2.0
-  header (user tags). RMSNorm carried into M2.
+- `VERSION`→0.2.0 + CHANGELOG `[0.2.0]` cut 2026-06-23 (user tags). RMSNorm carried into M2.
 
 ### M2 — Ternary transformer trains from scratch (v0.3.0)
 
