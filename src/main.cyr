@@ -9,10 +9,15 @@ include "src/ternary.cyr"    # absmean / ternary_quantize / ternary_dot (M0)
 include "src/bitlinear.cyr"  # bl_forward_full / bl_weight_effective (M1)
 include "src/layers.cyr"     # rmsnorm / gelu / attention (M2)
 include "src/model.cyr"      # softmax_xent / lm_train — minimal trainable ternary LM (M2)
+include "lib/akshara.cyr"    # corpus_set / gd_ld — sovereign tokenizer (M2 bite-F)
 include "src/block.cyr"      # the full transformer block + tx_train (M2 bite-E)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+# akshara loader/streaming consumer symbols — unused (we drive corpus_set/gd_ld only)
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
 
 # print an f64 (i64 bits) with 2 decimals
 fn print_f2(val): i64 {
@@ -93,14 +98,23 @@ fn main() {
     puts("    final   CE = "); print_f2(tget(stats, 1)); _putc(10);
     puts("    memorized  = "); fmt_int(tget(stats, 2)); puts(" / 8 successor tokens (argmax)\n");
 
-    # ---- M2 capstone: a full ternary TRANSFORMER block LM trains a sequence ----
-    puts("\nM2  ternary transformer block (RMSNorm+attn+MLP, all-ternary linears) trains a sequence:\n");
-    var tok = t_alloc(4); var tgt = t_alloc(4);
-    store64(tok + 0, 1); store64(tok + 8, 4); store64(tok + 16, 2); store64(tok + 24, 5);
-    store64(tgt + 0, 4); store64(tgt + 8, 2); store64(tgt + 16, 5); store64(tgt + 24, 3);
+    # ---- M2 capstone (bite-F): the ternary TRANSFORMER trains on a REAL akshara corpus ----
+    puts("\nM2  ternary transformer (RMSNorm+attn+MLP, all-ternary linears) trains on akshara-tokenized text:\n");
+    # corpus = "hello world" (raw ASCII bytes; akshara byte-tokenizes it)
+    var ctext = alloc(16);
+    store8(ctext + 0, 104); store8(ctext + 1, 101); store8(ctext + 2, 108); store8(ctext + 3, 108); store8(ctext + 4, 111);
+    store8(ctext + 5, 32);
+    store8(ctext + 6, 119); store8(ctext + 7, 111); store8(ctext + 8, 114); store8(ctext + 9, 108); store8(ctext + 10, 100);
+    var cV = corpus_set(ctext, 11);          # returns vocab size (distinct bytes)
+    var cT = 11 - 1;                          # next-token: T inputs predict tokens 1..T
+    var ctok = t_alloc(cT); var ctgt = t_alloc(cT);
+    var ci = 0;
+    while (ci < cT) { store64(ctok + ci * 8, gd_ld(ci)); store64(ctgt + ci * 8, gd_ld(ci + 1)); ci = ci + 1; }
     var st2 = t_alloc(2);
-    tx_train(tok, tgt, 6, 4, 4, 8, 1500, 1, st2);   # V=6, T=4, C=4, F=8, 1500 steps
-    puts("    initial CE = "); print_f2(tget(st2, 0)); puts("  (uniform-guess baseline ln 6 ~ 1.79)\n");
+    tx_train(ctok, ctgt, cV, cT, 4, 8, 2000, 1, st2);   # C=4, F=8, 2000 steps
+    puts("    corpus = \"hello world\"  (akshara byte-tokenized: V = "); fmt_int(cV);
+    puts(" tokens, T = "); fmt_int(cT); puts(" positions)\n");
+    puts("    initial CE = "); print_f2(tget(st2, 0)); _putc(10);
     puts("    final   CE = "); print_f2(tget(st2, 1)); _putc(10);
     return 0;
 }

@@ -38,10 +38,11 @@
   nonzero); descent. Suite **34/34**. *Prove the surrogate, not the discontinuity.*
 - `VERSION`→0.2.0 + CHANGELOG `[0.2.0]` cut 2026-06-23 (user tags). RMSNorm carried into M2.
 
-### M2 — Ternary transformer trains from scratch (v0.3.0) — in progress
+### M2 — Ternary transformer trains from scratch (v0.3.0) — ✅ cut 2026-06-23
 
 `Linear → BitLinear` across attn11's block shape, FD-gated; the ternary sibling of
-attn11's first loss curve. Sub-bites:
+attn11's first loss curve. **Done — 80/80, trains on real akshara text (CE → 0.11).**
+Sub-bites:
 
 - ✅ **bite-A (2026-06-23): minimal ternary LM trains from scratch.** `src/model.cyr`
   — softmax-CE (ported from attn11) + embedding → BitLinear head → softmax-CE; SGD
@@ -72,8 +73,9 @@ attn11's first loss curve. Sub-bites:
     BitLinear head → per-position softmax-CE. **E4a** fwd/bwd end-to-end FD-gated
     (`d_tokemb`/`d_posemb == FD`); **E4b** trains: CE `1.86 → 0.04` on a synthetic
     sequence (the "first loss curve"). 76/76. **M2 core complete.**
-- ⏳ **bite-F**: wire `[deps.akshara]`, swap synthetic for a real tokenized corpus
-  (tarka 0.2.0→0.2.1 pattern) → **cut v0.3.0**.
+- ✅ **bite-F (2026-06-23): trains on a real akshara corpus.** `[deps.akshara]` 0.1.0;
+  `corpus_set`/`gd_ld` byte-tokenize `"hello world"` (V=8); the transformer trains
+  next-token, CE `2.08 → 0.11`. **v0.3.0 cut.**
 - Later refinement: swap SGD for Adam once the multi-layer landscape needs it.
 
 ### M3 — Packed-ternary + int8 matmul-free inference kernel (v0.4.0)

@@ -10,7 +10,15 @@ include "src/ternary.cyr"   # absmean / ternary_one / tload / tstore (M0 core)
 include "src/bitlinear.cyr" # bl_weight_effective / bl_forward_wonly (M1)
 include "src/layers.cyr"    # rmsnorm / gelu / attention — differentiable layers (M2)
 include "src/model.cyr"     # softmax_xent / lm_* — minimal trainable ternary LM (M2)
-include "src/block.cyr"     # attn_sublayer_* — transformer block assembly (M2 bite-E)
+include "lib/akshara.cyr"   # corpus_set / gd_ld — sovereign tokenizer (M2 bite-F)
+include "src/block.cyr"     # attn_sublayer_* / tx_* — transformer block + LM (M2 bite-E/F)
+
+# akshara consumer symbols (unused — we drive the pure corpus_set/gd_ld path)
+fn _putc(ch): i64 { return 0; }
+fn puts(s): i64 { return 0; }
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
 
 # |a-b| < 1e-9 — tolerance compare for f64 results that aren't bit-exact integers
 fn bl_close(a, b): i64 {
@@ -599,6 +607,23 @@ fn main() {
     assert(f64_is_finite(tget(w5st, 1)) == 1, "E4b: final CE finite");
     assert(f64_lt(tget(w5st, 1), tget(w5st, 0)) == 1, "E4b: final CE < initial CE (the transformer descends)");
     assert(f64_lt(tget(w5st, 1), f64_div(f64_from(1), f64_from(2))) == 1, "E4b: final CE < 0.5 (memorizes the sequence; uniform baseline ln 6 ~ 1.79)");
+
+    test_group("M2 bite-F: the ternary transformer trains on a REAL akshara-tokenized corpus");
+    var fct = alloc(16);   # "hello world" as raw ASCII bytes
+    store8(fct + 0, 104); store8(fct + 1, 101); store8(fct + 2, 108); store8(fct + 3, 108); store8(fct + 4, 111);
+    store8(fct + 5, 32);
+    store8(fct + 6, 119); store8(fct + 7, 111); store8(fct + 8, 114); store8(fct + 9, 108); store8(fct + 10, 100);
+    var fcV = corpus_set(fct, 11);
+    assert(fcV == 8, "bite-F: akshara byte-tokenizes 'hello world' -> V=8 distinct tokens");
+    var fcT = 11 - 1;
+    var fctok = t_alloc(fcT); var fctgt = t_alloc(fcT);
+    var fci = 0;
+    while (fci < fcT) { store64(fctok + fci * 8, gd_ld(fci)); store64(fctgt + fci * 8, gd_ld(fci + 1)); fci = fci + 1; }
+    var fcst = t_alloc(2);
+    tx_train(fctok, fctgt, fcV, fcT, 4, 8, 1500, 1, fcst);
+    assert(f64_is_finite(tget(fcst, 1)) == 1, "bite-F: final CE finite");
+    assert(f64_lt(tget(fcst, 1), tget(fcst, 0)) == 1, "bite-F: final CE < initial (trains on real akshara-tokenized text)");
+    assert(f64_lt(tget(fcst, 1), f64_div(f64_from(1), f64_from(2))) == 1, "bite-F: final CE < 0.5 (learns the corpus; baseline ln 8 ~ 2.08)");
 
     return assert_summary();
 }

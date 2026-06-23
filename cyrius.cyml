@@ -33,4 +33,11 @@ git = "https://github.com/MacCracken/rosnet"
 tag = "0.2.0"
 modules = ["dist/rosnet.cyr"]
 
-# [deps.akshara] tag = "0.1.0" — the shared tokenizer, lands at M2 (train-from-scratch corpus).
+# Sovereign tokenizer (अक्षर) — the shared text→token-id layer (with attn11/tarka).
+# tentib uses the pure byte-vocab path: corpus_set(text,len)->V + gd_ld(i) + g_datalen.
+# The loader/streaming consumer symbols (secure_read_file/read_stdin/file_seek) are
+# stubbed in the build units (M2 bite-F real-corpus training).
+[deps.akshara]
+git = "https://github.com/MacCracken/akshara"
+tag = "0.1.0"
+modules = ["dist/akshara.cyr"]

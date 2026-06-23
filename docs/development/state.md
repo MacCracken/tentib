@@ -5,12 +5,11 @@
 
 ## Version
 
-**0.2.0** — M1 (BitLinear + STE), cut 2026-06-23. **M2 functionally COMPLETE on the
-0.2.0 line, staged for the v0.3.0 cut**: a ternary transformer trains from scratch
-(CE 1.86 → 0.04), every component + the full assembly FD-gated. Bites A (minimal
-LM) · B (RMSNorm) · C (GELU) · D (attention) · E1–E3 (block) · E4 (transformer LM
-trains). Remaining before the cut: bite-F (real akshara corpus) — optional.
-Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
+**0.3.0** — **M2: a ternary transformer trains from scratch**, cut 2026-06-23
+(awaiting user tag). Bites A (minimal LM) · B (RMSNorm) · C (GELU) · D (attention) ·
+E1–E3 (full block) · E4 (transformer LM trains) · F (real akshara corpus, CE → 0.11).
+Every component + the full assembly FD-gated; 80/80. Prior: **0.2.0** (M1 — BitLinear
++ STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Toolchain
 
@@ -68,7 +67,6 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**M2 core done — ready to cut v0.3.0** (the ternary transformer trains from
-scratch). Optional **bite-F**: swap the synthetic sequence for a real akshara
-corpus (tarka 0.2.0→0.2.1 pattern) before or after the cut. Then **M3** — the
-packed-ternary int8 matmul-free inference kernel. See [`roadmap.md`](roadmap.md).
+**M3 (v0.4.0)** — the packed-ternary + int8 **matmul-free inference kernel** (where
+"no multiply" becomes a measured tok/s; logit-parity vs the f64-latent forward).
+See [`roadmap.md`](roadmap.md).

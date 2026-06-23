@@ -4,7 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added — M2 (in progress): a minimal ternary LM trains from scratch
+## [0.3.0] — 2026-06-23
+
+**M2 — a ternary transformer trains from scratch.** The full milestone: BitLinear
+assembled into a pre-norm transformer block (RMSNorm + causal attention + GELU-MLP,
+all six linear projections ternary), trained end-to-end via the STE on real
+akshara-tokenized text. Every component *and* the full assembly is finite-difference
+gated; the model trains (CE → ~0.1). The ternary sibling of attn11's first loss
+curve, built assembly-up in sovereign Cyrius on rosnet — no BLAS / libc / autodiff.
+
+### Added — M2: a ternary transformer trains from scratch
 - `src/model.cyr` — softmax cross-entropy (`softmax_xent_fwd`/`_bwd`, ported from attn11; rosnet has no softmax) + a minimal trainable ternary LM: token id → **full-precision** embedding row → **BitLinear head** (ternary, weight-only) → softmax-CE. SGD walks the *latent* head weight (quantized only in the forward — the BitNet shadow-weight loop) + the full-precision embedding/bias.
 - **Trains from scratch** on a synthetic successor-bigram task (`x → (x+1) mod V`): CE descends from the uniform `ln 8 ≈ 2.08` baseline to **~0.57** (2000 steps), memorizing **7/8** successors by argmax — the ternary sibling of attn11's first loss curve, at honest tiny scale (the persistent 1/8 mis-rank is the ternary capacity limit, not hidden).
 - **FD-gates** (suite 34 → **57**): softmax-CE `dlogits` == central FD; the **end-to-end** head `dW` == FD of the linearized surrogate *with the real softmax-CE gradient frozen* (the M1 STE composes with the loss); saturated entries mask to 0 *through the loss*; the **embedding gradient** == FD of the live loss (the full chain); falsifier (FD-through-the-quantized-loss diverges > 0.5).
@@ -20,7 +29,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **bite-E4: the ternary transformer LM trains from scratch — the "first loss curve."** token-embed + learned absolute pos-embed (full-precision) → the block → final RMSNorm → a *separate* ternary BitLinear head → per-position next-token softmax-CE; SGD on the latent weights + full-precision embeds/gains.
   - **E4a** — the full LM forward/backward, **end-to-end FD-gated**: `d_tokemb`/`d_posemb == FD` of the CE loss through the entire chain (embed scatter → block → final RMSNorm → head → softmax-CE).
   - **E4b** — **trains**: on a synthetic next-token sequence, CE descends `ln 6 ≈ 1.79 → ~0.04` (1500 steps) — the ternary sibling of attn11's first loss curve. Suite → **76**.
-- **M2 functionally complete** (a ternary transformer trains from scratch, FD-gated). Remaining toward the v0.3.0 cut: **bite-F** — swap the synthetic sequence for a real **akshara**-tokenized corpus (tarka 0.2.0→0.2.1 pattern).
+- **bite-F: trains on a REAL akshara-tokenized corpus.** Wired `[deps.akshara]` 0.1.0 (the shared sovereign tokenizer); `corpus_set(text,len)` byte-tokenizes `"hello world"` → V=8, `gd_ld(i)` reads the token ids, and the ternary transformer trains next-token on it: CE `ln 8 ≈ 2.08 → 0.11` (2000 steps). One tokenizer behind attn11, tarka, and tentib.
 
 ## [0.2.0] — 2026-06-23
 

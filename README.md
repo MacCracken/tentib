@@ -19,19 +19,19 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — v0.2.0 shipped; M2 in progress (57/57 gated)
+## Status — v0.3.0: a ternary transformer trains from scratch (80/80 gated)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
   matmul ([`src/bitlinear.cyr`](src/bitlinear.cyr)), trainable via the
   **straight-through estimator**, every gradient FD-gated — *prove the surrogate,
   not the discontinuity* (incl. the γ-cancellation + a falsifier).
-- **M2 in progress** — a minimal **ternary LM trains from scratch**
-  ([`src/model.cyr`](src/model.cyr)): embedding → BitLinear head → softmax-CE, SGD
-  on the latent weight. CE descends `ln 8 ≈ 2.08 → ~0.57` on a synthetic successor
-  bigram (7/8 memorized) — the ternary sibling of attn11's first loss curve. The
-  end-to-end gradient is FD-gated (the STE composes with the real loss). Next:
-  RMSNorm → MLP → attention → full block → akshara corpus (v0.3.0).
+- **M2 (v0.3.0)** — **a ternary transformer trains from scratch.** BitLinear assembled
+  into a pre-norm block — RMSNorm + causal attention + GELU-MLP, all six linear
+  projections ternary ([`src/layers.cyr`](src/layers.cyr), [`src/block.cyr`](src/block.cyr))
+  — trained end-to-end via the STE on real **akshara**-tokenized text. *Every*
+  component and the full assembly is finite-difference-gated; the model trains
+  (CE → ~0.1). The ternary sibling of attn11's first loss curve.
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39
@@ -40,15 +40,14 @@ M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39
 M1  BitLinear (ternary weights, int8 activations, matmul-free):
     ternary W = [ 1 -1 0 1 ]  gamma = 0.80   BitLinear y = [ 0.80 -1.60 ]
 
-M2  ternary LM trains from scratch (embedding -> BitLinear head -> softmax-CE):
-    initial CE = 2.07   final CE = 0.57   memorized = 7 / 8 successor tokens
+M2  ternary transformer trains on akshara-tokenized text "hello world":
+    V = 8 tokens, T = 10 positions   initial CE = 2.02   final CE = 0.11
 ```
 
-Deps: rosnet 0.2.0 + tyche 0.1.1 (akshara lands later in M2).
+Deps: rosnet 0.2.0 + tyche 0.1.1 + akshara 0.1.0 (the shared sovereign tokenizer).
 
 See [`docs/development/roadmap.md`](docs/development/roadmap.md) for the M0→v1.0
-plan (M2 a ternary transformer trained from scratch over an akshara corpus, M3 the
-packed int8 matmul-free inference kernel) and
+plan (M3 the packed int8 matmul-free inference kernel) and
 [`docs/adr/0001-tentib-scope.md`](docs/adr/0001-tentib-scope.md) for the scope +
 naming rationale.
 
