@@ -54,10 +54,15 @@ attn11's first loss curve. Sub-bites:
   ported from attn11; `f64_tanh` isn't a builtin here so `tanh` is built from
   `f64_exp` (`f64_sqrt` confirmed available). *(MLP = up/down BitLinear + GELU
   assembles at bite-E.)*
-- ⏳ **bite-D**: single self-attention head (BitLinear Q/K/V/O + scaled-dot softmax,
-  causal mask, a real context window + positions), FD-gated.
-- ⏳ **bite-E**: assemble the full transformer block; drive the multi-layer loss
-  curve on the synthetic task (the v0.3.0 "first loss curve").
+- ✅ **bite-D (2026-06-23): scaled-dot-product self-attention core** (`src/layers.cyr`
+  `attn_fwd`/`attn_bwd`) — single-head, causal, full-precision Q/K/V; the softmax-
+  attention backward (`dQ`/`dK`/`dV`) cross-checked vs attn11's `attn_core_bwd`,
+  all three FD-gated. The last *novel* op of M2.
+- ⏳ **bite-E**: assemble the full transformer block — wrap Q/K/V/O as BitLinear
+  (ternary) projections + positions, chain RMSNorm → attention → residual → RMSNorm
+  → BitLinear-MLP+GELU → residual over a multi-token sequence; drive the loss curve
+  (the v0.3.0 "first loss curve"). (All components now built + gated — this is
+  integration: the full block forward/backward + multi-token training.)
 - ⏳ **bite-F**: wire `[deps.akshara]`, swap synthetic for a real tokenized corpus
   (tarka 0.2.0→0.2.1 pattern) → **cut v0.3.0**.
 - Later refinement: swap SGD for Adam once the multi-layer landscape needs it.

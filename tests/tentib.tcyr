@@ -432,6 +432,43 @@ fn main() {
     }
     assert(f64_lt(ccmr, bl_tol()) == 1, "GELU dx == central FD (< 1e-5)");
 
+    test_group("M2 bite-D: scaled-dot-product self-attention (causal) FD gate");
+    var aT = 3; var aD = 4; var aTD = aT * aD; var aTT = aT * aT;
+    var aQ = t_alloc(aTD); var aK = t_alloc(aTD); var aV = t_alloc(aTD);
+    var aP = t_alloc(aTT); var actx = t_alloc(aTD); var adctx = t_alloc(aTD);
+    var adQ = t_alloc(aTD); var adK = t_alloc(aTD); var adV = t_alloc(aTD); var adprow = t_alloc(aT);
+    var aPscr = t_alloc(aTT); var acscr = t_alloc(aTD);
+    rng_seed(13);
+    t_randn(aQ, aTD, f64_from(1)); t_randn(aK, aTD, f64_from(1)); t_randn(aV, aTD, f64_from(1));
+    attn_fwd(aQ, aK, aV, aP, actx, aT, aD);
+    t_copy(adctx, actx, aTD);                       # dctx = ctx (loss = 1/2||ctx||^2)
+    attn_bwd(aQ, aK, aV, aP, adctx, adQ, adK, adV, adprow, aT, aD);
+    var amrq = f64_from(0); var amrk = f64_from(0); var amrv = f64_from(0); var ai = 0;
+    while (ai < aTD) {
+        var sq = tload(aQ, ai);
+        tstore(aQ, ai, f64_add(sq, bl_eps())); var lpq = attn_loss(aQ, aK, aV, aT, aD, aPscr, acscr);
+        tstore(aQ, ai, f64_sub(sq, bl_eps())); var lmq = attn_loss(aQ, aK, aV, aT, aD, aPscr, acscr);
+        tstore(aQ, ai, sq);
+        var req = bl_relerr(f64_div(f64_sub(lpq, lmq), f64_mul(f64_from(2), bl_eps())), tload(adQ, ai));
+        if (f64_gt(req, amrq) == 1) { amrq = req; }
+        var sk = tload(aK, ai);
+        tstore(aK, ai, f64_add(sk, bl_eps())); var lpk = attn_loss(aQ, aK, aV, aT, aD, aPscr, acscr);
+        tstore(aK, ai, f64_sub(sk, bl_eps())); var lmk = attn_loss(aQ, aK, aV, aT, aD, aPscr, acscr);
+        tstore(aK, ai, sk);
+        var rek = bl_relerr(f64_div(f64_sub(lpk, lmk), f64_mul(f64_from(2), bl_eps())), tload(adK, ai));
+        if (f64_gt(rek, amrk) == 1) { amrk = rek; }
+        var svv = tload(aV, ai);
+        tstore(aV, ai, f64_add(svv, bl_eps())); var lpv = attn_loss(aQ, aK, aV, aT, aD, aPscr, acscr);
+        tstore(aV, ai, f64_sub(svv, bl_eps())); var lmv = attn_loss(aQ, aK, aV, aT, aD, aPscr, acscr);
+        tstore(aV, ai, svv);
+        var rev = bl_relerr(f64_div(f64_sub(lpv, lmv), f64_mul(f64_from(2), bl_eps())), tload(adV, ai));
+        if (f64_gt(rev, amrv) == 1) { amrv = rev; }
+        ai = ai + 1;
+    }
+    assert(f64_lt(amrq, bl_tol()) == 1, "attention dQ == central FD (< 1e-5)");
+    assert(f64_lt(amrk, bl_tol()) == 1, "attention dK == central FD (< 1e-5)");
+    assert(f64_lt(amrv, bl_tol()) == 1, "attention dV == central FD (< 1e-5)");
+
     return assert_summary();
 }
 

@@ -118,3 +118,97 @@ fn gelu_loss(x, n, yscr): i64 {
     while (i < n) { var v = load64(yscr + i * 8); acc = f64_add(acc, f64_mul(v, v)); i = i + 1; }
     return f64_mul(f64_div(f64_from(1), f64_from(2)), acc);
 }
+
+# ---- single-head causal scaled-dot-product attention (M2 bite-D) -----------
+# Q,K,V are T x d (row-major, one token per row). Causal: query i attends keys
+# j = 0..i. score[i,j] = (Q[i].K[j]) / sqrt(d); P[i,:] = softmax over j<=i;
+# ctx[i] = sum_j P[i,j] V[j]. Math cross-checked vs attn11/src/attn_core_fwd/bwd
+# (single head, nh=1). P is T x T (the upper triangle stays 0).
+
+fn attn_fwd(Q, K, V, P, ctx, T, d): i64 {
+    var scale = f64_div(f64_from(1), f64_sqrt(f64_from(d)));
+    var Tsz = T * T; var z = 0;
+    while (z < Tsz) { store64(P + z * 8, f64_from(0)); z = z + 1; }
+    var i = 0;
+    while (i < T) {
+        var prow = P + i * T * 8;
+        var qb = Q + i * d * 8;
+        var j = 0;
+        while (j <= i) {                                    # raw scaled scores, j = 0..i
+            var kb = K + j * d * 8;
+            var dot = f64_from(0); var dd = 0;
+            while (dd < d) { dot = f64_add(dot, f64_mul(load64(qb + dd * 8), load64(kb + dd * 8))); dd = dd + 1; }
+            store64(prow + j * 8, f64_mul(dot, scale));
+            j = j + 1;
+        }
+        var mx = load64(prow); j = 1;                        # softmax over j = 0..i (max-subtract)
+        while (j <= i) { var s = load64(prow + j * 8); if (f64_gt(s, mx) == 1) { mx = s; } j = j + 1; }
+        var sum = f64_from(0); j = 0;
+        while (j <= i) { var e = f64_exp(f64_sub(load64(prow + j * 8), mx)); store64(prow + j * 8, e); sum = f64_add(sum, e); j = j + 1; }
+        var inv = f64_div(f64_from(1), sum); j = 0;
+        while (j <= i) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
+        var cb = ctx + i * d * 8; var c0 = 0;                # ctx[i] = sum_j P[i,j] V[j]
+        while (c0 < d) { store64(cb + c0 * 8, f64_from(0)); c0 = c0 + 1; }
+        j = 0;
+        while (j <= i) {
+            var pij = load64(prow + j * 8); var vb = V + j * d * 8; var cd = 0;
+            while (cd < d) { store64(cb + cd * 8, f64_add(load64(cb + cd * 8), f64_mul(pij, load64(vb + cd * 8)))); cd = cd + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Backward: dctx(T,d) -> dQ,dK,dV (T,d, all written fresh/zeroed inside). dprow is a
+# T-length per-row softmax-gradient scratch. P is the forward's probabilities.
+#   dP[i,j] = dctx[i].V[j] ; dV[j] += P[i,j] dctx[i]
+#   ds[i,j] = P[i,j] (dP[i,j] - sum_k P[i,k] dP[i,k])   (softmax backward)
+#   dQ[i] += scale ds[i,j] K[j] ; dK[j] += scale ds[i,j] Q[i]
+fn attn_bwd(Q, K, V, P, dctx, dQ, dK, dV, dprow, T, d): i64 {
+    var scale = f64_div(f64_from(1), f64_sqrt(f64_from(d)));
+    var Td = T * d; var z = 0;
+    while (z < Td) { store64(dQ + z * 8, f64_from(0)); store64(dK + z * 8, f64_from(0)); store64(dV + z * 8, f64_from(0)); z = z + 1; }
+    var i = 0;
+    while (i < T) {
+        var prow = P + i * T * 8;
+        var dcb = dctx + i * d * 8;
+        var j = 0;
+        while (j <= i) {                                    # dP[i,j] + dV accumulation
+            var pij = load64(prow + j * 8); var vb = V + j * d * 8; var dvb = dV + j * d * 8;
+            var dpj = f64_from(0); var dd = 0;
+            while (dd < d) {
+                var dc = load64(dcb + dd * 8);
+                dpj = f64_add(dpj, f64_mul(dc, load64(vb + dd * 8)));
+                store64(dvb + dd * 8, f64_add(load64(dvb + dd * 8), f64_mul(pij, dc)));
+                dd = dd + 1;
+            }
+            store64(dprow + j * 8, dpj);
+            j = j + 1;
+        }
+        var dotPdP = f64_from(0); j = 0;                     # sum_k P[k] dP[k]
+        while (j <= i) { dotPdP = f64_add(dotPdP, f64_mul(load64(prow + j * 8), load64(dprow + j * 8))); j = j + 1; }
+        var dqb = dQ + i * d * 8; var qb = Q + i * d * 8; j = 0;
+        while (j <= i) {
+            var ds = f64_mul(load64(prow + j * 8), f64_sub(load64(dprow + j * 8), dotPdP));
+            var sds = f64_mul(scale, ds);
+            var kb = K + j * d * 8; var dkb = dK + j * d * 8; var dd2 = 0;
+            while (dd2 < d) {
+                store64(dqb + dd2 * 8, f64_add(load64(dqb + dd2 * 8), f64_mul(sds, load64(kb + dd2 * 8))));
+                store64(dkb + dd2 * 8, f64_add(load64(dkb + dd2 * 8), f64_mul(sds, load64(qb + dd2 * 8))));
+                dd2 = dd2 + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1/2 * ||attn(Q,K,V)||^2 — the scalar the FD gate differentiates (dctx = ctx).
+fn attn_loss(Q, K, V, T, d, Pscr, cscr): i64 {
+    attn_fwd(Q, K, V, Pscr, cscr, T, d);
+    var acc = f64_from(0); var i = 0; var Td = T * d;
+    while (i < Td) { var v = load64(cscr + i * 8); acc = f64_add(acc, f64_mul(v, v)); i = i + 1; }
+    return f64_mul(f64_div(f64_from(1), f64_from(2)), acc);
+}

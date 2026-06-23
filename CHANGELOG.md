@@ -9,8 +9,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Trains from scratch** on a synthetic successor-bigram task (`x → (x+1) mod V`): CE descends from the uniform `ln 8 ≈ 2.08` baseline to **~0.57** (2000 steps), memorizing **7/8** successors by argmax — the ternary sibling of attn11's first loss curve, at honest tiny scale (the persistent 1/8 mis-rank is the ternary capacity limit, not hidden).
 - **FD-gates** (suite 34 → **57**): softmax-CE `dlogits` == central FD; the **end-to-end** head `dW` == FD of the linearized surrogate *with the real softmax-CE gradient frozen* (the M1 STE composes with the loss); saturated entries mask to 0 *through the loss*; the **embedding gradient** == FD of the live loss (the full chain); falsifier (FD-through-the-quantized-loss diverges > 0.5).
 - Embedding stays full-precision (b1.58 ternarizes only linear layers).
-- `src/layers.cyr` — differentiable transformer layers, each FD-gated standalone (suite 57 → **60**): **RMSNorm** (pre-norm, the BitNet/Llama choice — no mean-subtraction; backward = LayerNorm minus the centering term, cross-checked vs attn11's `ln_bwd`) and **GELU** (tanh approximation, ported from attn11; `tanh` implemented from `f64_exp` since `f64_tanh` is not a builtin in this toolchain).
-- **Remaining M2 bites:** self-attention → full transformer block → akshara corpus (the v0.3.0 cut).
+- `src/layers.cyr` — differentiable transformer layers, each FD-gated standalone (suite 57 → **63**):
+  - **RMSNorm** (pre-norm, the BitNet/Llama choice — no mean-subtraction; backward = LayerNorm minus the centering term, cross-checked vs attn11's `ln_bwd`).
+  - **GELU** (tanh approximation, ported from attn11; `tanh` implemented from `f64_exp` since `f64_tanh` is not a builtin in this toolchain).
+  - **Causal scaled-dot-product self-attention** (`attn_fwd`/`attn_bwd`) — single-head, `score = Q·K/√d`, causal softmax, value-sum; the full backward (`dQ`/`dK`/`dV` incl. the softmax-attention `P·(dP − ΣP·dP)` term) cross-checked vs attn11's `attn_core_bwd`, all three FD-gated.
+- **Remaining M2 bites:** assemble the full transformer block (RMSNorm → attention with BitLinear Q/K/V/O → residual → RMSNorm → BitLinear-MLP+GELU → residual, with positions) over a multi-token sequence and drive the loss curve → akshara corpus → the v0.3.0 cut.
 
 ## [0.2.0] — 2026-06-23
 

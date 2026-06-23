@@ -29,7 +29,8 @@ Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
   `bl_xent_loss` (the FD-gate's quantized-loss probe). Embedding (full-precision) →
   BitLinear head (ternary) → softmax-CE, SGD on the latent weight.
 - `src/layers.cyr` — **M2 differentiable layers**: `rmsnorm_fwd`/`bwd` (pre-norm),
-  `gelu_fwd`/`bwd` (+ a `_tanh` from `f64_exp`), each with a `*_loss` FD probe.
+  `gelu_fwd`/`bwd` (+ a `_tanh` from `f64_exp`), `attn_fwd`/`bwd` (single-head causal
+  scaled-dot-product attention), each with a `*_loss` FD probe.
 - `src/main.cyr` — demo driver (M0 quantizer + M1 BitLinear + M2 LM-trains-from-scratch).
 
 ## Tests
@@ -39,7 +40,7 @@ Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
   grad vs live loss, falsifier), the **ternary-LM descent** (final CE < initial,
-  argmax ≥ 6/8), and **RMSNorm + GELU** fwd/bwd FD gates.
+  argmax ≥ 6/8), and **RMSNorm + GELU + attention** fwd/bwd FD gates.
 - `tests/tentib.bcyr` / `.fcyr` — benchmark / fuzz stubs (no-op).
 
 ## Dependencies
