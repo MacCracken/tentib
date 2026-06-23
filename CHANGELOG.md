@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M2 (in progress): a minimal ternary LM trains from scratch
+- `src/model.cyr` — softmax cross-entropy (`softmax_xent_fwd`/`_bwd`, ported from attn11; rosnet has no softmax) + a minimal trainable ternary LM: token id → **full-precision** embedding row → **BitLinear head** (ternary, weight-only) → softmax-CE. SGD walks the *latent* head weight (quantized only in the forward — the BitNet shadow-weight loop) + the full-precision embedding/bias.
+- **Trains from scratch** on a synthetic successor-bigram task (`x → (x+1) mod V`): CE descends from the uniform `ln 8 ≈ 2.08` baseline to **~0.57** (2000 steps), memorizing **7/8** successors by argmax — the ternary sibling of attn11's first loss curve, at honest tiny scale (the persistent 1/8 mis-rank is the ternary capacity limit, not hidden).
+- **FD-gates** (suite 34 → **57**): softmax-CE `dlogits` == central FD; the **end-to-end** head `dW` == FD of the linearized surrogate *with the real softmax-CE gradient frozen* (the M1 STE composes with the loss); saturated entries mask to 0 *through the loss*; the **embedding gradient** == FD of the live loss (the full chain); falsifier (FD-through-the-quantized-loss diverges > 0.5).
+- Embedding stays full-precision (b1.58 ternarizes only linear layers). **Remaining M2 bites:** RMSNorm → GELU-MLP block → self-attention → full transformer block → akshara corpus (the v0.3.0 cut).
+
 ## [0.2.0] — 2026-06-23
 
 **M1 — BitLinear + the straight-through estimator, finite-difference-gated.** The

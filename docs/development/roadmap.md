@@ -38,12 +38,26 @@
   nonzero); descent. Suite **34/34**. *Prove the surrogate, not the discontinuity.*
 - `VERSION`→0.2.0 + CHANGELOG `[0.2.0]` cut 2026-06-23 (user tags). RMSNorm carried into M2.
 
-### M2 — Ternary transformer trains from scratch (v0.3.0)
+### M2 — Ternary transformer trains from scratch (v0.3.0) — in progress
 
-- `Linear → BitLinear` across attn11's block shape (attention + MLP), int8
-  activation path; `[deps.akshara]` for the char-LM corpus.
-- **Acceptance:** loss descends under STE training, FD-gated; the ternary sibling
-  of attn11's first loss curve. Honest small-scale quality delta vs same-size f64.
+`Linear → BitLinear` across attn11's block shape, FD-gated; the ternary sibling of
+attn11's first loss curve. Sub-bites:
+
+- ✅ **bite-A (2026-06-23): minimal ternary LM trains from scratch.** `src/model.cyr`
+  — softmax-CE (ported from attn11) + embedding → BitLinear head → softmax-CE; SGD
+  on the latent weight. CE 2.07 → ~0.57 on the synthetic successor bigram (7/8 argmax).
+  FD-gated end-to-end (head dW vs surrogate w/ the real loss dy, embedding grad vs
+  live loss, falsifier). 57/57.
+- ⏳ **bite-B**: RMSNorm (pre-norm, BitNet/Llama choice) fwd+bwd, FD-gated.
+- ⏳ **bite-C**: GELU-MLP block (two BitLinear + GELU), FD-gated. *(verify
+  `f64_tanh`/`f64_sqrt` resolve in Cyrius first.)*
+- ⏳ **bite-D**: single self-attention head (BitLinear Q/K/V/O + scaled-dot softmax,
+  causal mask, a real context window + positions), FD-gated.
+- ⏳ **bite-E**: assemble the full transformer block; drive the multi-layer loss
+  curve on the synthetic task (the v0.3.0 "first loss curve").
+- ⏳ **bite-F**: wire `[deps.akshara]`, swap synthetic for a real tokenized corpus
+  (tarka 0.2.0→0.2.1 pattern) → **cut v0.3.0**.
+- Later refinement: swap SGD for Adam once the multi-layer landscape needs it.
 
 ### M3 — Packed-ternary + int8 matmul-free inference kernel (v0.4.0)
 

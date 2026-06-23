@@ -8,6 +8,7 @@ include "lib/tyche.cyr"     # rng_* (rosnet's t_randn -> rng_normal; link dep)
 include "lib/rosnet.cyr"    # t_alloc / t_zero / linear_fwd / linear_bwd / f64_is_finite
 include "src/ternary.cyr"   # absmean / ternary_one / tload / tstore (M0 core)
 include "src/bitlinear.cyr" # bl_weight_effective / bl_forward_wonly (M1)
+include "src/model.cyr"     # softmax_xent / lm_* — minimal trainable ternary LM (M2)
 
 # |a-b| < 1e-9 — tolerance compare for f64 results that aren't bit-exact integers
 fn bl_close(a, b): i64 {
@@ -44,6 +45,22 @@ fn fd_qgrad(x, W, idx, M, K, N, Wq, Weff, yscr): i64 {
     tstore(W, idx, f64_add(sv, bl_eps())); var lp = bl_quant_loss_wonly(x, W, 0, M, K, N, Wq, Weff, yscr);
     tstore(W, idx, f64_sub(sv, bl_eps())); var lm = bl_quant_loss_wonly(x, W, 0, M, K, N, Wq, Weff, yscr);
     tstore(W, idx, sv);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
+}
+# central FD of the quantized softmax-CE loss wrt embedding entry embx[k] (EXACT — embx is smooth input)
+fn fd_emb(embx, k, W, b, tgt_buf, D, V, Wq, Weff, logits, probs): i64 {
+    var sv = load64(embx + k * 8);
+    store64(embx + k * 8, f64_add(sv, bl_eps())); var lp = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
+    store64(embx + k * 8, f64_sub(sv, bl_eps())); var lm = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
+    store64(embx + k * 8, sv);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
+}
+# central FD of the quantized softmax-CE loss wrt head weight W[idx] (FALSIFIER — round/clip flat)
+fn fd_xentw(embx, W, idx, b, tgt_buf, D, V, Wq, Weff, logits, probs): i64 {
+    var sv = load64(W + idx * 8);
+    store64(W + idx * 8, f64_add(sv, bl_eps())); var lp = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
+    store64(W + idx * 8, f64_sub(sv, bl_eps())); var lm = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
+    store64(W + idx * 8, sv);
     return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
 }
 
@@ -267,6 +284,92 @@ fn main() {
         ia = ia + 1;
     }
     assert(f64_lt(mrwa, bl_tol()) == 1, "gate: weight STE dW == FD(surrogate) with int8 activations frozen");
+
+    test_group("M2 bite-A: softmax cross-entropy FD gate (the smooth loss layer)");
+    var sM = 4; var sV = 5; var sMV = sM * sV;
+    var slog = t_alloc(sMV); var sprob = t_alloc(sMV); var sdl = t_alloc(sMV); var stgt = t_alloc(sM);
+    rng_seed(7); t_randn(slog, sMV, f64_from(1));
+    store64(stgt + 0, 2); store64(stgt + 8, 0); store64(stgt + 16, 4); store64(stgt + 24, 1);
+    softmax_xent_fwd(slog, stgt, sprob, sM, sV);
+    softmax_xent_bwd(sprob, stgt, sdl, sM, sV);
+    var smr = f64_from(0); var si = 0;
+    while (si < sMV) {
+        var o = load64(slog + si * 8);
+        store64(slog + si * 8, f64_add(o, bl_eps())); var lp = softmax_xent_fwd(slog, stgt, sprob, sM, sV);
+        store64(slog + si * 8, f64_sub(o, bl_eps())); var lm = softmax_xent_fwd(slog, stgt, sprob, sM, sV);
+        store64(slog + si * 8, o);
+        var nd = f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
+        var re5 = bl_relerr(nd, load64(sdl + si * 8));
+        if (f64_gt(re5, smr) == 1) { smr = re5; }
+        si = si + 1;
+    }
+    assert(f64_lt(smr, bl_tol()) == 1, "softmax_xent dlogits == central FD (< 1e-5)");
+
+    test_group("M2 bite-A: end-to-end gradient gate (STE head + softmax-CE loss + embedding)");
+    var eK = 4; var eV = 8; var eKV = eK * eV;     # D=4, V=8
+    var emb = t_alloc(eK); var eW = t_alloc(eKV); var eb = t_alloc(eV);
+    var elog = t_alloc(eV); var eprob = t_alloc(eV); var edl = t_alloc(eV); var edyf = t_alloc(eV);
+    var eWq = t_alloc(eKV); var eWeff = t_alloc(eKV); var escr = t_alloc(eKV);
+    var edemb = t_alloc(eK); var eGW = t_alloc(eKV); var eGb = t_alloc(eV);
+    var etgt = t_alloc(1); var eyscr = t_alloc(eV);
+    # one embedding row + a head weight (random, mid-bin under random f64 — knees are measure-zero)
+    rng_seed(11);
+    tstore(emb, 0, f64_div(f64_from(5), f64_from(10)));  tstore(emb, 1, f64_div(f64_from(0-3), f64_from(10)));
+    tstore(emb, 2, f64_div(f64_from(8), f64_from(10)));  tstore(emb, 3, f64_div(f64_from(0-6), f64_from(10)));
+    t_randn(eW, eKV, f64_div(f64_from(1), f64_from(2)));   # std 0.5 -> a spread of saturated + unsaturated
+    t_zero(eb, eV);
+    store64(etgt, 3);   # arbitrary target token
+
+    # real pipeline: forward -> softmax-CE -> dy_frozen -> STE backward
+    var eg = bl_forward_wonly(emb, eW, eb, elog, 1, eK, eV, eWq, eWeff);
+    softmax_xent_fwd(elog, etgt, eprob, 1, eV);
+    softmax_xent_bwd(eprob, etgt, edl, 1, eV);
+    t_copy(edyf, edl, eV);
+    t_zero(eGW, eKV); t_zero(eGb, eV);
+    bl_backward_wonly(emb, eWeff, edyf, edemb, eGW, eGb, 1, eK, eV, eW, eg, escr);
+
+    # dW_head gate: analytic STE dW == FD of the linearized surrogate (softmax-CE dy frozen), unsaturated only
+    var emrw = f64_from(0); var nuns = 0; var ei = 0;
+    while (ei < eKV) {
+        if (f64_lt(f64_abs(f64_div(tload(eW, ei), eg)), f64_from(1)) == 1) {
+            nuns = nuns + 1;
+            var re6 = bl_relerr(fd_wgrad(emb, eW, ei, edyf, 1, eK, eV, eyscr), tload(eGW, ei));
+            if (f64_gt(re6, emrw) == 1) { emrw = re6; }
+        } else {
+            assert(bl_close(tload(eGW, ei), f64_from(0)) == 1, "M2: saturated head dW = 0 (clip-mask through the loss)");
+        }
+        ei = ei + 1;
+    }
+    assert(f64_lt(emrw, bl_tol()) == 1, "M2: head dW == FD(STE surrogate) with softmax-CE dy frozen");
+    assert(nuns > 0, "M2: gate exercised >=1 unsaturated entry");
+
+    # embedding gradient gate: demb == FD of the live quantized softmax-CE loss wrt embx (EXACT, no STE on this path)
+    var emrx = f64_from(0); ei = 0;
+    while (ei < eK) {
+        var re7 = bl_relerr(fd_emb(emb, ei, eW, eb, etgt, eK, eV, eWq, eWeff, elog, eprob), tload(edemb, ei));
+        if (f64_gt(re7, emrx) == 1) { emrx = re7; }
+        ei = ei + 1;
+    }
+    assert(f64_lt(emrx, bl_tol()) == 1, "M2: embedding grad == FD of the live softmax-CE loss (end-to-end chain)");
+
+    # FALSIFIER: FD through the quantized softmax-CE loss wrt a head weight DIVERGES from the STE dW
+    var emrq = f64_from(0); ei = 0;
+    while (ei < eKV) {
+        if (f64_lt(f64_abs(f64_div(tload(eW, ei), eg)), f64_from(1)) == 1) {
+            var re8 = bl_relerr(fd_xentw(emb, eW, ei, eb, etgt, eK, eV, eWq, eWeff, elog, eprob), tload(eGW, ei));
+            if (f64_gt(re8, emrq) == 1) { emrq = re8; }
+        }
+        ei = ei + 1;
+    }
+    assert(f64_gt(emrq, f64_div(f64_from(1), f64_from(2))) == 1, "M2 falsifier: FD-through-quantized-loss diverges (>0.5) — STE surrogate required");
+
+    test_group("M2 bite-A: the ternary LM trains from scratch (SGD descent)");
+    var tstats = t_alloc(3);
+    lm_train(8, 4, 1000, 1, tstats);   # V=8, D=4, 1000 SGD steps on the successor bigram
+    assert(f64_is_finite(tget(tstats, 1)) == 1, "train: final CE finite");
+    assert(f64_lt(tget(tstats, 1), tget(tstats, 0)) == 1, "train: final CE < initial CE (descent)");
+    assert(f64_lt(tget(tstats, 1), f64_div(f64_from(3), f64_from(2))) == 1, "train: final CE < 1.5 (well below uniform ln 8 ~ 2.08)");
+    assert(tget(tstats, 2) >= 6, "train: argmax memorizes >= 6/8 successor tokens");
 
     return assert_summary();
 }

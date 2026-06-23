@@ -1,0 +1,154 @@
+# tentib — minimal trainable ternary LM (M2 bite-A).
+#
+# token id -> embedding row (FULL-PRECISION f64 table) -> BitLinear head (TERNARY,
+# weight-only) -> softmax cross-entropy. Trains from scratch by SGD on the LATENT
+# (full-precision shadow) head weight + the embedding, the head quantized only in
+# the forward (the BitNet latent-weight training loop): you train a full-precision
+# shadow weight and quantize it in the forward; the STE routes the gradient back to
+# the shadow. Proves a ternary-weight model learns end-to-end via the M1 STE.
+#
+# Gradient provenance: the ONLY STE seam is the head weight (dW_head, clip-masked,
+# no-gamma — see bitlinear.cyr). The loss gradient (dlogits), the embedding gradient
+# (demb), the bias, and the embedding-table scatter are ALL exact full-precision.
+# Embeddings stay full-precision: BitNet b1.58 ternarizes ONLY linear layers.
+#
+# softmax_xent_fwd/bwd are PORTED from attn11/src/ops.cyr (rosnet has no softmax).
+# Depends, in the includer's scope and IN ORDER: src/ternary.cyr + lib/rosnet.cyr
+# + src/bitlinear.cyr. Self-includes nothing.
+
+# ---- softmax cross-entropy (ported from attn11 ops.cyr:217/254) ------------
+
+# Forward: per row, max-subtract softmax into probs(M*V); returns mean NLL over M.
+# targets(M) are RAW i64 class indices (load64, used as offset tgt*8) — NOT f64.
+fn softmax_xent_fwd(logits, targets, probs, M, V): i64 {
+    var total = f64_from(0);
+    var m = 0;
+    while (m < M) {
+        var row = logits + m * V * 8;
+        var prow = probs + m * V * 8;
+        var mx = load64(row);
+        var i = 1;
+        while (i < V) { var lv = load64(row + i * 8); if (f64_gt(lv, mx) == 1) { mx = lv; } i = i + 1; }
+        var sum = f64_from(0);
+        i = 0;
+        while (i < V) {
+            var e = f64_exp(f64_sub(load64(row + i * 8), mx));
+            store64(prow + i * 8, e);
+            sum = f64_add(sum, e);
+            i = i + 1;
+        }
+        var inv = f64_div(f64_from(1), sum);
+        i = 0;
+        while (i < V) { store64(prow + i * 8, f64_mul(load64(prow + i * 8), inv)); i = i + 1; }
+        var tgt = load64(targets + m * 8);
+        total = f64_sub(total, f64_ln(load64(prow + tgt * 8)));
+        m = m + 1;
+    }
+    return f64_div(total, f64_from(M));
+}
+
+# Backward: dlogits(M*V) = (probs - onehot(targets)) / M. Consumes normalized probs.
+fn softmax_xent_bwd(probs, targets, dlogits, M, V): i64 {
+    var invM = f64_div(f64_from(1), f64_from(M));
+    var m = 0;
+    while (m < M) {
+        var tgt = load64(targets + m * 8);
+        var i = 0;
+        while (i < V) {
+            var g = load64(probs + (m * V + i) * 8);
+            if (i == tgt) { g = f64_sub(g, f64_from(1)); }
+            store64(dlogits + (m * V + i) * 8, f64_mul(g, invM));
+            i = i + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# Quantized softmax-CE loss as a function of (embx, W_head): the full forward
+# (W re-quantized live) + softmax cross-entropy. Used by the FD gates — FD over an
+# embedding entry is EXACT (embx is the smooth input), FD over a head weight is the
+# FALSIFIER (round/clip is flat between steps → diverges from the STE).
+fn bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs): i64 {
+    bl_forward_wonly(embx, W, b, logits, 1, D, V, Wq, Weff);
+    return softmax_xent_fwd(logits, tgt_buf, probs, 1, V);
+}
+
+# ---- minimal ternary LM (embedding + BitLinear head) -----------------------
+
+# init: full-precision embedding + latent head ~ N(0, 0.1); zero bias.
+fn lm_init(E, W_head, b_head, V, D, seed): i64 {
+    rng_seed(seed);
+    var std = f64_div(f64_from(1), f64_from(10));
+    t_randn(E, V * D, std);
+    t_randn(W_head, D * V, std);
+    t_zero(b_head, V);
+    return 0;
+}
+
+# mean cross-entropy over the whole alphabet on the successor bigram tgt=(x+1)%V.
+fn lm_eval_sweep(E, W_head, b_head, V, D, logits, probs, tgt_buf, Wq, Weff): i64 {
+    var acc = f64_from(0);
+    var x = 0;
+    while (x < V) {
+        store64(tgt_buf, (x + 1) % V);
+        bl_forward_wonly(E + x * D * 8, W_head, b_head, logits, 1, D, V, Wq, Weff);
+        acc = f64_add(acc, softmax_xent_fwd(logits, tgt_buf, probs, 1, V));
+        x = x + 1;
+    }
+    return f64_div(acc, f64_from(V));
+}
+
+# count tokens whose argmax prediction == the true successor (memorization metric).
+fn lm_correct(E, W_head, b_head, V, D, logits, probs, tgt_buf, Wq, Weff): i64 {
+    var n = 0;
+    var x = 0;
+    while (x < V) {
+        bl_forward_wonly(E + x * D * 8, W_head, b_head, logits, 1, D, V, Wq, Weff);
+        var best = 0; var bestv = load64(logits);
+        var i = 1;
+        while (i < V) { var lv = load64(logits + i * 8); if (f64_gt(lv, bestv) == 1) { bestv = lv; best = i; } i = i + 1; }
+        if (best == ((x + 1) % V)) { n = n + 1; }
+        x = x + 1;
+    }
+    return n;
+}
+
+# Train the ternary LM by SGD for `steps` over the full V-token sweep each step.
+# Writes stats[0]=loss_initial, stats[1]=loss_final, stats[2]=argmax-correct (i64).
+fn lm_train(V, D, steps, seed, stats): i64 {
+    var VD = V * D; var DV = D * V;
+    var E = t_alloc(VD); var W_head = t_alloc(DV); var b_head = t_alloc(V);
+    var GE = t_alloc(VD); var GW = t_alloc(DV); var Gb = t_alloc(V);
+    var logits = t_alloc(V); var probs = t_alloc(V); var dlogits = t_alloc(V);
+    var demb = t_alloc(D); var Wq = t_alloc(DV); var Weff = t_alloc(DV); var scr = t_alloc(DV);
+    var tgt_buf = t_alloc(1);
+
+    lm_init(E, W_head, b_head, V, D, seed);
+    store64(stats + 0, lm_eval_sweep(E, W_head, b_head, V, D, logits, probs, tgt_buf, Wq, Weff));
+
+    var neg_lr = f64_div(f64_from(0 - 1), f64_from(10));   # -0.1
+    var invV = f64_div(f64_from(1), f64_from(V));
+    var s = 0;
+    while (s < steps) {
+        t_zero(GE, VD); t_zero(GW, DV); t_zero(Gb, V);
+        var x = 0;
+        while (x < V) {
+            store64(tgt_buf, (x + 1) % V);
+            var g = bl_forward_wonly(E + x * D * 8, W_head, b_head, logits, 1, D, V, Wq, Weff);
+            softmax_xent_fwd(logits, tgt_buf, probs, 1, V);
+            softmax_xent_bwd(probs, tgt_buf, dlogits, 1, V);
+            bl_backward_wonly(E + x * D * 8, Weff, dlogits, demb, GW, Gb, 1, D, V, W_head, g, scr);
+            t_add_into(GE + x * D * 8, demb, D);
+            x = x + 1;
+        }
+        t_scale(GE, VD, invV); t_scale(GW, DV, invV); t_scale(Gb, V, invV);
+        t_axpy(W_head, GW, neg_lr, DV);     # SGD on the LATENT head weight (re-quantized next fwd)
+        t_axpy(E, GE, neg_lr, VD);          # full-precision embedding
+        t_axpy(b_head, Gb, neg_lr, V);      # full-precision bias
+        s = s + 1;
+    }
+    store64(stats + 8, lm_eval_sweep(E, W_head, b_head, V, D, logits, probs, tgt_buf, Wq, Weff));
+    store64(stats + 16, lm_correct(E, W_head, b_head, V, D, logits, probs, tgt_buf, Wq, Weff));
+    return 0;
+}

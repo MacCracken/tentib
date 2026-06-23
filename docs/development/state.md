@@ -5,8 +5,10 @@
 
 ## Version
 
-**0.2.0** — M1 (BitLinear + STE), cut 2026-06-23 (awaiting user tag). 34/34 green.
-Prior: **0.1.0** (M0 — scaffold + ternary quantizer), 2026-06-23.
+**0.2.0** — M1 (BitLinear + STE), cut 2026-06-23. **M2 bite-A (minimal ternary LM
+trains from scratch) built + gated on the 0.2.0 line, staged for the v0.3.0 cut**
+(v0.3.0 = the full ternary transformer; bite-A is its first sub-bite).
+Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
 
 ## Toolchain
 
@@ -22,13 +24,20 @@ Prior: **0.1.0** (M0 — scaffold + ternary quantizer), 2026-06-23.
   STE backward `bl_backward_wonly` + `bl_ste_mask_w`/`bl_ste_mask_x` (dW no-γ-factor
   clip-mask, dx through Weff); FD-gate losses `bl_surr_lin_loss`/`bl_loss_of_x`/
   `bl_quant_loss_wonly`.
-- `src/main.cyr` — demo driver (M0 quantizer + an M1 BitLinear layer).
+- `src/model.cyr` — **M2 ternary LM**: `softmax_xent_fwd`/`_bwd` (ported from
+  attn11), `lm_init`/`lm_forward`/`lm_train`/`lm_eval_sweep`/`lm_correct`, and
+  `bl_xent_loss` (the FD-gate's quantized-loss probe). Embedding (full-precision) →
+  BitLinear head (ternary) → softmax-CE, SGD on the latent weight.
+- `src/main.cyr` — demo driver (M0 quantizer + M1 BitLinear + M2 LM-trains-from-scratch).
 
 ## Tests
 
-- `tests/tentib.tcyr` — **34/34** green: rosnet smoke, M0 quantization (6),
-  BitLinear forward, the **finite-difference STE gate** (dW vs surrogate, dx vs
-  Weff, γ-cancellation @ γ=3, two falsifiers, descent), int8 activation quant.
+- `tests/tentib.tcyr` — **57/57** green: rosnet smoke, M0 quantization, BitLinear
+  forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
+  falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
+  **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
+  grad vs live loss, falsifier), and the **ternary-LM descent** (final CE < initial,
+  argmax ≥ 6/8).
 - `tests/tentib.bcyr` / `.fcyr` — benchmark / fuzz stubs (no-op).
 
 ## Dependencies
@@ -46,5 +55,6 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-Cut **v0.2.0** (M1). Then **M2** — a ternary transformer that trains from scratch
-over an akshara corpus (loss descends, FD-gated). See [`roadmap.md`](roadmap.md).
+**M2 continues** toward the full ternary transformer (v0.3.0). bite-A (minimal LM
+trains from scratch) done; next bites: **RMSNorm → GELU-MLP block → self-attention
+→ full transformer block → akshara corpus**. See [`roadmap.md`](roadmap.md).
