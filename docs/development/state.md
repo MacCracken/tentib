@@ -87,5 +87,6 @@ integer SIMD (typed `iNxM` vectors + int8/16/32 ops); the proposal is filed at
 [`proposals/2026-06-23-cyrius-integer-simd.md`](proposals/2026-06-23-cyrius-integer-simd.md)
 (+ the arity-check issue at [`issues/2026-06-23-cyrius-call-arity-no-check.md`](issues/2026-06-23-cyrius-call-arity-no-check.md)).
 Until then the scalar matmul-free kernel (multiply-free + branchless + 32× memory) is
-the shipped surface. Then **M4** (allocation-clean + API freeze + benchmarks → v1.0).
-See [`roadmap.md`](roadmap.md).
+the shipped surface. Then the SemVer path to 1.0: **0.5.0** benchmarks · **0.6.0**
+alloc-clean + API freeze + `docs/api.md` · **0.7.0** consumer readiness · **0.8.0**
+security audit · **1.0.0**. Full per-version scope + acceptance in [`roadmap.md`](roadmap.md).
