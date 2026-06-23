@@ -58,11 +58,18 @@ attn11's first loss curve. Sub-bites:
   `attn_fwd`/`attn_bwd`) — single-head, causal, full-precision Q/K/V; the softmax-
   attention backward (`dQ`/`dK`/`dV`) cross-checked vs attn11's `attn_core_bwd`,
   all three FD-gated. The last *novel* op of M2.
-- ⏳ **bite-E**: assemble the full transformer block — wrap Q/K/V/O as BitLinear
-  (ternary) projections + positions, chain RMSNorm → attention → residual → RMSNorm
-  → BitLinear-MLP+GELU → residual over a multi-token sequence; drive the loss curve
-  (the v0.3.0 "first loss curve"). (All components now built + gated — this is
-  integration: the full block forward/backward + multi-token training.)
+- **bite-E**: assemble the full transformer block over a multi-token sequence
+  (`src/block.cyr`, module-global scratch). Each step end-to-end dx-FD-gated.
+  - ✅ **E1 (2026-06-23): attention sublayer** — `RMSNorm → BitLinear Q/K/V →
+    causal attention → BitLinear O → +residual`, M=T whole-sequence projections;
+    dx == FD over the full chain. 66/66.
+  - ⏳ **E2**: MLP sublayer (`RMSNorm → BitLinear-up → GELU → BitLinear-down →
+    +residual`), dx-FD-gated.
+  - ⏳ **E3**: full block = E1 ∘ E2 (the residual fold lives inside each sublayer
+    bwd, so the block bwd just threads `dout → dxmid → dx`), dx-FD-gated.
+  - ⏳ **E4**: multi-token LM = token-embed + learned pos-embed → block → BitLinear
+    head → per-position softmax-CE; train on a synthetic multi-token task until the
+    loss descends (the v0.3.0 "first loss curve"). Separate ternary head (not tied).
 - ⏳ **bite-F**: wire `[deps.akshara]`, swap synthetic for a real tokenized corpus
   (tarka 0.2.0→0.2.1 pattern) → **cut v0.3.0**.
 - Later refinement: swap SGD for Adam once the multi-layer landscape needs it.

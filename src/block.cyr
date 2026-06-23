@@ -1,0 +1,80 @@
+# tentib — transformer block assembly (M2 bite-E). Composes the FD-gated components
+# (BitLinear STE, RMSNorm, GELU, attention) into a pre-norm block. E1 = the attention
+# sublayer (BitLinear Q/K/V/O around the bare attn core + pre-norm + residual);
+# E2 (MLP sublayer), E3 (full block), E4 (multi-token LM) follow.
+#
+# Scratch + forward caches are MODULE-GLOBAL (attn11 pattern), allocated once by
+# blk_init(T,C) — this keeps the fwd/bwd signatures small and avoids per-call
+# allocation (the bump allocator never frees, so FD-gate re-calls must reuse).
+# Depends (includer order): ternary + bitlinear + layers in scope.
+#
+# Single head: head dim d = C, so P is T*T and Q/K/V/ctx are each T*C. The 4
+# projection weights are passed as one contiguous arena W (4*C*C): Wq|Wk|Wv|Wo.
+
+var blk_a = 0; var blk_Q = 0; var blk_K = 0; var blk_V = 0;
+var blk_P = 0; var blk_ctx = 0; var blk_attn_out = 0; var blk_out = 0;
+var blk_Wqq = 0; var blk_Wqe = 0; var blk_Wkq = 0; var blk_Wke = 0;
+var blk_Wvq = 0; var blk_Wve = 0; var blk_Woq = 0; var blk_Woe = 0;
+var blk_rstd = 0; var blk_gam = 0;
+var blk_dctx = 0; var blk_dQ = 0; var blk_dK = 0; var blk_dV = 0; var blk_dprow = 0;
+var blk_da = 0; var blk_dnorm = 0; var blk_dxq = 0; var blk_dxk = 0; var blk_dxv = 0;
+var blk_dWeff = 0; var blk_db = 0;
+
+fn blk_init(T, C): i64 {
+    var TC = T * C; var CC = C * C;
+    blk_a = t_alloc(TC); blk_Q = t_alloc(TC); blk_K = t_alloc(TC); blk_V = t_alloc(TC);
+    blk_P = t_alloc(T * T); blk_ctx = t_alloc(TC); blk_attn_out = t_alloc(TC); blk_out = t_alloc(TC);
+    blk_Wqq = t_alloc(CC); blk_Wqe = t_alloc(CC); blk_Wkq = t_alloc(CC); blk_Wke = t_alloc(CC);
+    blk_Wvq = t_alloc(CC); blk_Wve = t_alloc(CC); blk_Woq = t_alloc(CC); blk_Woe = t_alloc(CC);
+    blk_rstd = t_alloc(T); blk_gam = t_alloc(4);
+    blk_dctx = t_alloc(TC); blk_dQ = t_alloc(TC); blk_dK = t_alloc(TC); blk_dV = t_alloc(TC); blk_dprow = t_alloc(T);
+    blk_da = t_alloc(TC); blk_dnorm = t_alloc(TC); blk_dxq = t_alloc(TC); blk_dxk = t_alloc(TC); blk_dxv = t_alloc(TC);
+    blk_dWeff = t_alloc(CC); blk_db = t_alloc(C);
+    return 0;
+}
+
+# Attention sublayer forward: blk_out = x + Oproj(attn(Qproj(a),Kproj(a),Vproj(a))),
+# a = RMSNorm(x, g1). W is the 4*C*C weight arena (Wq|Wk|Wv|Wo). Caches everything
+# the backward needs in module globals (blk_a/Q/K/V/P/ctx, the 4 Weff, blk_gam, blk_rstd).
+fn attn_sublayer_fwd(x, g1, W, T, C): i64 {
+    var TC = T * C; var CC = C * C;
+    var Wq = W; var Wk = W + CC * 8; var Wv = W + 2 * CC * 8; var Wo = W + 3 * CC * 8;
+    var t = 0;
+    while (t < T) { store64(blk_rstd + t * 8, rmsnorm_fwd(x + t * C * 8, g1, blk_a + t * C * 8, C)); t = t + 1; }
+    store64(blk_gam + 0,  bl_forward_wonly(blk_a, Wq, 0, blk_Q, T, C, C, blk_Wqq, blk_Wqe));
+    store64(blk_gam + 8,  bl_forward_wonly(blk_a, Wk, 0, blk_K, T, C, C, blk_Wkq, blk_Wke));
+    store64(blk_gam + 16, bl_forward_wonly(blk_a, Wv, 0, blk_V, T, C, C, blk_Wvq, blk_Wve));
+    attn_fwd(blk_Q, blk_K, blk_V, blk_P, blk_ctx, T, C);
+    store64(blk_gam + 24, bl_forward_wonly(blk_ctx, Wo, 0, blk_attn_out, T, C, C, blk_Woq, blk_Woe));
+    t_copy(blk_out, x, TC); t_add_into(blk_out, blk_attn_out, TC);
+    return 0;
+}
+
+# 1/2 ||blk_out||^2 — smooth in x (every quantizer is frozen under an x-perturbation:
+# round/clip fire only on W-perturbation), so central FD of this wrt x is EXACT and
+# equals the analytic dx — the end-to-end gate over the whole fwd+bwd chain.
+fn attn_sublayer_loss(x, g1, W, T, C): i64 {
+    attn_sublayer_fwd(x, g1, W, T, C);
+    var acc = f64_from(0); var i = 0; var TC = T * C;
+    while (i < TC) { var v = load64(blk_out + i * 8); acc = f64_add(acc, f64_mul(v, v)); i = i + 1; }
+    return f64_mul(f64_div(f64_from(1), f64_from(2)), acc);
+}
+
+# Attention sublayer backward. dout = d(blk_out). dW is the 4*C*C grad arena (ACCUMULATES,
+# STE); dg1 ACCUMULATES; dx fresh = dout (skip) + d(RMSNorm-through-branch). Caller zeroes
+# dW + dg1 once per step. Uses the forward's module-global caches.
+fn attn_sublayer_bwd(dout, x, g1, W, dx, dg1, dW, T, C): i64 {
+    var TC = T * C; var CC = C * C;
+    var Wq = W; var Wk = W + CC * 8; var Wv = W + 2 * CC * 8; var Wo = W + 3 * CC * 8;
+    var dWq = dW; var dWk = dW + CC * 8; var dWv = dW + 2 * CC * 8; var dWo = dW + 3 * CC * 8;
+    bl_backward_wonly(blk_ctx, blk_Woe, dout, blk_dctx, dWo, blk_db, T, C, C, Wo, load64(blk_gam + 24), blk_dWeff);
+    attn_bwd(blk_Q, blk_K, blk_V, blk_P, blk_dctx, blk_dQ, blk_dK, blk_dV, blk_dprow, T, C);
+    bl_backward_wonly(blk_a, blk_Wqe, blk_dQ, blk_dxq, dWq, blk_db, T, C, C, Wq, load64(blk_gam + 0), blk_dWeff);
+    bl_backward_wonly(blk_a, blk_Wke, blk_dK, blk_dxk, dWk, blk_db, T, C, C, Wk, load64(blk_gam + 8), blk_dWeff);
+    bl_backward_wonly(blk_a, blk_Wve, blk_dV, blk_dxv, dWv, blk_db, T, C, C, Wv, load64(blk_gam + 16), blk_dWeff);
+    t_copy(blk_da, blk_dxq, TC); t_add_into(blk_da, blk_dxk, TC); t_add_into(blk_da, blk_dxv, TC);
+    var t = 0;
+    while (t < T) { rmsnorm_bwd(x + t * C * 8, g1, blk_da + t * C * 8, blk_dnorm + t * C * 8, dg1, C, load64(blk_rstd + t * 8)); t = t + 1; }
+    t_copy(dx, dout, TC); t_add_into(dx, blk_dnorm, TC);
+    return 0;
+}

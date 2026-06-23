@@ -31,6 +31,9 @@ Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
 - `src/layers.cyr` — **M2 differentiable layers**: `rmsnorm_fwd`/`bwd` (pre-norm),
   `gelu_fwd`/`bwd` (+ a `_tanh` from `f64_exp`), `attn_fwd`/`bwd` (single-head causal
   scaled-dot-product attention), each with a `*_loss` FD probe.
+- `src/block.cyr` — **M2 block assembly** (E1): `blk_init` + `attn_sublayer_fwd`/
+  `bwd`/`loss` — `RMSNorm → BitLinear Q/K/V → attention → BitLinear O → +residual`,
+  module-global scratch/caches, end-to-end dx-FD-gated.
 - `src/main.cyr` — demo driver (M0 quantizer + M1 BitLinear + M2 LM-trains-from-scratch).
 
 ## Tests
@@ -40,7 +43,9 @@ Prior: **0.1.0** (M0 — scaffold + ternary quantizer).
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
   grad vs live loss, falsifier), the **ternary-LM descent** (final CE < initial,
-  argmax ≥ 6/8), and **RMSNorm + GELU + attention** fwd/bwd FD gates.
+  argmax ≥ 6/8), **RMSNorm + GELU + attention** fwd/bwd FD gates, and the **E1
+  attention-sublayer end-to-end dx gate** (the assembled BitLinear-Q/K/V/O + attn +
+  residual chain).
 - `tests/tentib.bcyr` / `.fcyr` — benchmark / fuzz stubs (no-op).
 
 ## Dependencies

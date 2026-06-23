@@ -8,8 +8,9 @@ include "lib/tyche.cyr"     # rng_* (rosnet's t_randn -> rng_normal; link dep)
 include "lib/rosnet.cyr"    # t_alloc / t_zero / linear_fwd / linear_bwd / f64_is_finite
 include "src/ternary.cyr"   # absmean / ternary_one / tload / tstore (M0 core)
 include "src/bitlinear.cyr" # bl_weight_effective / bl_forward_wonly (M1)
-include "src/layers.cyr"    # rmsnorm_fwd/bwd — differentiable layers (M2)
+include "src/layers.cyr"    # rmsnorm / gelu / attention — differentiable layers (M2)
 include "src/model.cyr"     # softmax_xent / lm_* — minimal trainable ternary LM (M2)
+include "src/block.cyr"     # attn_sublayer_* — transformer block assembly (M2 bite-E)
 
 # |a-b| < 1e-9 — tolerance compare for f64 results that aren't bit-exact integers
 fn bl_close(a, b): i64 {
@@ -468,6 +469,37 @@ fn main() {
     assert(f64_lt(amrq, bl_tol()) == 1, "attention dQ == central FD (< 1e-5)");
     assert(f64_lt(amrk, bl_tol()) == 1, "attention dK == central FD (< 1e-5)");
     assert(f64_lt(amrv, bl_tol()) == 1, "attention dV == central FD (< 1e-5)");
+
+    test_group("M2 bite-E1: attention sublayer (BitLinear Q/K/V/O + attn + residual) — end-to-end dx gate");
+    var qC = 4; var qT = 3; var qTC = qT * qC; var qCC = qC * qC;
+    blk_init(qT, qC);
+    var qx = t_alloc(qTC); var qg1 = t_alloc(qC); var qW = t_alloc(4 * qCC);
+    var qdx = t_alloc(qTC); var qdg1 = t_alloc(qC); var qdW = t_alloc(4 * qCC); var qdout = t_alloc(qTC);
+    rng_seed(21);
+    t_randn(qx, qTC, f64_from(1));
+    var qj = 0; while (qj < qC) { tstore(qg1, qj, f64_from(1)); qj = qj + 1; }    # RMSNorm gain = 1
+    t_randn(qW, 4 * qCC, f64_div(f64_from(1), f64_from(2)));                      # weights std 0.5
+    attn_sublayer_fwd(qx, qg1, qW, qT, qC);
+    t_copy(qdout, blk_out, qTC);                                                 # dout = out (loss = 1/2||out||^2)
+    t_zero(qdW, 4 * qCC); t_zero(qdg1, qC);
+    attn_sublayer_bwd(qdout, qx, qg1, qW, qdx, qdg1, qdW, qT, qC);
+    assert(f64_is_finite(tget(qdx, 0)) == 1, "E1: dx finite");
+
+    var qmr = f64_from(0); var qk = 0;
+    while (qk < qTC) {
+        var qsv = tload(qx, qk);
+        tstore(qx, qk, f64_add(qsv, bl_eps())); var qlp = attn_sublayer_loss(qx, qg1, qW, qT, qC);
+        tstore(qx, qk, f64_sub(qsv, bl_eps())); var qlm = attn_sublayer_loss(qx, qg1, qW, qT, qC);
+        tstore(qx, qk, qsv);
+        var qre = bl_relerr(f64_div(f64_sub(qlp, qlm), f64_mul(f64_from(2), bl_eps())), tload(qdx, qk));
+        if (f64_gt(qre, qmr) == 1) { qmr = qre; }
+        qk = qk + 1;
+    }
+    assert(f64_lt(qmr, bl_tol()) == 1, "E1: attention sublayer dx == central FD (< 1e-5) — full fwd+bwd chain");
+
+    var qdwnz = 0; qk = 0;
+    while (qk < 4 * qCC) { if (f64_gt(f64_abs(tload(qdW, qk)), bl_tol()) == 1) { qdwnz = 1; } qk = qk + 1; }
+    assert(qdwnz == 1, "E1: projection weight grads nonzero (STE accumulated through the block)");
 
     return assert_summary();
 }

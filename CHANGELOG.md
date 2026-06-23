@@ -13,7 +13,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **RMSNorm** (pre-norm, the BitNet/Llama choice — no mean-subtraction; backward = LayerNorm minus the centering term, cross-checked vs attn11's `ln_bwd`).
   - **GELU** (tanh approximation, ported from attn11; `tanh` implemented from `f64_exp` since `f64_tanh` is not a builtin in this toolchain).
   - **Causal scaled-dot-product self-attention** (`attn_fwd`/`attn_bwd`) — single-head, `score = Q·K/√d`, causal softmax, value-sum; the full backward (`dQ`/`dK`/`dV` incl. the softmax-attention `P·(dP − ΣP·dP)` term) cross-checked vs attn11's `attn_core_bwd`, all three FD-gated.
-- **Remaining M2 bites:** assemble the full transformer block (RMSNorm → attention with BitLinear Q/K/V/O → residual → RMSNorm → BitLinear-MLP+GELU → residual, with positions) over a multi-token sequence and drive the loss curve → akshara corpus → the v0.3.0 cut.
+- `src/block.cyr` — transformer-block assembly. **bite-E1: the attention sublayer** — `x → RMSNorm → BitLinear Q/K/V → causal attention → BitLinear O → + residual`, multi-token (whole-sequence M=T projections), module-global scratch + caches. The full forward/backward chain is **end-to-end FD-gated** (`dx == central FD` of `½‖out‖²`, exact since the quantizers freeze under an x-perturbation — catches any wiring bug: the Q/K/V dx-sum, the residual fold, per-row RMSNorm, the four STE projections). Suite 63 → **66**.
+- **Remaining M2 bites:** E2 MLP sublayer (RMSNorm → BitLinear-up → GELU → BitLinear-down → residual) → E3 full block → E4 multi-token LM (+ positions) that trains the loss curve → akshara corpus → the v0.3.0 cut.
 
 ## [0.2.0] — 2026-06-23
 
