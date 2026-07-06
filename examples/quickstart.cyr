@@ -1,0 +1,102 @@
+# tentib quickstart — the downstream-consumer path, PUBLIC API ONLY (docs/api.md):
+#
+#   1. train a tiny ternary transformer LM on akshara-tokenized text (tx_train)
+#   2. quantize + pack the trained weights ONCE (tx_int_init / tx_pack_init / tx_pack)
+#   3. serve matmul-free integer inference from the packed store (tx_fwd_packed)
+#
+# Self-checking: the packed predictions must match the scalar integer kernel's
+# (tx_fwd_q mode 0) at every position — exits non-zero on any mismatch, so running
+# this example IS a test. The eventual real consumer is hoosh/murti serving the
+# ternary model; this file is the shape of that call sequence.
+#
+# Build + run (from the repo root):
+#   cyrius build examples/quickstart.cyr build/quickstart && ./build/quickstart
+
+include "lib/tyche.cyr"      # rng_* (rosnet link dep)
+include "lib/rosnet.cyr"     # t_alloc + tensor access
+include "src/ternary.cyr"    # M0 core
+include "src/bitlinear.cyr"  # BitLinear (M1)
+include "src/layers.cyr"     # RMSNorm / GELU / attention (M2)
+include "src/model.cyr"      # softmax-CE (M2)
+include "lib/akshara.cyr"    # corpus_set / gd_ld — the sovereign tokenizer
+include "src/block.cyr"      # the transformer + tx_train (M2)
+include "src/kernel.cyr"     # integer kernels + pack-once serving (M3 / 0.4.1 / 0.7.0)
+
+fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+# akshara loader/streaming consumer symbols — unused (corpus_set/gd_ld only)
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
+
+fn main(): i64 {
+    alloc_init();
+    puts("tentib quickstart — train -> pack once -> serve integer inference\n\n");
+
+    # 1. corpus: "hello world", byte-tokenized by akshara
+    var text = alloc(16);
+    store8(text + 0, 104); store8(text + 1, 101); store8(text + 2, 108);
+    store8(text + 3, 108); store8(text + 4, 111); store8(text + 5, 32);
+    store8(text + 6, 119); store8(text + 7, 111); store8(text + 8, 114);
+    store8(text + 9, 108); store8(text + 10, 100);
+    var V = corpus_set(text, 11);                 # vocab = distinct bytes
+    var T = 10;                                   # next-token positions
+    var C = 4; var F = 8;                         # tiny config (see docs/api.md sizing)
+    var tok = t_alloc(T); var tgt = t_alloc(T);
+    var i = 0;
+    while (i < T) { store64(tok + i * 8, gd_ld(i)); store64(tgt + i * 8, gd_ld(i + 1)); i = i + 1; }
+
+    # 2. train the ternary LM (latent f64 weights, STE; ternarized each forward)
+    var stats = t_alloc(2);
+    tx_train(tok, tgt, V, T, C, F, 2000, 1, stats);
+    puts("trained: V="); fmt_int(V); puts(" T="); fmt_int(T);
+    puts("  CE "); print_f2(tget(stats, 0)); puts(" -> "); print_f2(tget(stats, 1)); _putc(10);
+
+    # 3. quantize + pack ONCE (deployment step) ...
+    tx_int_init(V, T, C, F);
+    tx_pack_init(V, T, C, F);
+    tx_pack(V, T, C, F);
+
+    # ... then serve: matmul-free integer inference from the packed store.
+    tx_fwd_packed(tok, V, T, C, F);
+    puts("packed integer serve — next-token argmax per position: ");
+    var t = 0;
+    while (t < T) { fmt_int(logits_argmax(ki_logits + t * V * 8, V)); _putc(32); t = t + 1; }
+    _putc(10);
+
+    # 4. self-check: packed serving must match the scalar integer kernel exactly.
+    var served = t_alloc(T);
+    t = 0;
+    while (t < T) { store64(served + t * 8, logits_argmax(ki_logits + t * V * 8, V)); t = t + 1; }
+    tx_fwd_q(0, tok, V, T, C, F);
+    var ok = 1;
+    t = 0;
+    while (t < T) {
+        if (logits_argmax(ki_logits + t * V * 8, V) != load64(served + t * 8)) { ok = 0; }
+        t = t + 1;
+    }
+    if (ok == 1) { puts("self-check PASS: packed serving == scalar integer kernel at all positions\n"); return 0; }
+    puts("self-check FAIL\n");
+    return 1;
+}
+
+# print an f64 (i64 bits) with 2 decimals
+fn print_f2(val): i64 {
+    if (((val >> 63) & 1) == 1) { _putc(45); val = f64_abs(val); }
+    var fl = f64_floor(val);
+    fmt_int(f64_to(fl));
+    _putc(46);
+    var frac = f64_sub(val, fl);
+    var i = 0;
+    while (i < 2) {
+        frac = f64_mul(frac, f64_from(10));
+        var d = f64_floor(frac);
+        fmt_int(f64_to(d));
+        frac = f64_sub(frac, d);
+        i = i + 1;
+    }
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

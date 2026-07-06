@@ -42,6 +42,7 @@ hide it.
 | **0.4.1** | integer-SIMD ternary kernel | the gate lifted (cyrius 6.4.6/6.4.7 int SIMD, `iv_dp8`): `ternary_matmul_free_simd` (pack-once i8 transpose + u8-offset codes + 16-lane `iv_dp8` + branchless tail) **bit-identical** to scalar and **~7.5× faster than rosnet f64-SIMD** on 128×128 (1,946 vs 14,670 ns; ~45× over branchless) — *multiply-free is also faster* met. Whole-model = mode 2. Pin 6.2.37 → 6.4.10. **90/90**. |
 | **0.5.0** | benchmarks (`docs/benchmarks.md`) | the real `tests/tentib.bcyr` harness, B-series fairness: layer-sweep SIMD advantage **grows 5.0×→18.4×** over f64-SIMD (128²→768²; lane width + i8 cache residency); whole-model **3,549 vs 2,307 tok/s** (per-call re-pack included — pack-once deployment bounded by the sweep, → 0.7.0); memory 32× measured; **honest quality delta** vs matched-size f64 attn11 (CE 0.006 vs 0.11 toy-scale; b1.58 ≥3B parity cited). **90/90**. |
 | **0.6.0** | alloc-clean + API freeze (`docs/api.md`) | the public surface settled + documented (freeze policy, not-frozen internals, conventions, output cells); allocation audit: **allocation only in `*_init` + one-shot trainers, every fwd/bwd/kernel path allocation-free**; last indirect-only coverage closed (`ref_dot`, direct `bl_forward_q` 0-vs-2, the manual `tx_sgd` quartet). No behavior change. **95/95**. |
+| **0.7.0** | consumer readiness — pack-once serving | additive: `tx_pack_init`/`tx_pack` (quantize + pack the 7 BitLinears once) + `tx_fwd_packed` (serving forward, bit-identical to modes 0/2, gated twice) → **13,472 tok/s vs 2,316 f64 (5.8×)**, 3.8× over mode 2; self-checking public-API-only `examples/quickstart.cyr` (train → pack → serve, PASS). **97/97**. |
 
 Full detail per version in [`../../CHANGELOG.md`](../../CHANGELOG.md).
 
@@ -78,15 +79,15 @@ surface with every public symbol documented + directly suite-gated (the 0.6.0
 API-freeze test group closed `ref_dot` / `bl_forward_q` / `tx_sgd`, the three
 symbols previously exercised only indirectly).
 
-### 0.7.0 — downstream-consumer readiness
+### 0.7.0 — downstream-consumer readiness  ✅ **SHIPPED 2026-07-06** (see the table above)
 
-The second-consumer pass — a clean inference entry point a server can call.
-
-- **Deliverable:** a documented, stable inference path (load latent weights → quantize +
-  pack once → integer inference) + a worked example in `docs/examples/`. The eventual real
-  consumer is **hoosh / murti** serving the ternary model; tentib provides the surface.
-- **Acceptance:** the example runs integer inference from the **public API alone** (no
-  internal-symbol reach-in) and is tested.
+The clean serving entry point landed additive to the frozen surface
+(`tx_pack_init`/`tx_pack`/`tx_fwd_packed` — quantize + pack once, then serve,
+bit-identical to the reference kernels at 5.8× the f64 path) with the worked
+example at `examples/quickstart.cyr` (repo-root `examples/` per the
+tarka/anukūlana house convention; self-checking, public API only, non-zero exit
+on mismatch — running it is the test). The eventual real consumer is
+**hoosh / murti** serving the ternary model; the surface is now theirs to call.
 
 ### 0.8.0 — security/hardening audit + CHANGELOG completeness  *[v1.0 criterion]*
 

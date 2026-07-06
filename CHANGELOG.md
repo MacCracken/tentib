@@ -4,6 +4,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-06
+
+**Downstream-consumer readiness — the pack-once deployment serving path.** The
+piece the 0.5.0 benchmarks motivated: `tx_fwd_q` re-quantizes (mode 2: + re-packs)
+every forward by reference-fairness design; a deployment packs **once** and serves.
+All additions are **additive to the 0.6.0 frozen surface**. Suite **95 → 97**.
+
+### Added — pack-once serving (`src/kernel.cyr`, public per `docs/api.md` §0.7.0)
+- **`tx_pack_init(V, T, C, F)`** — allocate the packed store (7 per-layer
+  transposed-i8 weight buffers + `wsum` tables + γs; attn Q/K/V/O, MLP up/down,
+  head).
+- **`tx_pack(V, T, C, F)`** — quantize + pack all 7 BitLinears from the live
+  `tx_*` latent weights, once (~4 ns/weight; 6.4 ms at the bench config,
+  amortized after ~3 forwards).
+- **`tx_fwd_packed(tokens, V, T, C, F)`** — the serving forward: per call only the
+  per-token activation quant runs, weights are never touched; logits → `ki_logits`.
+  **Bit-identical to `tx_fwd_q` modes 0/2** (same quantize → same pack → same
+  kernel, hoisted out of the call). Internal chain (`bl_forward_pk`,
+  `*_sublayer_pk`) stays out of the freeze like its `_q` siblings.
+
+### Benchmarks (`docs/benchmarks.md` §3 updated — same host/core/config)
+- **PACKED serving = 2,375,236 ns/fwd → 13,472 tok/s = 5.8× the f64 path**
+  (2,316 tok/s) and **3.8× mode 2** (3,580) — the whole-model number now reflects
+  the §1 layer-sweep advantage instead of per-call prep; the residual 2.4 ms is
+  dominated by the shared f64 interludes (RMSNorm/attention/GELU, kept f64 per
+  b1.58) + the T×V head.
+
+### Added — `examples/quickstart.cyr` (the worked consumer example)
+- Train a tiny ternary LM → `tx_int_init`/`tx_pack_init`/`tx_pack` once →
+  `tx_fwd_packed` serving, **public API only** (no internal-symbol reach-in),
+  **self-checking** (packed argmax must equal the scalar integer kernel's at every
+  position; non-zero exit on mismatch — running the example IS a test). Verified:
+  builds + runs + PASS. (Placed at repo-root `examples/` per the tarka/anukūlana
+  house convention; the roadmap's `docs/examples/` phrasing predates it.)
+
+### Tests (95 → 97)
+- Packed serving logits **bit-identical** to the scalar integer path on the
+  trained M3c model, and **reproduced on a second serve** from the same store
+  (serve-time read-only).
+
 ## [0.6.0] — 2026-07-06
 
 **Allocation-clean + API freeze** (`docs/api.md`, the "API frozen" v1.0 criterion).

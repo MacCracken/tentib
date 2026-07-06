@@ -114,6 +114,24 @@ The manual loop `tx_zero_grads → tx_loss → tx_bwd → tx_sgd` is public and 
 | `tx_fwd_q(mode, tokens, V, T, C, F)` | whole-model inference through all 7 BitLinears in the chosen mode; logits → `ki_logits`. Modes 0 and 2 are bit-identical; mode 1 is the f64 rounding reference | demo, suite, bench |
 | `logits_argmax(logits, V)` → i64 | argmax over one logits row (ties → first) | demo, suite |
 
+## 0.7.0 — pack-once deployment inference (`src/kernel.cyr`, additive)
+
+The consumer serving path (`tx_fwd_q` re-quantizes per call by reference-fairness
+design; a deployment packs once). Contract: call after `tx_init` (weights live)
+**and** `tx_int_init` (packing quantizes through `ki_Wq`/`ki_We`; serving
+activation-quants into `ki_q`/`ki_sx`). Worked example:
+[`examples/quickstart.cyr`](../examples/quickstart.cyr) (public-API-only,
+self-checking — running it is a test).
+
+| symbol | contract | tested by |
+|--------|----------|-----------|
+| `tx_pack_init(V, T, C, F)` | allocate the packed store (7 per-layer i8 weight buffers + `wsum` tables + γs) | suite, bench, example |
+| `tx_pack(V, T, C, F)` | quantize + pack all 7 BitLinears from the live `tx_*` latents — **once**; ~4 ns/weight | suite, bench, example |
+| `tx_fwd_packed(tokens, V, T, C, F)` | serving forward from the packed store — per call only the per-token activation quant runs, weights untouched; logits → `ki_logits`. **Bit-identical** to `tx_fwd_q` modes 0/2 (suite-gated, twice — the store is serve-time read-only) | suite, bench, example |
+
+Internal (not frozen): `bl_forward_pk`, `attn_sublayer_pk`, `mlp_sublayer_pk`,
+`pk_*` store globals.
+
 ## Documented output cells (module globals, read-only for consumers)
 
 | global | written by | contents |
@@ -127,5 +145,7 @@ The manual loop `tx_zero_grads → tx_loss → tx_bwd → tx_sgd` is public and 
 See [`benchmarks.md`](benchmarks.md): the SIMD kernel is pack-once-then-hot —
 `tsimd_pack_w` costs ~4 ns/weight once; the kernel then beats the f64-SIMD matmul
 5–18× (growing with layer size). `bl_forward_q`/`tx_fwd_q` re-quantize per call by
-design (reference fairness); the pack-once deployment entry point is the 0.7.0
-deliverable and will be additive.
+design (reference fairness); **the pack-once deployment entry point shipped in
+0.7.0 (additive)** — `tx_pack` + `tx_fwd_packed` serve the whole model at **5.8×
+the f64 path** (13,472 vs 2,316 tok/s at the bench config), the one-time pack
+amortizing after ~3 forwards.

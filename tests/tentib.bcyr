@@ -103,6 +103,7 @@ var wmV = 0; var wmT = 0; var wmC = 0; var wmF = 0; var wmtok = 0;
 fn wm_f64(): i64 { return tx_fwd(wmtok, wmV, wmT, wmC, wmF); }
 fn wm_int(): i64 { return tx_fwd_q(0, wmtok, wmV, wmT, wmC, wmF); }
 fn wm_simd(): i64 { return tx_fwd_q(2, wmtok, wmV, wmT, wmC, wmF); }
+fn wm_packed(): i64 { return tx_fwd_packed(wmtok, wmV, wmT, wmC, wmF); }
 
 fn toks_per_s(avg_ns): i64 {   # T tokens per forward
     if (avg_ns == 0) { return 0; }
@@ -125,10 +126,17 @@ fn wm_bench(V, T, C, F, seed, iters): i64 {
     var tf = timed(&wm_f64, 2, iters);
     var ti = timed(&wm_int, 2, iters);
     var ts = timed(&wm_simd, 2, iters);
-    puts("  f64 weight-only     = "); fmt_int(tf); puts(" ns/fwd  ("); fmt_int(toks_per_s(tf)); puts(" tok/s)\n");
-    puts("  integer scalar      = "); fmt_int(ti); puts(" ns/fwd  ("); fmt_int(toks_per_s(ti)); puts(" tok/s)\n");
-    puts("  integer SIMD (0.4.1)= "); fmt_int(ts); puts(" ns/fwd  ("); fmt_int(toks_per_s(ts)); puts(" tok/s)  simd-vs-f64=");
+    tx_pack_init(V, T, C, F);                     # 0.7.0: quantize + pack ONCE...
+    var tpk0 = now_ns();
+    tx_pack(V, T, C, F);
+    var tpk = now_ns() - tpk0;
+    var td = timed(&wm_packed, 2, iters);         # ...then serve
+    puts("  f64 weight-only        = "); fmt_int(tf); puts(" ns/fwd  ("); fmt_int(toks_per_s(tf)); puts(" tok/s)\n");
+    puts("  integer scalar         = "); fmt_int(ti); puts(" ns/fwd  ("); fmt_int(toks_per_s(ti)); puts(" tok/s)\n");
+    puts("  integer SIMD (0.4.1)   = "); fmt_int(ts); puts(" ns/fwd  ("); fmt_int(toks_per_s(ts)); puts(" tok/s)  simd-vs-f64=");
     f2dec(tf, ts); puts("x\n");
+    puts("  PACKED serving (0.7.0) = "); fmt_int(td); puts(" ns/fwd  ("); fmt_int(toks_per_s(td)); puts(" tok/s)  packed-vs-f64=");
+    f2dec(tf, td); puts("x   (one-time tx_pack = "); fmt_int(tpk); puts(" ns, amortized over the serve)\n");
     return 0;
 }
 

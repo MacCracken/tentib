@@ -745,6 +745,22 @@ fn main() {
     while (cii < ciTV) { if (tget(ki_logits, cii) != tget(li_int, cii)) { ci_sok = 0; } cii = cii + 1; }
     assert(ci_sok == 1, "M3d: whole-model SIMD inference (mode 2) bit-identical to the scalar integer kernel (incl. the biased head)");
 
+    test_group("0.7.0 pack-once deployment inference (tx_pack_init / tx_pack / tx_fwd_packed)");
+    # Quantize + pack the trained model ONCE, then serve — same quantize, same
+    # pack, same kernel as mode 2, hoisted out of the call => logits BIT-IDENTICAL
+    # to the scalar integer path (li_int, saved above). A second serve from the
+    # same packed store must reproduce them (the store is read-only at serve time).
+    tx_pack_init(ciV, ciT, ciC, ciF);
+    tx_pack(ciV, ciT, ciC, ciF);
+    tx_fwd_packed(citok, ciV, ciT, ciC, ciF);
+    var pk_ok = 1; cii = 0;
+    while (cii < ciTV) { if (tget(ki_logits, cii) != tget(li_int, cii)) { pk_ok = 0; } cii = cii + 1; }
+    assert(pk_ok == 1, "0.7.0: packed serving logits bit-identical to the scalar integer kernel (pack hoisted, nothing else changed)");
+    tx_fwd_packed(citok, ciV, ciT, ciC, ciF);
+    var pk_ok2 = 1; cii = 0;
+    while (cii < ciTV) { if (tget(ki_logits, cii) != tget(li_int, cii)) { pk_ok2 = 0; } cii = cii + 1; }
+    assert(pk_ok2 == 1, "0.7.0: a second serve from the same packed store reproduces the logits (store is serve-time read-only)");
+
     test_group("0.6.0 API-freeze gates: every public entry point exercised directly");
     # ref_dot — the M0 full-precision baseline dot (exact-int f64s => exact result).
     var rd_w = t_alloc(2); var rd_x = t_alloc(2);

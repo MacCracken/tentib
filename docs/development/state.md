@@ -5,14 +5,17 @@
 
 ## Version
 
-**0.6.0** — **allocation-clean + API freeze** (`docs/api.md`, a v1.0 criterion), cut
-2026-07-06 (user tags). The public surface settled + documented (tarka api.md
-pattern: freeze policy, not-frozen internals, conventions, output cells); the
-allocation audit recorded — **allocation only in `blk_init`/`tx_init`/`tx_int_init`
-+ the one-shot trainers; every forward/backward/kernel path allocation-free**; the
-last indirect-only coverage closed with three direct gates (`ref_dot`,
-`bl_forward_q` mode 0-vs-2, the manual `tx_sgd` quartet). No behavior change.
-Suite **95/95**. Prior: **0.5.0** (benchmarks — `docs/benchmarks.md` + the real
+**0.7.0** — **downstream-consumer readiness: the pack-once deployment serving
+path**, cut 2026-07-06 (user tags). Additive to the frozen surface:
+`tx_pack_init`/`tx_pack` (quantize + pack all 7 BitLinears once, ~4 ns/wt) +
+`tx_fwd_packed` (serving forward — per call only activation quant; **bit-identical**
+to `tx_fwd_q` modes 0/2, gated twice). Whole-model deployment throughput:
+**13,472 tok/s vs 2,316 f64 (5.8×)**, 3.8× over mode 2 (benchmarks.md §3 updated).
+Worked self-checking consumer example `examples/quickstart.cyr` (train → pack →
+serve, public API only, exits non-zero on mismatch — verified PASS). Suite
+**97/97**. Prior: **0.6.0** (alloc-clean + API freeze — `docs/api.md`; allocation
+only in `*_init` + one-shot trainers, every inference path allocation-free; direct
+gates for `ref_dot`/`bl_forward_q`/`tx_sgd`). Prior: **0.5.0** (benchmarks — `docs/benchmarks.md` + the real
 bcyr harness; SIMD advantage grows 5.0×→18.4× over f64-SIMD with layer size;
 whole-model 3,549 vs 2,307 tok/s; honest toy-scale quality delta vs f64 attn11
 CE 0.006 vs 0.11), **0.4.1** (the integer-SIMD ternary kernel — the toolchain gate
@@ -60,13 +63,15 @@ STE), **0.1.0** (M0 — ternary quantizer).
   `logits_argmax`. **0.4.1 SIMD kernel**: `tsimd_pack_w` (Wq [K,N] i64 → transposed
   [N,K] i8 + per-output `wsum` offset-correction) + `ternary_matmul_free_simd`
   (u8-offset codes, `iv_dp8` 16-lane inner loop, branchless tail — bit-identical,
-  exactness bounds documented in-file).
+  exactness bounds documented in-file). **0.7.0 pack-once serving**:
+  `tx_pack_init`/`tx_pack` (7-layer packed store, built once) + `tx_fwd_packed`
+  (deployment forward; internal `bl_forward_pk`/`*_sublayer_pk` chain).
 - `src/main.cyr` — demo driver (M0 quantizer · M1 BitLinear · M2 transformer-trains ·
   M3 matmul-free kernel · M3b branchless bench · M3c whole-model integer inference).
 
 ## Tests
 
-- `tests/tentib.tcyr` — **95/95** green: rosnet smoke, M0 quantization, BitLinear
+- `tests/tentib.tcyr` — **97/97** green: rosnet smoke, M0 quantization, BitLinear
   forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
@@ -80,9 +85,10 @@ STE), **0.1.0** (M0 — ternary quantizer).
   split K=20 / pure-`iv_dp8` K=32 — + whole-model mode 2 bit-identical incl. the
   biased head), **M3c** (whole-model integer inference: < 1e-9 relerr vs the
   full-quant f64 forward, finite activation-quant delta vs the trained model,
-  argmax agreement at all T), and the **0.6.0 API-freeze gates** (`ref_dot` exact,
-  `bl_forward_q` direct mode 0-vs-2 bit-identity + same γ, the manual
-  zero/loss/bwd/sgd quartet descends).
+  argmax agreement at all T), the **0.7.0 pack-once gates** (packed serving
+  bit-identical to the scalar integer path + reproduced on a second serve), and
+  the **0.6.0 API-freeze gates** (`ref_dot` exact, `bl_forward_q` direct mode
+  0-vs-2 bit-identity + same γ, the manual zero/loss/bwd/sgd quartet descends).
 - `tests/tentib.bcyr` — **the 0.5.0 benchmark harness** (drives `docs/benchmarks.md`):
   per-layer kernel sweep (branchy/branchless/SIMD-pack-once/rosnet-f64 at 128²–768²),
   prep-amortization costs, whole-model forward → tok/s (f64 / scalar-int / SIMD-int
@@ -104,10 +110,7 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**v0.6.0 cut (alloc-clean + API freeze — `docs/api.md`).** The remaining SemVer
-path to 1.0: **0.7.0** consumer readiness (the pack-once deployment inference
-entry point — load latent weights → quantize + pack once → integer inference, a
-worked example from the public API alone; §2/§3 of benchmarks.md motivate it;
-must stay **additive** to the frozen surface) · **0.8.0** security audit ·
-**1.0.0** clean cut. Full per-version scope + acceptance in
-[`roadmap.md`](roadmap.md).
+**v0.7.0 cut (consumer readiness — pack-once serving + quickstart).** The
+remaining SemVer path to 1.0: **0.8.0** security/hardening audit + CHANGELOG
+completeness · **1.0.0** clean cut (all criteria green; 5 of 6 boxes already
+ticked). Full per-version scope + acceptance in [`roadmap.md`](roadmap.md).

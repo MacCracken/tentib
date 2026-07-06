@@ -325,6 +325,109 @@ fn ternary_matmul_free_simd(qx, sx, w8t, wsum, gamma, b, y, M, K, N, xu8): i64 {
     return 0;
 }
 
+# ---- 0.7.0: pack-once deployment inference --------------------------------------
+# The consumer-facing serving path. tx_fwd_q re-quantizes (and mode 2 re-packs)
+# every forward by reference-fairness design; a deployment quantizes + packs ONCE
+# and then serves. tx_pack_init/tx_pack build a packed store for the trained
+# model's 7 BitLinears (attn Q/K/V/O + MLP up/down + head); tx_fwd_packed serves
+# forwards from it — per call only the per-token activation quant runs, the
+# weights are never touched again. Bit-identical to tx_fwd_q modes 0/2 (same
+# quantize -> same pack -> same kernel, just hoisted out of the call).
+# Contract: call AFTER tx_init (weights live) + tx_int_init (ki_* scratch —
+# tx_pack quantizes through ki_Wq/ki_We; serving quantizes acts into ki_q/ki_sx).
+# Layer index: 0..3 = attn Q/K/V/O (K=C,N=C) · 4 = up (C,F) · 5 = down (F,C) ·
+# 6 = head (C,V; carries tx_bhead).
+
+var pk_w8t = 0; var pk_wsum = 0; var pk_gamma = 0; var pk_ready = 0;
+
+# Allocate the packed store (pointer tables + per-layer buffers).
+fn tx_pack_init(V, T, C, F): i64 {
+    pk_w8t = t_alloc(7); pk_wsum = t_alloc(7); pk_gamma = t_alloc(7);
+    var i = 0;
+    while (i < 7) {
+        var K = C; var N = C;
+        if (i == 4) { N = F; }
+        if (i == 5) { K = F; N = C; }
+        if (i == 6) { N = V; }
+        store64(pk_w8t + i * 8, t_alloc((K * N + 7) / 8));   # K*N i8 bytes
+        store64(pk_wsum + i * 8, t_alloc(N));
+        i = i + 1;
+    }
+    pk_ready = 0;
+    return 0;
+}
+
+# Quantize + pack all 7 BitLinears from the live tx_* latent weights. Once.
+fn tx_pack(V, T, C, F): i64 {
+    var CC = C * C; var CF = C * F;
+    var i = 0;
+    while (i < 7) {
+        var W = tx_Wa + i * CC * 8;                          # 0..3: Q/K/V/O
+        var K = C; var N = C;
+        if (i == 4) { W = tx_Wm; N = F; }
+        if (i == 5) { W = tx_Wm + CF * 8; K = F; N = C; }
+        if (i == 6) { W = tx_Whead; N = V; }
+        var g = bl_weight_effective(W, K * N, ki_Wq, ki_We);
+        tsimd_pack_w(ki_Wq, K, N, load64(pk_w8t + i * 8), load64(pk_wsum + i * 8));
+        store64(pk_gamma + i * 8, g);
+        i = i + 1;
+    }
+    pk_ready = 1;
+    return 0;
+}
+
+# One packed BitLinear (internal): activation quant + the SIMD kernel against the
+# pre-packed layer `i`. The only per-call work besides the matmul is act quant.
+fn bl_forward_pk(i, x, b, y, M, K, N): i64 {
+    act_quant_int(x, M, K, ki_q, ki_sx);
+    ternary_matmul_free_simd(ki_q, ki_sx, load64(pk_w8t + i * 8), load64(pk_wsum + i * 8),
+                             load64(pk_gamma + i * 8), b, y, M, K, N, ki_xu8);
+    return 0;
+}
+
+fn attn_sublayer_pk(x, g1, T, C): i64 {
+    var TC = T * C;
+    var t = 0;
+    while (t < T) { rmsnorm_fwd(x + t * C * 8, g1, blk_a + t * C * 8, C); t = t + 1; }
+    bl_forward_pk(0, blk_a, 0, blk_Q, T, C, C);
+    bl_forward_pk(1, blk_a, 0, blk_K, T, C, C);
+    bl_forward_pk(2, blk_a, 0, blk_V, T, C, C);
+    attn_fwd(blk_Q, blk_K, blk_V, blk_P, blk_ctx, T, C);
+    bl_forward_pk(3, blk_ctx, 0, blk_attn_out, T, C, C);
+    t_copy(blk_out, x, TC); t_add_into(blk_out, blk_attn_out, TC);
+    return 0;
+}
+
+fn mlp_sublayer_pk(x, g2, T, C, F): i64 {
+    var TC = T * C;
+    var t = 0;
+    while (t < T) { rmsnorm_fwd(x + t * C * 8, g2, mlp_b2 + t * C * 8, C); t = t + 1; }
+    bl_forward_pk(4, mlp_b2, 0, mlp_fc, T, C, F);
+    gelu_fwd(mlp_fc, mlp_gg, T * F);
+    bl_forward_pk(5, mlp_gg, 0, mlp_branch, T, F, C);
+    t_copy(mlp_out, x, TC); t_add_into(mlp_out, mlp_branch, TC);
+    return 0;
+}
+
+# Whole-model packed forward — the deployment serving path. Writes ki_logits.
+fn tx_fwd_packed(tokens, V, T, C, F): i64 {
+    var C8 = C * 8;
+    var t = 0;
+    while (t < T) {
+        var tok = load64(tokens + t * 8);
+        t_copy(tx_resid0 + t * C8, tx_tokemb + tok * C8, C);
+        t_add_into(tx_resid0 + t * C8, tx_posemb + t * C8, C);
+        t = t + 1;
+    }
+    attn_sublayer_pk(tx_resid0, tx_gns, T, C);
+    t_copy(blk_xmid, blk_out, T * C);
+    mlp_sublayer_pk(blk_xmid, tx_gns + C * 8, T, C, F);
+    t = 0;
+    while (t < T) { rmsnorm_fwd(mlp_out + t * C8, tx_gf, tx_fnorm + t * C8, C); t = t + 1; }
+    bl_forward_pk(6, tx_fnorm, tx_bhead, ki_logits, T, C, V);
+    return 0;
+}
+
 # argmax over a V-length logits row (the next-token prediction). Ties -> first index.
 fn logits_argmax(logits, V): i64 {
     var best = 0; var bv = load64(logits + 0); var i = 1;
