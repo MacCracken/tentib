@@ -13,7 +13,7 @@ test = "src/test.cyr"
 output = "build/tentib"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math", "fnptr"]
 
 # tentib is a SIBLING reference to attn11 (transformer) and tarka (RL/reasoning),
 # on the same f64 substrate. M1 (v0.2.0) wires the latent-weight tensors + grad to

@@ -40,6 +40,7 @@ hide it.
 | **0.3.0** | M2 — ternary transformer trains | RMSNorm + causal attn + GELU-MLP, all 6 linears ternary; trains on akshara text (CE → 0.11); every level end-to-end FD-gated. **80/80**. |
 | **0.4.0** | M3 — matmul-free integer inference | the kernel through all 7 BitLinears of the trained transformer; exact parity < 1e-9 vs full-quant f64, argmax 10/10; 2-bit packed weights (32×); branchless scalar kernel (~25% over branchy). **86/86**. |
 | **0.4.1** | integer-SIMD ternary kernel | the gate lifted (cyrius 6.4.6/6.4.7 int SIMD, `iv_dp8`): `ternary_matmul_free_simd` (pack-once i8 transpose + u8-offset codes + 16-lane `iv_dp8` + branchless tail) **bit-identical** to scalar and **~7.5× faster than rosnet f64-SIMD** on 128×128 (1,946 vs 14,670 ns; ~45× over branchless) — *multiply-free is also faster* met. Whole-model = mode 2. Pin 6.2.37 → 6.4.10. **90/90**. |
+| **0.5.0** | benchmarks (`docs/benchmarks.md`) | the real `tests/tentib.bcyr` harness, B-series fairness: layer-sweep SIMD advantage **grows 5.0×→18.4×** over f64-SIMD (128²→768²; lane width + i8 cache residency); whole-model **3,549 vs 2,307 tok/s** (per-call re-pack included — pack-once deployment bounded by the sweep, → 0.7.0); memory 32× measured; **honest quality delta** vs matched-size f64 attn11 (CE 0.006 vs 0.11 toy-scale; b1.58 ≥3B parity cited). **90/90**. |
 
 Full detail per version in [`../../CHANGELOG.md`](../../CHANGELOG.md).
 
@@ -59,19 +60,13 @@ filed proposal with integer vector types + `iv_dp8` (the widening u8·i8 → i32
 and the kernel landed the same release-window with the acceptance met — bit-identical
 to scalar AND ~7.5× faster than rosnet's `linear_fwd` on the same layer.
 
-### 0.5.0 — benchmarks (`docs/benchmarks.md`)  *[v1.0 criterion: benchmarks]*
+### 0.5.0 — benchmarks (`docs/benchmarks.md`)  ✅ **SHIPPED 2026-07-06** (see the table above)
 
-The honest numbers behind the claims.
-
-- **tok/s** — whole-model forward latency → tokens/s of the integer kernel vs the f64
-  path, under the **B-series fairness rules** (identical shapes, warm cache, report
-  toolchain + CPU). The *speed* story needs 0.4.1 to be a win; the *memory* story (32×)
-  and the eliminated-multiply count are reportable now.
-- **Quality delta** vs a same-size f64 attn11 (the honest small-scale ternary-vs-fp gap)
-  and vs a named reference (bitnet.cpp numbers / the b1.58 paper) **cited, not
-  re-demonstrated at 3B**.
-- **Acceptance:** `docs/benchmarks.md` with reproducible numbers + the honest caveats; the
-  `tests/tentib.bcyr` bench harness (currently a stub) drives them.
+All three planned pieces landed with the honest caveats stated: tok/s under B-series
+fairness (whole-model + the per-layer sweep the whole-model number is bounded by),
+the measured 32× memory story, and the quality delta vs a matched-size f64 attn11
+with the b1.58/bitnet.cpp references cited. The per-call-re-pack honesty note feeds
+directly into 0.7.0's pack-once deployment entry point.
 
 ### 0.6.0 — allocation-clean + API freeze + `docs/api.md`  *[v1.0 criterion: API frozen]*
 
@@ -110,7 +105,7 @@ All v1.0 criteria green (below); public API frozen; clean cut.
 - [x] BitLinear forward + STE backward, finite-difference-gated (the surrogate) — **0.2.0**
 - [x] A ternary transformer that trains from scratch (loss descends) via akshara — **0.3.0**
 - [x] Packed-ternary + int8 matmul-free inference kernel reproduces the model's logits — **0.4.0**
-- [ ] Benchmarks in `docs/benchmarks.md` (tok/s; quality delta vs same-size f64 attn11) — **0.5.0** (speed half needs **0.4.1**)
+- [x] Benchmarks in `docs/benchmarks.md` (tok/s; quality delta vs same-size f64 attn11) — **0.5.0** (the speed half landed via **0.4.1**)
 - [ ] Public API frozen — every exported symbol documented and tested — **0.6.0**
 - [ ] CHANGELOG complete from v0.1.0; security/hardening audit pass — **0.8.0**
 

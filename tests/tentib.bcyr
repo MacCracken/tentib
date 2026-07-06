@@ -1,23 +1,153 @@
-# tentib benchmarks
-# Stdlib auto-included via cyrius.cyml
-#
-# Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop -> bench_report.
-# For sub-1us ops use batch_size >= 1000 to amortize clock_gettime overhead
-# (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
-# the full overhead-vs-batching guidance.
+# tentib benchmarks — the 0.5.0 numbers behind docs/benchmarks.md.
+# Two surfaces, B-series fairness (identical shapes, warm cache, single thread;
+# toolchain + CPU reported in the doc):
+#   1. per-layer kernel sweep (M=1 row, K x N): branchy / branchless / SIMD
+#      (pack-once, the deployment shape) / rosnet SIMD-f64 linear_fwd — the same
+#      quantized layer, four compute paths. + pack/act-quant amortization costs.
+#   2. whole-model forward -> tok/s at a b1.58-shaped config (F = 4C): the f64
+#      weight-only path vs the scalar integer kernel vs the integer-SIMD kernel.
+#      Modes 0/2 re-quantize (+ mode 2 re-packs) per call, mirroring the f64
+#      path's per-call weight quantization — every path pays its prep, honestly.
+# Pattern: bench_new -> bench_run (per-call costs are 1 us - 10 ms; no batching
+# needed) -> bench_avg_ns. See lib/bench.cyr for the overhead guidance.
 
-fn bench_noop(): i64 { return 0; }
+include "lib/tyche.cyr"      # rng_* (rosnet's t_randn -> rng_normal; link dep)
+include "lib/rosnet.cyr"     # t_alloc / linear_fwd / f64 helpers
+include "src/ternary.cyr"    # absmean / ternary_quantize (M0)
+include "src/bitlinear.cyr"  # bl_forward_full / bl_weight_effective (M1)
+include "src/layers.cyr"     # rmsnorm / gelu / attention (M2)
+include "src/model.cyr"      # softmax_xent (M2)
+include "lib/akshara.cyr"    # corpus_set / gd_ld (link dep for block.cyr)
+include "src/block.cyr"      # tx_init / tx_param_init / tx_fwd (M2)
+include "src/kernel.cyr"     # the matmul-free kernels incl. 0.4.1 SIMD (M3)
+
+fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
+# akshara loader/streaming consumer symbols — unused (corpus_set/gd_ld only)
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+fn file_seek(fd, off): i64 { return 0 - 1; }
+
+# ---- 1. per-layer kernel sweep ------------------------------------------------
+# One quantized M=1 x K -> N BitLinear, timed through all four compute paths.
+# Globals so the zero-arg bench fnptrs can reach the current shape's buffers.
+
+var bK = 0; var bN = 0;
+var bx = 0; var bqx = 0; var bsi = 0; var bg = 0;
+var bWq = 0; var bWe = 0; var bxe = 0;
+var byi = 0; var byb = 0; var bys = 0; var byf = 0;
+var bw8t = 0; var bwsum = 0; var bxu8 = 0;
+
+fn bw_branchy(): i64 { return ternary_matmul_free(bqx, bsi, bWq, bg, 0, byi, 1, bK, bN); }
+fn bw_branchless(): i64 { return ternary_matmul_free_bl(bqx, bsi, bWq, bg, 0, byb, 1, bK, bN); }
+fn bw_simd(): i64 { return ternary_matmul_free_simd(bqx, bsi, bw8t, bwsum, bg, 0, bys, 1, bK, bN, bxu8); }
+fn bw_rosnet(): i64 { return linear_fwd(bxe, bWe, 0, byf, 1, bK, bN); }
+fn bw_pack(): i64 { return tsimd_pack_w(bWq, bK, bN, bw8t, bwsum); }
+fn bw_actq(): i64 { return act_quant_int(bx, 1, bK, bqx, bsi); }
+
+# Build one random quantized layer at K x N (fresh buffers; rosnet's bump
+# allocator never frees — fine for a handful of shapes).
+fn layer_setup(K, N, seed): i64 {
+    bK = K; bN = N;
+    var KN = K * N;
+    bx = t_alloc(K); var W = t_alloc(KN);
+    bWq = t_alloc(KN); bWe = t_alloc(KN); bxe = t_alloc(K);
+    bqx = t_alloc(K); bsi = t_alloc(1);
+    byi = t_alloc(N); byb = t_alloc(N); bys = t_alloc(N); byf = t_alloc(N);
+    bw8t = alloc(KN); bwsum = t_alloc(N); bxu8 = alloc(K);
+    rng_seed(seed);
+    t_randn(bx, K, f64_from(1));
+    t_randn(W, KN, f64_div(f64_from(1), f64_from(2)));
+    var sf = t_alloc(1);
+    bg = bl_forward_full(bx, W, 0, byf, 1, K, N, bWq, bWe, bxe, sf);   # bWe/bxe = the f64 path's inputs
+    act_quant_int(bx, 1, K, bqx, bsi);
+    tsimd_pack_w(bWq, K, N, bw8t, bwsum);                              # pack-once (deployment)
+    return 0;
+}
+
+# Time one fnptr: warmup then measured runs; returns avg ns/call.
+fn timed(fp, warm, iters): i64 {
+    var w = 0;
+    while (w < warm) { fncall0(fp); w = w + 1; }
+    var b = bench_new("row");
+    bench_run(b, fp, iters);
+    return bench_avg_ns(b);
+}
+
+fn f2dec(num, den): i64 {   # print num/den with 1 decimal (den != 0)
+    var whole = num / den;
+    var tenth = ((num * 10) / den) % 10;
+    fmt_int(whole); _putc(46); fmt_int(tenth);
+    return 0;
+}
+
+fn layer_row(K, N, seed, iters): i64 {
+    layer_setup(K, N, seed);
+    var tby = timed(&bw_branchy, 3, iters);
+    var tbl = timed(&bw_branchless, 3, iters);
+    var tsd = timed(&bw_simd, 3, iters);
+    var trs = timed(&bw_rosnet, 3, iters);
+    fmt_int(K); puts("x"); fmt_int(N);
+    puts("  branchy="); fmt_int(tby);
+    puts("  branchless="); fmt_int(tbl);
+    puts("  simd="); fmt_int(tsd);
+    puts("  rosnet-f64="); fmt_int(trs);
+    puts("  ns/call   simd-speedup: vs-f64="); f2dec(trs, tsd);
+    puts("x  vs-branchless="); f2dec(tbl, tsd); puts("x\n");
+    return 0;
+}
+
+# ---- 2. whole-model forward -> tok/s -------------------------------------------
+var wmV = 0; var wmT = 0; var wmC = 0; var wmF = 0; var wmtok = 0;
+
+fn wm_f64(): i64 { return tx_fwd(wmtok, wmV, wmT, wmC, wmF); }
+fn wm_int(): i64 { return tx_fwd_q(0, wmtok, wmV, wmT, wmC, wmF); }
+fn wm_simd(): i64 { return tx_fwd_q(2, wmtok, wmV, wmT, wmC, wmF); }
+
+fn toks_per_s(avg_ns): i64 {   # T tokens per forward
+    if (avg_ns == 0) { return 0; }
+    return (wmT * 1000000000) / avg_ns;
+}
+
+fn wm_bench(V, T, C, F, seed, iters): i64 {
+    wmV = V; wmT = T; wmC = C; wmF = F;
+    tx_init(V, T, C, F);
+    tx_param_init(V, T, C, F, seed);
+    tx_int_init(V, T, C, F);
+    wmtok = t_alloc(T);
+    var t = 0;
+    while (t < T) { store64(wmtok + t * 8, (rng_u64() & 0x7FFFFFFFFFFFFFFF) % V); t = t + 1; }
+    var params = V * C + T * C + 3 * C + 4 * C * C + 2 * C * F + C * V + V;
+    puts("config V="); fmt_int(V); puts(" T="); fmt_int(T); puts(" C="); fmt_int(C);
+    puts(" F="); fmt_int(F); puts("  params="); fmt_int(params);
+    puts("  ternary-linear weights: f64="); fmt_int((4 * C * C + 2 * C * F + C * V) * 8);
+    puts(" B -> 2-bit packed="); fmt_int((4 * C * C + 2 * C * F + C * V + 3) / 4); puts(" B\n");
+    var tf = timed(&wm_f64, 2, iters);
+    var ti = timed(&wm_int, 2, iters);
+    var ts = timed(&wm_simd, 2, iters);
+    puts("  f64 weight-only     = "); fmt_int(tf); puts(" ns/fwd  ("); fmt_int(toks_per_s(tf)); puts(" tok/s)\n");
+    puts("  integer scalar      = "); fmt_int(ti); puts(" ns/fwd  ("); fmt_int(toks_per_s(ti)); puts(" tok/s)\n");
+    puts("  integer SIMD (0.4.1)= "); fmt_int(ts); puts(" ns/fwd  ("); fmt_int(toks_per_s(ts)); puts(" tok/s)  simd-vs-f64=");
+    f2dec(tf, ts); puts("x\n");
+    return 0;
+}
 
 fn main(): i64 {
     alloc_init();
-    var b = bench_new("noop");
-    bench_batch_start(b);
-    var i = 0;
-    while (i < 1000000) { bench_noop(); i = i + 1; }
-    bench_batch_stop(b, 1000000);
-    bench_report(b);
+    puts("tentib bench — single thread, warm cache; every path re-quantizes per call\n");
+    puts("(whole-model) or is pack-once (layer sweep); report CPU + cyrius pin with the numbers.\n\n");
+    puts("[1] per-layer kernel sweep (M=1 row, ns/call; SIMD row is pack-once):\n");
+    layer_row(128, 128, 9, 200);
+    layer_row(256, 256, 10, 100);
+    layer_row(512, 512, 11, 50);
+    layer_row(768, 768, 12, 30);      # GPT-2-small hidden-dim-shaped row
+    puts("\n[2] prep amortization at 768x768 (ns/call; pack is once-per-weight, act-quant once-per-token):\n");
+    puts("  tsimd_pack_w="); fmt_int(timed(&bw_pack, 2, 30));
+    puts("  act_quant_int="); fmt_int(timed(&bw_actq, 2, 200)); puts("\n");
+    puts("\n[3] whole-model forward -> tok/s (b1.58-shaped F=4C; T tokens/fwd):\n");
+    wm_bench(256, 32, 128, 512, 1337, 30);
     return 0;
 }
 
 var r = main();
-syscall(60, r);
+syscall(SYS_EXIT, r);

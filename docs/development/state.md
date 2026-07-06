@@ -5,17 +5,20 @@
 
 ## Version
 
-**0.4.1** — the **integer-SIMD ternary kernel**, cut 2026-07-06 (user tags). The
-0.4.0 gate lifted (cyrius 6.4.6/6.4.7 shipped integer SIMD incl. `iv_dp8`, the
-widening u8·i8 → i32 dot): `ternary_matmul_free_simd` (pack-once transposed-i8
-weights + u8-offset activations + `iv_dp8` inner loop + branchless K%16 tail) is
-**bit-identical** to the scalar kernel and **~7.5× faster than rosnet's f64-SIMD
-matmul** on a 128×128 layer (1,946 ns vs 14,670 ns; ~45× over branchless scalar) —
-the *"multiply-free is also faster"* acceptance met. Whole-model SIMD inference =
-`bl_forward_q` mode 2. **90/90.** Prior: **0.4.0** (M3 — whole-model matmul-free
-integer inference, exact parity < 1e-9, argmax 10/10, 2-bit packed 32×), **0.3.0**
-(M2 — ternary transformer trains), **0.2.0** (M1 — BitLinear + STE), **0.1.0**
-(M0 — ternary quantizer).
+**0.5.0** — **benchmarks** (`docs/benchmarks.md`, a v1.0 criterion), cut 2026-07-06
+(user tags). The real `tests/tentib.bcyr` harness under B-series fairness (single
+pinned CPU, warm cache, identical shapes): layer-sweep SIMD advantage **grows with
+size** (vs rosnet f64-SIMD **5.0× @128² → 18.4× @768²**; lane width + i8 cache
+residency), prep amortization (~4 ns/wt pack, once), whole-model **3,549 tok/s vs
+2,307 f64** (per-call re-pack included; pack-once deployment = 0.7.0), memory 32×
+measured, and the **honest quality delta** vs matched-size f64 attn11 1.13.0
+(CE 0.006 vs 0.11 at toy scale; b1.58 ≥3B parity + bitnet.cpp cited, not
+re-demonstrated). Suite **90/90**. Prior: **0.4.1** (the integer-SIMD ternary
+kernel — the toolchain gate lifted by cyrius 6.4.6/6.4.7 `iv_dp8`; bit-identical
+to scalar + beats the f64-SIMD matmul; whole-model = `bl_forward_q` mode 2),
+**0.4.0** (M3 — whole-model matmul-free integer inference, exact parity < 1e-9,
+argmax 10/10, 2-bit packed 32×), **0.3.0** (M2 — ternary transformer trains),
+**0.2.0** (M1 — BitLinear + STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Toolchain
 
@@ -75,7 +78,11 @@ integer inference, exact parity < 1e-9, argmax 10/10, 2-bit packed 32×), **0.3.
   biased head), and **M3c** (whole-model integer inference: < 1e-9 relerr vs the
   full-quant f64 forward, finite activation-quant delta vs the trained model,
   argmax agreement at all T).
-- `tests/tentib.bcyr` / `.fcyr` — benchmark / fuzz stubs (no-op).
+- `tests/tentib.bcyr` — **the 0.5.0 benchmark harness** (drives `docs/benchmarks.md`):
+  per-layer kernel sweep (branchy/branchless/SIMD-pack-once/rosnet-f64 at 128²–768²),
+  prep-amortization costs, whole-model forward → tok/s (f64 / scalar-int / SIMD-int
+  at a b1.58-shaped 267k-param config). B-series fairness; ratios reproduce, absolute
+  ns vary with boost. `tests/tentib.fcyr` — fuzz stub (no-op).
 
 ## Dependencies
 
@@ -92,10 +99,9 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**v0.4.1 cut (the int-SIMD kernel — the gated lever landed; proposal
-[`proposals/2026-06-23-cyrius-integer-simd.md`](proposals/2026-06-23-cyrius-integer-simd.md)
-answered by cyrius 6.4.6/6.4.7).** Next is the SemVer path to 1.0: **0.5.0**
-benchmarks (`docs/benchmarks.md` — tok/s + quality delta under the B-series fairness
-rules; the speed half is now a win) · **0.6.0** alloc-clean + API freeze +
-`docs/api.md` · **0.7.0** consumer readiness · **0.8.0** security audit · **1.0.0**.
-Full per-version scope + acceptance in [`roadmap.md`](roadmap.md).
+**v0.5.0 cut (benchmarks — `docs/benchmarks.md` + the real bench harness).** The
+remaining SemVer path to 1.0: **0.6.0** alloc-clean + API freeze + `docs/api.md` ·
+**0.7.0** consumer readiness (the pack-once deployment inference entry point —
+load → quantize + pack once → integer inference; §2/§3 of benchmarks.md motivate
+it) · **0.8.0** security audit · **1.0.0**. Full per-version scope + acceptance in
+[`roadmap.md`](roadmap.md).

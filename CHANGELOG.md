@@ -4,6 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-06
+
+**Benchmarks — the honest numbers behind the claims** (`docs/benchmarks.md`, a v1.0
+criterion). The `tests/tentib.bcyr` stub is now the real harness driving every
+number; B-series fairness throughout (identical shapes, warm cache, single pinned
+CPU, every path pays its per-call prep, ratios-not-nanoseconds reproduction).
+Run of record: cyrius 6.4.10, AMD Ryzen 7 5800H (Zen 3), 2026-07-06.
+
+### Added — `docs/benchmarks.md` + the real bench harness
+- **§1 per-layer kernel sweep** (M=1, pack-once SIMD): the SIMD advantage **grows
+  with size** — vs the rosnet f64-SIMD matmul **5.0× at 128×128 → 18.4× at
+  768×768** (3,124 → 29,361 ns/call; vs branchless scalar 29.5× → 123.1×). Two
+  compounding mechanisms documented: 16 int8 lanes vs 2-wide SSE2, and i8 weights
+  staying L2-resident where f64 spills (590 KB vs 4.7 MB at 768²).
+- **§2 prep amortization**: `tsimd_pack_w` ~4 ns/weight, paid once — amortizes
+  after ~81 calls at 768²; `act_quant_int` 8.3 µs/row.
+- **§3 whole-model tok/s** (b1.58-shaped F=4C, 267k params, T=32): f64 2,307 →
+  scalar-int 456 → **SIMD-int 3,549 tok/s (1.5× over f64)** — with the honest
+  note that mode 2 re-quantizes AND re-packs per call (fairness mirror of the f64
+  path's per-call quantization), so the pack-once deployment entry point (the
+  0.7.0 deliverable) is bounded by §1, not §3.
+- **§4 memory story measured**: 1,835,008 B f64 → 57,344 B 2-bit packed (32×) at
+  the bench config; zero inner-loop multiplies.
+- **§5 quality delta (honest)**: matched-size, same-corpus, same-steps f64 sibling
+  — **attn11 1.13.0 (324 params) final CE 0.006 vs tentib ternary (252 params)
+  CE 0.11**; both solve the task, ternary plateaus ~20× higher at toy scale;
+  differences beyond quantization enumerated (bundled gap, not an ablation);
+  b1.58 paper (arXiv:2402.17764, parity from ~3B) + bitnet.cpp (~2–6× over fp16)
+  **cited, not re-demonstrated**.
+
+### Changed
+- `tests/tentib.bcyr`: noop stub → the benchmark harness (layer sweep ×4 shapes,
+  prep costs, whole-model tok/s; `bench_new`/`bench_run`/`bench_avg_ns` +
+  fnptr-dispatched kernels; random tokens use the masked `rng_u64` idiom).
+- `cyrius.cyml` stdlib gains `fnptr` (the bench harness dispatches via `fncall0`).
+- Suite unchanged at **90/90** (re-validated with the manifest change).
+
 ## [0.4.1] — 2026-07-06
 
 **The integer-SIMD ternary kernel — "multiply-free is also FASTER."** The 0.4.0 gate

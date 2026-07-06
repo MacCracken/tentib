@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — v0.4.1: the integer-SIMD kernel — multiply-free is also *faster* (90/90 gated)
+## Status — v0.5.0: benchmarks — the honest numbers behind the claims (90/90 gated)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -47,6 +47,13 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   **bit-identical** to the scalar kernel, and on a 128×128 layer **~7.5× faster
   than rosnet's f64-SIMD matmul** (1.9 µs vs 14.7 µs; ~45× over the branchless
   scalar). The 0.4.0 standings — scalar ternary ~5× *slower* than f64 — are inverted.
+- **Benchmarks (v0.5.0)** — [`docs/benchmarks.md`](docs/benchmarks.md), driven by the
+  real `tests/tentib.bcyr` harness under B-series fairness: the SIMD advantage
+  **grows with size** (5.0× over f64 at 128×128 → **18.4× at 768×768** — lane width
+  + i8 cache residency), whole-model **3,549 tok/s vs 2,307 f64** (per-call re-pack
+  included; pack-once deployment is the 0.7.0 entry point), the 32× memory story
+  measured, and the **honest quality delta** vs a matched-size f64 attn11 (CE 0.006
+  vs 0.11 at toy scale; b1.58 ≥3B parity cited, not re-demonstrated).
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39
