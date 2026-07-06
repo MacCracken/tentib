@@ -39,6 +39,7 @@ hide it.
 | **0.2.0** | M1 — BitLinear + STE | ternary W + int8 acts on rosnet; STE backward FD-gated (the surrogate, γ-cancellation @ γ=3, falsifiers). **34/34**. |
 | **0.3.0** | M2 — ternary transformer trains | RMSNorm + causal attn + GELU-MLP, all 6 linears ternary; trains on akshara text (CE → 0.11); every level end-to-end FD-gated. **80/80**. |
 | **0.4.0** | M3 — matmul-free integer inference | the kernel through all 7 BitLinears of the trained transformer; exact parity < 1e-9 vs full-quant f64, argmax 10/10; 2-bit packed weights (32×); branchless scalar kernel (~25% over branchy). **86/86**. |
+| **0.4.1** | integer-SIMD ternary kernel | the gate lifted (cyrius 6.4.6/6.4.7 int SIMD, `iv_dp8`): `ternary_matmul_free_simd` (pack-once i8 transpose + u8-offset codes + 16-lane `iv_dp8` + branchless tail) **bit-identical** to scalar and **~7.5× faster than rosnet f64-SIMD** on 128×128 (1,946 vs 14,670 ns; ~45× over branchless) — *multiply-free is also faster* met. Whole-model = mode 2. Pin 6.2.37 → 6.4.10. **90/90**. |
 
 Full detail per version in [`../../CHANGELOG.md`](../../CHANGELOG.md).
 
@@ -51,24 +52,12 @@ section → suite green → **the user tags** (never `git commit`/`tag` yourself
 > **Version numbers below are the proposed decomposition** — adjust granularity with the
 > maintainer. The *ordering* (0.4.1 gated first, audit last) is the load-bearing part.
 
-### 0.4.1 — integer-SIMD ternary kernel  ⛔ **gated on cyrius integer SIMD**
+### 0.4.1 — integer-SIMD ternary kernel  ✅ **SHIPPED 2026-07-06** (see the table above)
 
-The wall-clock throughput lever: vectorize the matmul-free kernel so ternary is not just
-multiply-free but **faster than the f64-SIMD matmul**.
-
-- **Blocked on:** Cyrius gaining **integer SIMD** (typed `iNxM` vectors + int8/16/32
-  ops). This toolchain (6.2.37) is **f64-only, 2-wide SSE2**. The full design is filed
-  in-repo: [`proposals/2026-06-23-cyrius-integer-simd.md`](proposals/2026-06-23-cyrius-integer-simd.md).
-  **Do NOT attempt the SIMD kernel until that lands** — the scalar kernel (multiply-free
-  + branchless + 32× memory) is the shipped surface until then. Re-check by grepping the
-  vendored `lib/simd.cyr` for an integer vector type/builtin; if still f64-only, this
-  version stays parked.
-- **Deliverable:** `ternary_matmul_free_simd` — vectorized int8 × ternary (sign-select +
-  widening integer accumulate, 16–32 lanes/instr; the bitnet.cpp TL1/TL2/I2_S shape
-  ported, never copied).
-- **Acceptance:** bit-identical (or within an int tolerance) to the scalar kernel **and
-  measurably faster than rosnet's `linear_fwd`** (the f64-SIMD baseline) on the same
-  layer — the *"multiply-free is also faster"* demonstration. Same parity gate as M3.
+The gate held exactly as designed: cyrius 6.4.6/6.4.7 (SIMD arc Phase 3) answered the
+filed proposal with integer vector types + `iv_dp8` (the widening u8·i8 → i32 dot),
+and the kernel landed the same release-window with the acceptance met — bit-identical
+to scalar AND ~7.5× faster than rosnet's `linear_fwd` on the same layer.
 
 ### 0.5.0 — benchmarks (`docs/benchmarks.md`)  *[v1.0 criterion: benchmarks]*
 

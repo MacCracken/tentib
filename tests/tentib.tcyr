@@ -58,6 +58,28 @@ fn fd_qgrad(x, W, idx, M, K, N, Wq, Weff, yscr): i64 {
     tstore(W, idx, sv);
     return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
 }
+
+# --- 0.4.1 (M3d) helper: random M x K -> N layer; quantize; check the SIMD kernel
+# (tsimd_pack_w + u8-offset iv_dp8 + branchless tail) reproduces the scalar
+# matmul-free kernel BIT-FOR-BIT. K chosen by the caller to steer the K16 split.
+fn m3s_simd_matches(M, K, N, seed): i64 {
+    var MK = M * K; var KN = K * N; var MN = M * N;
+    var x = t_alloc(MK); var W = t_alloc(KN); var Wq = t_alloc(KN); var We = t_alloc(KN);
+    var qx = t_alloc(MK); var si = t_alloc(M);
+    var yi = t_alloc(MN); var ys = t_alloc(MN);
+    var w8t = alloc(KN); var wsum = t_alloc(N); var xu8 = alloc(K);
+    rng_seed(seed);
+    t_randn(x, MK, f64_from(1));
+    t_randn(W, KN, f64_div(f64_from(1), f64_from(2)));
+    var g = bl_weight_effective(W, KN, Wq, We);
+    act_quant_int(x, M, K, qx, si);
+    ternary_matmul_free(qx, si, Wq, g, 0, yi, M, K, N);
+    tsimd_pack_w(Wq, K, N, w8t, wsum);
+    ternary_matmul_free_simd(qx, si, w8t, wsum, g, 0, ys, M, K, N, xu8);
+    var ok = 1; var i = 0;
+    while (i < MN) { if (tget(ys, i) != tget(yi, i)) { ok = 0; } i = i + 1; }
+    return ok;
+}
 # central FD of the quantized softmax-CE loss wrt embedding entry embx[k] (EXACT — embx is smooth input)
 fn fd_emb(embx, k, W, b, tgt_buf, D, V, Wq, Weff, logits, probs): i64 {
     var sv = load64(embx + k * 8);
@@ -662,6 +684,15 @@ fn main() {
     while (m3i < m3MN) { if (tget(m3yb, m3i) != tget(m3yi, m3i)) { m3bok = 0; } m3i = m3i + 1; }
     assert(m3bok == 1, "M3b: ternary_matmul_free_bl == ternary_matmul_free bit-for-bit (mask arithmetic, no value change)");
 
+    test_group("M3d: integer-SIMD kernel (iv_dp8) is bit-identical to the scalar kernel (0.4.1)");
+    # The exactness argument (kernel.cyr): ternary weights bound each pmaddubsw
+    # pair-sum by 510 << 32767 (no i16 saturation) and the +128 u8-offset correction
+    # is exact integer algebra — so the SIMD accumulate is the SAME i64, and the
+    # dequant expression is shared => identical f64 bits. Three K regimes:
+    assert(m3s_simd_matches(2, 4, 3, 71) == 1, "M3d: K=4 (K16=0, pure branchless tail) bit-identical");
+    assert(m3s_simd_matches(3, 20, 5, 72) == 1, "M3d: K=20 (16-lane SIMD span + 4-wide tail, offset correction split) bit-identical");
+    assert(m3s_simd_matches(2, 32, 7, 73) == 1, "M3d: K=32 (pure iv_dp8 span, two lane-groups) bit-identical");
+
     test_group("M3c: whole-model integer inference reproduces the f64 forward (parity + activation-quant delta)");
     # Train a tiny transformer, then run it three ways: the weight-only f64 model that
     # was trained, the full-quant f64 reference (int8 acts, f64 matmul), and the integer
@@ -705,6 +736,14 @@ fn main() {
         ci_t = ci_t + 1;
     }
     assert(ci_ag == ciT, "M3c: integer inference argmax matches the trained f64 model at all T positions");
+    # 0.4.1: the SIMD kernel through the whole model (mode 2) — all 7 BitLinears at
+    # C=4/F=8 run below one 16-lane group (pure-tail) and the head carries the bias;
+    # logits must be BIT-IDENTICAL to the scalar integer path (mode 0, saved above).
+    var li_int = t_alloc(ciTV); t_copy(li_int, ki_logits, ciTV);
+    tx_fwd_q(2, citok, ciV, ciT, ciC, ciF);
+    var ci_sok = 1; cii = 0;
+    while (cii < ciTV) { if (tget(ki_logits, cii) != tget(li_int, cii)) { ci_sok = 0; } cii = cii + 1; }
+    assert(ci_sok == 1, "M3d: whole-model SIMD inference (mode 2) bit-identical to the scalar integer kernel (incl. the biased head)");
 
     return assert_summary();
 }

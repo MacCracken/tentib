@@ -153,3 +153,36 @@ fn sys_getrandom(buf, len, flags): i64 {
     if (syscall(0xF01A, buf, len) != 0) { return len; }
     return 0 - 1;
 }
+
+# v6.3.2: POSIX process/wait/fs ops referenced on shared CLI paths that are
+# DEAD on Windows (the CLI spawns via CreateProcessW reroutes, not fork/exec/
+# wait). Stubbed so the PE cross-build has no undefined-fn reference under the
+# v6.3.2 default reachable-undef hard error. Returns degrade safely (better than
+# the pre-v6.3.2 ud2 stub, which would SIGILL if ever hit).
+# Windows has no fork(); the CLI spawns via CreateProcessW. Returns -1.
+fn sys_fork(): i64 { return 0 - 1; }
+# No execve on Windows; CreateProcessW is used instead. Returns -1.
+fn sys_execve(path, argv, envp): i64 { return 0 - 1; }
+# No POSIX waitpid; process exit is read via GetExitCodeProcess. Returns -1.
+fn sys_waitpid(pid, status_ptr, options): i64 { return 0 - 1; }
+# POSIX wait-status accessor: on Windows the exit code IS the status. Pass-through.
+fn WEXITSTATUS(status): i64 { return status; }
+# POSIX wait-status predicate: Windows exits are always "exited" (no signals). 1.
+fn WIFEXITED(status): i64 { return 1; }
+# POSIX wait-status predicate: no POSIX signals on Windows. 0.
+fn WIFSIGNALED(status): i64 { return 0; }
+# POSIX wait-status accessor: no terminating signal on Windows. 0.
+fn WTERMSIG(status): i64 { return 0; }
+# chmod has no Windows equivalent (ACL model differs); no-op success.
+fn sys_chmod(path, mode): i64 { return 0; }
+# Best-effort dup2 stub: returns the requested newfd (handle dup is rerouted).
+fn sys_dup2(oldfd, newfd): i64 { return newfd; }
+# mkdir — routed to kernel32!CreateDirectoryW by the PE backend's syscall(83)
+# reroute (src/backend/pe/emit.cyr _pe_ensure_createdir, v5.11.22). Returns 0 on
+# success, -1 on failure. (Was a no-op `return 0` stub through v6.3.42 — VR-01
+# surfaced that it never actually created the directory on Windows.)
+fn sys_mkdir(path, mode): i64 { return syscall(83, path, mode); }
+# unlink — routed to kernel32!DeleteFileW by the PE backend's syscall(87) reroute
+# (_pe_ensure_deletef, v5.11.22). Returns 0 on success, -1 on failure. (Was a
+# no-op `return 0` stub through v6.3.42 — VR-01 surfaced the file was never deleted.)
+fn sys_unlink(path): i64 { return syscall(87, path); }

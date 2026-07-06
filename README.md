@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — v0.4.0: matmul-free integer inference through the trained transformer (86/86 gated)
+## Status — v0.4.1: the integer-SIMD kernel — multiply-free is also *faster* (90/90 gated)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -38,7 +38,15 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   integer signed-accumulate (add / subtract / skip, *no multiply*) → **exact parity
   < 1e-9** vs the f64 forward, next-token **argmax 10/10**, plus a branchless scalar
   kernel (~25% over branchy) and 2-bit packed weights (**32×** smaller). The SIMD
-  throughput lever is deferred to **0.4.1**, gated on cyrius integer SIMD.
+  throughput lever was deferred to **0.4.1**, gated on cyrius integer SIMD.
+- **M3-SIMD (v0.4.1)** — **the integer-SIMD kernel: multiply-free is also *faster*.**
+  The gate lifted (cyrius 6.4.6/6.4.7 shipped integer SIMD incl. `iv_dp8`, the
+  widening u8·i8 → i32 dot, 16 lanes/instr): `ternary_matmul_free_simd` packs the
+  ternary weights to transposed i8 rows once, offsets the int8 activation codes to
+  u8 (exact `+128·Σw` correction), and runs one `iv_dp8` per 16 weights —
+  **bit-identical** to the scalar kernel, and on a 128×128 layer **~7.5× faster
+  than rosnet's f64-SIMD matmul** (1.9 µs vs 14.7 µs; ~45× over the branchless
+  scalar). The 0.4.0 standings — scalar ternary ~5× *slower* than f64 — are inverted.
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39
@@ -52,6 +60,9 @@ M2  ternary transformer trains on akshara-tokenized text "hello world":
 
 M3  matmul-free integer inference through the trained transformer:
     exact parity vs f64 < 1e-12   next-token argmax 10/10   (weights 32x smaller)
+
+M3-SIMD  the 0.4.1 kernel (iv_dp8, 16 int8 lanes/instr), 128x128 layer:
+    bit-identical to scalar   1946 ns/call  vs  rosnet SIMD-f64 14670 ns  (~7.5x)
 ```
 
 Deps: rosnet 0.2.0 + tyche 0.1.1 + akshara 0.1.0 (the shared sovereign tokenizer).

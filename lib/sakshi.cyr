@@ -1,5 +1,5 @@
 # sakshi.cyr — tracing, error handling, and structured logging for Cyrius
-# Bundled distribution of sakshi v2.4.1
+# Bundled distribution of sakshi v2.4.4
 # Source: https://github.com/MacCracken/sakshi
 # License: GPL-3.0-only
 #
@@ -197,6 +197,15 @@ fn _sk_clock_panic(msg, len): i64 {
 # Inlines the same syscall the v2.1.x _sk_now_ns used so the calibration
 # anchor is in the same time base as a non-cycle-counter implementation.
 fn _sk_clock_now_ns_raw(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # agnos: uptime_ms (#40) → monotonic ms since boot (in rax) ×1e6 = ns. #228
+    # (clock_gettime) is out of agnos's frozen syscall range — #40 is the only
+    # monotonic source. Literal #40 (a `var` would defeat const-fold; agnos has
+    # no reroute for it). Mirrors chrono.cyr's agnos clock. Coarse (~10 ms at the
+    # 100 Hz tick) but correct — see _sk_now_ns for why agnos skips the TSC.
+    return syscall(40) * 1000000;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var ts[16];   # {tv_sec,tv_nsec} = 16 B (var[N] byte-sized; [2] would OOB the +8 store).
     # The syscall NUMBER 228 MUST be a literal — a `var`/named constant does not
     # const-fold, so the macOS __got reroute and the Windows IAT reroute never fire
@@ -215,6 +224,7 @@ fn _sk_clock_now_ns_raw(): i64 {
     if (ret < 0) { return 0; }
     return load64(&ts) * 1000000000 + load64(&ts + 8);
     #endif
+    #endif
 }
 
 # One-shot init: panic if invariant TSC is absent, then calibrate freq with
@@ -223,6 +233,18 @@ fn _sk_clock_now_ns_raw(): i64 {
 fn _sk_clock_init(): i64 {
     if (_sk_tsc_freq_hz > 0) { return 0; }
 
+    #ifdef CYRIUS_TARGET_AGNOS
+    # agnos uses uptime_ms directly (see _sk_now_ns) — no TSC calibration: no
+    # cpuid invariant-TSC check, no nanosleep window. (The 100 Hz uptime_ms tick
+    # is far too coarse to calibrate a GHz TSC over a short window, and #35
+    # (nanosleep) is agnos `sysinfo`, not sleep.) Set nonzero sentinels so the
+    # idempotent guard + any `_sk_tsc_scale == 0` check are satisfied.
+    _sk_tsc_freq_hz = 1;
+    _sk_tsc_scale = 1;
+    return 0;
+    #endif
+
+    #ifndef CYRIUS_TARGET_AGNOS
     #ifdef CYRIUS_ARCH_X86
     if (_sk_cpuid_invariant_tsc() == 0) {
         _sk_clock_panic("sakshi: clock_init: invariant TSC absent (CPUID 0x80000007 EDX bit 8 = 0)\n", 75);
@@ -276,6 +298,7 @@ fn _sk_clock_init(): i64 {
         _sk_tsc_scale = (1000000000 << 32) / _sk_tsc_freq_hz;
     }
     return 0;
+    #endif
 }
 
 # Monotonic nanoseconds — drop-in replacement for the v2.1.x clock_gettime
@@ -284,10 +307,20 @@ fn _sk_clock_init(): i64 {
 # origin), but monotonicity and ns scaling are preserved — span elapsed
 # computation and event ordering are unaffected.
 fn _sk_now_ns(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # agnos: skip the rdtsc TSC fast-path entirely. uptime_ms (#40) is ~10 ms-
+    # granular at the 100 Hz tick, so calibrating a GHz TSC against a short
+    # window would yield a ~±100% garbage frequency. Read uptime_ms directly —
+    # coarse but correct; mirrors chrono.cyr's agnos clock. All span/output
+    # capture flows through here, so this covers every consumer time-stamp.
+    return _sk_clock_now_ns_raw();
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     if (_sk_tsc_scale == 0) {
         _sk_clock_init();
     }
     return _sk_ticks_to_ns(_sk_now_ticks());
+    #endif
 }
 
 # Re-run the calibration loop and refresh _sk_tsc_freq_hz / _sk_tsc_scale.
@@ -1366,7 +1399,12 @@ fn sakshi_log_kv(level, msg, msg_len, key, key_len, val, val_len): i64 {
 # Total: 16 * 24 = 384 bytes
 var _sk_span_stack[384];
 var _sk_span_depth: i64 = 0;
+# Trace id. `_sk_trace_id` is the LOW 64 bits; `_sk_trace_hi` is the HIGH 64
+# bits (0 unless a 128-bit id was set). A W3C trace-id is 128-bit, so a
+# consumer bridging into distributed tracing keeps the full id via the _128
+# API below; the original i64 API is the low half (hi = 0) for back-compat.
 var _sk_trace_id: i64 = 0;
+var _sk_trace_hi: i64 = 0;
 enum _SkSpanConst {
     _SK_MAX_SPANS = 16;
 }
@@ -1408,14 +1446,37 @@ fn sakshi_span_depth(): i64 {
     return _sk_span_depth;
 }
 
-# Set the active trace ID for correlating spans and events.
-# Typically set once at the root span of a request/operation.
+# Set the active (64-bit) trace ID for correlating spans and events.
+# Typically set once at the root span of a request/operation. Clears the high
+# half — a 64-bit id is a full id in the low half.
 fn sakshi_trace_set(id): i64 {
     _sk_trace_id = id;
+    _sk_trace_hi = 0;
     return 0;
 }
 
-# Get the active trace ID.
+# Get the active (low 64 bits of the) trace ID. Unchanged for back-compat.
 fn sakshi_trace_id(): i64 {
+    return _sk_trace_id;
+}
+
+# Set a full 128-bit trace ID (e.g. a W3C `traceparent` trace-id): `hi` is the
+# high 64 bits, `lo` the low 64. A consumer that adopts an inbound distributed
+# trace uses this to preserve the whole id; `sakshi_trace_id()` still returns
+# the low half.
+fn sakshi_trace_set_128(hi, lo): i64 {
+    _sk_trace_hi = hi;
+    _sk_trace_id = lo;
+    return 0;
+}
+
+# High 64 bits of the active trace ID (0 unless a 128-bit id was set).
+fn sakshi_trace_id_hi(): i64 {
+    return _sk_trace_hi;
+}
+
+# Low 64 bits of the active trace ID (== sakshi_trace_id; provided for symmetry
+# with sakshi_trace_id_hi).
+fn sakshi_trace_id_lo(): i64 {
     return _sk_trace_id;
 }

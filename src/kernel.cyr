@@ -148,30 +148,44 @@ fn tunpack2(packed, i): i64 {
 # Both write logits to ki_logits; the caller copies between calls to compare.
 
 var ki_Wq = 0; var ki_We = 0; var ki_q = 0; var ki_xe = 0; var ki_sx = 0; var ki_logits = 0;
+var ki_w8t = 0; var ki_wsum = 0; var ki_xu8 = 0;
 
 # Allocate the integer-inference scratch (call AFTER tx_init). ki_Wq/ki_We size to
 # the largest single projection (max of C*C, C*F, C*V); ki_q/ki_xe to T*max(C,F)
-# (the down-proj reads F-wide rows); ki_sx per-token; ki_logits = T*V.
+# (the down-proj reads F-wide rows); ki_sx per-token; ki_logits = T*V. The SIMD
+# path (mode 2) adds ki_w8t (packed i8 weights, mkn bytes), ki_wsum (offset
+# correction, max-N slots) and ki_xu8 (the u8 activation row, max-K bytes).
 fn tx_int_init(V, T, C, F): i64 {
     var mkn = C * C;
     if (C * F > mkn) { mkn = C * F; }
     if (C * V > mkn) { mkn = C * V; }
     var kf = C; if (F > kf) { kf = F; }
+    var nmax = C; if (F > nmax) { nmax = F; } if (V > nmax) { nmax = V; }
     ki_Wq = t_alloc(mkn); ki_We = t_alloc(mkn);
     ki_q = t_alloc(T * kf); ki_xe = t_alloc(T * kf); ki_sx = t_alloc(T);
     ki_logits = t_alloc(T * V);
+    ki_w8t = t_alloc((mkn + 7) / 8); ki_wsum = t_alloc(nmax); ki_xu8 = t_alloc((kf + 7) / 8);
     return 0;
 }
 
-# One BitLinear, integer (mode 0) or full-quant-f64 reference (mode 1). The latent
-# weight W re-quantizes to ternary each call (deployment pre-quantizes once; here we
-# match the f64 forward's per-call cost for a fair benchmark). Returns gamma.
+# One BitLinear, integer (mode 0), full-quant-f64 reference (mode 1), or integer
+# SIMD (mode 2 — the 0.4.1 iv_dp8 kernel, re-packing per call like mode 0
+# re-quantizes). The latent weight W re-quantizes to ternary each call (deployment
+# pre-quantizes once; here we match the f64 forward's per-call cost for a fair
+# benchmark). Returns gamma.
 fn bl_forward_q(mode, x, W, b, y, M, K, N): i64 {
     if (mode == 0) {
         var g = bl_weight_effective(W, K * N, ki_Wq, ki_We);   # ternary ki_Wq + gamma (ki_We unused)
         act_quant_int(x, M, K, ki_q, ki_sx);
         ternary_matmul_free(ki_q, ki_sx, ki_Wq, g, b, y, M, K, N);
         return g;
+    }
+    if (mode == 2) {
+        var g2 = bl_weight_effective(W, K * N, ki_Wq, ki_We);
+        tsimd_pack_w(ki_Wq, K, N, ki_w8t, ki_wsum);
+        act_quant_int(x, M, K, ki_q, ki_sx);
+        ternary_matmul_free_simd(ki_q, ki_sx, ki_w8t, ki_wsum, g2, b, y, M, K, N, ki_xu8);
+        return g2;
     }
     return bl_forward_full(x, W, b, y, M, K, N, ki_Wq, ki_We, ki_xe, ki_sx);
 }
@@ -225,6 +239,89 @@ fn tx_fwd_q(mode, tokens, V, T, C, F): i64 {
     t = 0;
     while (t < T) { rmsnorm_fwd(mlp_out + t * C8, tx_gf, tx_fnorm + t * C8, C); t = t + 1; }
     bl_forward_q(mode, tx_fnorm, tx_Whead, tx_bhead, ki_logits, T, C, V);   # head carries bias
+    return 0;
+}
+
+# ---- 0.4.1: integer-SIMD kernel (iv_dp8) — the b1.58 throughput lever ---------
+# The M3b gate lifted: cyrius 6.4.6/6.4.7 (SIMD arc Phase 3) shipped integer SIMD,
+# including iv_dp8(a, b, n) — the widening u8·i8 -> i32 dot (pmaddubsw -> pmaddwd ->
+# paddd, 16 lanes/iteration; n a multiple of 16). That is exactly this kernel's
+# inner loop, with two integer-exact rearrangements:
+#
+#   1. LAYOUT: the scalar kernel walks Wq [K,N] down a COLUMN (stride N) per output;
+#      iv_dp8 needs 16 contiguous bytes. tsimd_pack_w transposes once to w8t [N,K]
+#      i8 bytes (ternary {-1,0,+1} IS i8) — the "quantize + pack once" deployment
+#      step, the i8 sibling of tpack2.
+#   2. SIGNEDNESS: pmaddubsw is u8 x i8 — the FIRST operand is unsigned, but our
+#      activation codes are signed [-127,+127]. Offset them: xu = qx + 128 in
+#      [1,255], then dot(xu, w) = dot(qx, w) + 128*sum(w), so the true accumulate
+#      is iv_dp8(xu, w, K16) - 128*wsum[n], with wsum precomputed at pack time.
+#
+# Exactness (why the SIMD path stays BIT-IDENTICAL to the scalar kernel): with
+# ternary weights each pmaddubsw pair-sum is bounded by 2*255 = 510 << 32767, so
+# the i16 stage NEVER saturates; the i32 accumulate is bounded by ~64*K (safe to
+# K ~ 2^24); the +128 offset correction is exact integer algebra. Same acc value,
+# same dequant expression => the same f64 bits out.
+#
+# The K % 16 tail (whole-model dims C=4/F=8 are below one lane-group) runs the M3b
+# branchless mask arithmetic on the SAME w8t bytes; wsum covers only the SIMD span
+# [0, K16) so the tail needs no offset correction.
+
+# Pack once per quantized weight: Wq [K,N] (i64 {-1,0,+1}) -> w8t [N,K] (i8 bytes,
+# transposed so each output's weights are contiguous) + wsum[n] (i64) = the weight
+# sum over the SIMD-covered span k < K16 (the +128 offset correction term).
+fn tsimd_pack_w(Wq, K, N, w8t, wsum): i64 {
+    var K16 = (K / 16) * 16;
+    var n = 0;
+    while (n < N) {
+        var s = 0;
+        var k = 0;
+        while (k < K) {
+            var w = load64(Wq + (k * N + n) * 8);
+            store8(w8t + n * K + k, w);           # i64 -1 truncates to the i8 0xFF
+            if (k < K16) { s = s + w; }
+            k = k + 1;
+        }
+        store64(wsum + n * 8, s);
+        n = n + 1;
+    }
+    return 0;
+}
+
+# The SIMD matmul-free kernel. Same contract as ternary_matmul_free (and
+# bit-identical output), but consuming the packed w8t/wsum instead of Wq, plus a
+# K-byte u8 scratch xu8 for the offset activation row. Inner loop: one iv_dp8 per
+# 16 weights (widening dot, still multiply-free in spirit — pmaddubsw against
+# {-1,0,+1} only sign-selects) + the branchless scalar tail for K % 16.
+fn ternary_matmul_free_simd(qx, sx, w8t, wsum, gamma, b, y, M, K, N, xu8): i64 {
+    var K16 = (K / 16) * 16;
+    var m = 0;
+    while (m < M) {
+        var scale = f64_mul(load64(sx + m * 8), gamma);
+        var qrow = qx + m * K * 8;
+        var k = 0;
+        while (k < K) { store8(xu8 + k, load64(qrow + k * 8) + 128); k = k + 1; }   # u8 in [1,255]
+        var n = 0;
+        while (n < N) {
+            var wrow = w8t + n * K;
+            var acc = 0;
+            if (K16 > 0) { acc = iv_dp8(xu8, wrow, K16) - 128 * load64(wsum + n * 8); }
+            k = K16;                              # branchless tail on the same i8 bytes
+            while (k < K) {
+                var w = load8(wrow + k);          # 0 / 1 / 255 (load8 zero-extends)
+                var qv = load64(qrow + k * 8);
+                var pm = 0 - (w == 1);
+                var nm = 0 - (w == 255);
+                acc = acc + (qv & pm) - (qv & nm);
+                k = k + 1;
+            }
+            var yv = f64_mul(f64_from(acc), scale);
+            if (b != 0) { yv = f64_add(yv, load64(b + n * 8)); }
+            store64(y + (m * N + n) * 8, yv);
+            n = n + 1;
+        }
+        m = m + 1;
+    }
     return 0;
 }
 

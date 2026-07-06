@@ -144,19 +144,31 @@ fn main() {
     var kbok = 1; ki = 0;
     while (ki < kN) { if (tget(kyb, ki) != tget(kyi, ki)) { kbok = 0; } ki = ki + 1; }
     puts("    branchless kernel output bit-identical to branchy: "); if (kbok == 1) { puts("yes"); } else { puts("NO"); } _putc(10);
+    # 0.4.1: the integer-SIMD kernel (iv_dp8, 16 int8 lanes/instr) — pack once
+    # (the deployment "quantize + pack once" step, like kWq above), then run.
+    var kw8t = alloc(kKN); var kwsum = t_alloc(kN); var kxu8 = alloc(kK);
+    tsimd_pack_w(kWq, kK, kN, kw8t, kwsum);
+    var kys = t_alloc(kN);
+    ternary_matmul_free_simd(kqx, ksi, kw8t, kwsum, kg, 0, kys, 1, kK, kN, kxu8);
+    var ksok = 1; ki = 0;
+    while (ki < kN) { if (tget(kys, ki) != tget(kyi, ki)) { ksok = 0; } ki = ki + 1; }
+    puts("    SIMD kernel (iv_dp8) output bit-identical to branchy: "); if (ksok == 1) { puts("yes"); } else { puts("NO"); } _putc(10);
     var iters = 100; var it = 0;
     var t0 = now_ns();
     while (it < iters) { ternary_matmul_free(kqx, ksi, kWq, kg, 0, kyi, 1, kK, kN); it = it + 1; }
     var t1 = now_ns(); it = 0;
     while (it < iters) { ternary_matmul_free_bl(kqx, ksi, kWq, kg, 0, kyb, 1, kK, kN); it = it + 1; }
     var tb = now_ns(); it = 0;
+    while (it < iters) { ternary_matmul_free_simd(kqx, ksi, kw8t, kwsum, kg, 0, kys, 1, kK, kN, kxu8); it = it + 1; }
+    var ts = now_ns(); it = 0;
     while (it < iters) { linear_fwd(kxe, kWe, 0, kyf, 1, kK, kN); it = it + 1; }
     var t2 = now_ns();
     puts("    timing/call: branchy = "); fmt_int((t1 - t0) / iters); puts(" ns ; branchless (M3b) = "); fmt_int((tb - t1) / iters);
-    puts(" ns ; rosnet SIMD-f64 = "); fmt_int((t2 - tb) / iters); puts(" ns\n");
-    puts("    (today's wins: multiply-free accumulate + branch elimination + 32x memory. The b1.58\n");
-    puts("     CPU throughput payoff over SIMD-f64 needs INTEGER-SIMD lanes (int8 x sign-select, 16-32/instr),\n");
-    puts("     which this Cyrius toolchain (f64-only SIMD, 2-wide SSE2) does not yet expose — the M3b gate.)\n");
+    puts(" ns ; SIMD int8 (0.4.1) = "); fmt_int((ts - tb) / iters);
+    puts(" ns ; rosnet SIMD-f64 = "); fmt_int((t2 - ts) / iters); puts(" ns\n");
+    puts("    (the 0.4.1 payoff: multiply-free is now also FASTER — cyrius 6.4.x integer SIMD (iv_dp8,\n");
+    puts("     16 int8 lanes/instr) lifted the M3b gate; ternary beats the f64-SIMD matmul on wall-clock\n");
+    puts("     while keeping the exact-parity + 32x-memory wins.)\n");
 
     # ---- M3c: whole-model integer inference — the kernel through the TRAINED model ----
     # Reuse the bite-F transformer (trained on "hello world" just above): run it three
@@ -170,6 +182,13 @@ fn main() {
     tx_fwd_q(1, ctok, cV, cT, 4, 8);                     # full-quant f64 reference
     var li_fq = t_alloc(ciTV); t_copy(li_fq, ki_logits, ciTV);
     tx_fwd_q(0, ctok, cV, cT, 4, 8);                     # integer kernel — the payoff
+    var li_int = t_alloc(ciTV); t_copy(li_int, ki_logits, ciTV);
+    tx_fwd_q(2, ctok, cV, cT, 4, 8);                     # integer-SIMD kernel (0.4.1)
+    var csok = 1; var cs = 0;
+    while (cs < ciTV) { if (tget(ki_logits, cs) != tget(li_int, cs)) { csok = 0; } cs = cs + 1; }
+    puts("    SIMD whole-model logits bit-identical to the scalar integer kernel: ");
+    if (csok == 1) { puts("yes"); } else { puts("NO"); } _putc(10);
+    t_copy(ki_logits, li_int, ciTV);
     var cmx = f64_from(0); var cdx = f64_from(0); var ci2 = 0;
     while (ci2 < ciTV) {
         var e = f64_abs(f64_sub(tget(ki_logits, ci2), tget(li_fq, ci2)));

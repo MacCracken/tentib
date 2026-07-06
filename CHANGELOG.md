@@ -4,12 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Deferred → 0.4.1 (gated on the toolchain)
-- **M3b integer-SIMD kernel** — the wall-clock throughput lever. b1.58's CPU speedup
-  over SIMD-f64 needs INTEGER-SIMD lanes (int8 × sign-select / VNNI, 16–32 per instr);
-  this Cyrius (6.2.37) has **f64-only SIMD** (2-wide SSE2). Lands when cyrius adds
-  integer SIMD — see the proposal
-  [`docs/development/proposals/2026-06-23-cyrius-integer-simd.md`](docs/development/proposals/2026-06-23-cyrius-integer-simd.md).
+## [0.4.1] — 2026-07-06
+
+**The integer-SIMD ternary kernel — "multiply-free is also FASTER."** The 0.4.0 gate
+lifted: cyrius **6.4.6/6.4.7** (SIMD arc Phase 3) shipped integer SIMD, including
+`iv_dp8(a, b, n)` — the widening u8·i8 → i32 dot (`pmaddubsw` → `pmaddwd` → `paddd`,
+16 int8 lanes/instruction) that the filed proposal
+([`docs/development/proposals/2026-06-23-cyrius-integer-simd.md`](docs/development/proposals/2026-06-23-cyrius-integer-simd.md))
+asked for. The ternary kernel now **beats the f64-SIMD matmul it was ~5× behind**,
+while staying **bit-identical** to the scalar kernel. Suite **86 → 90**.
+
+### Added — the SIMD kernel (`src/kernel.cyr`)
+- **`tsimd_pack_w(Wq, K, N, w8t, wsum)`** — the "quantize + pack once" deployment
+  step: transposes `Wq` [K,N] (i64 ternary) to **`w8t` [N,K] i8 bytes** (each
+  output's weights contiguous, as `iv_dp8` needs) + per-output **`wsum`** over the
+  SIMD span (the u8-offset correction term). The i8 sibling of `tpack2`.
+- **`ternary_matmul_free_simd(qx, sx, w8t, wsum, γ, b, y, M, K, N, xu8)`** — same
+  contract + **bit-identical output** vs `ternary_matmul_free`. `pmaddubsw` is
+  u8 × i8, so the signed int8 activation codes are offset to u8 (`+128`, exact
+  algebra: `dot(x+128, w) = dot(x, w) + 128·Σw`, corrected by `wsum`); the `K % 16`
+  tail runs the M3b branchless mask arithmetic on the same `w8t` bytes. Exactness
+  argument documented in-file: ternary weights bound each `pmaddubsw` pair-sum by
+  510 ≪ 32767 (the i16 stage never saturates), i32 accumulate safe to K ~ 2²⁴.
+- **`bl_forward_q` mode 2** — whole-model SIMD inference through all 7 BitLinears
+  (re-packs per call, matching mode 0's re-quantize-per-call fairness); new scratch
+  `ki_w8t`/`ki_wsum`/`ki_xu8` in `tx_int_init`.
+
+### Benchmarks (128×128 layer, M=1, 100 iters/kernel, x86-64 host, cyrius 6.4.10)
+- **SIMD int8 kernel = 1,946 ns/call** vs **rosnet SIMD-f64 `linear_fwd` = 14,670 ns**
+  — **~7.5× faster than the f64 baseline** (the 0.4.1 acceptance: the *"multiply-free
+  is also faster"* demonstration). vs branchless scalar (M3b) 87,254 ns = **~45×**;
+  vs branchy 102,652 ns = **~53×**. The 0.4.0 standings (scalar ternary ~5× *slower*
+  than f64-SIMD) are inverted.
+
+### Tests (86 → 90, all green)
+- **M3d bit-identity** across the three K regimes: K=4 (K16=0, pure branchless
+  tail — the whole-model C=4/F=8 shape), K=20 (SIMD span + tail, correction split),
+  K=32 (pure `iv_dp8`, two lane-groups).
+- **M3d whole-model**: `tx_fwd_q(mode 2)` logits **bit-identical** to the scalar
+  integer path (mode 0) through all 7 BitLinears incl. the biased head.
+
+### Changed
+- **Cyrius pin 6.2.37 → 6.4.10** (`cyrius lib sync --full`; the 86/86 baseline
+  re-validated green at the new pin before the kernel work — the bump crosses the
+  6.3.13 array-locals-to-stack boundary, no fallout).
+- Demo driver (`src/main.cyr`) M3/M3c sections print the SIMD parity + timing rows;
+  the stale "toolchain does not yet expose integer SIMD" gate-note replaced.
 
 ## [0.4.0] — 2026-06-23
 

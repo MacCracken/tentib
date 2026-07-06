@@ -290,6 +290,12 @@ var _FDL_SYSTEM_HELPER = "/usr/lib/cyrius/dlopen-helper";
 # Default: `$HOME/.cyrius/dlopen-helper`. In trusted mode: the root-owned
 # system helper (the $HOME copy is NEVER consulted).
 fn _fdlopen_helper_path(buf, bufsz): i64 {
+    # v6.2.43: fdlopen (setuid foreign-glibc dlopen) is Linux-host-only — agnos
+    # has no foreign glibc and the raw syscalls below mis-dispatch. Fail closed
+    # on agnos. (issue 2026-06-23-agnos-portability-sweep-residuals, part 2.)
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
     if (buf == 0) { return 0; }
     if (bufsz < 64) { return 0; }
     if (_fdl_trusted_mode == 1) {
@@ -363,6 +369,11 @@ fn _fdlopen_helper_path(buf, bufsz): i64 {
 # Check whether `$HOME/.cyrius/dlopen-helper` exists. Returns 1 if
 # yes, 0 if no.
 fn fdlopen_helper_available(): i64 {
+    # v6.2.43: fdlopen is Linux-host-only — report unavailable on agnos (the
+    # documented availability gate; callers check this before fdlopen_init*).
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
     var pathbuf = alloc(512);
     if (pathbuf == 0) { return 0; }
     var pl = _fdlopen_helper_path(pathbuf, 512);
@@ -401,6 +412,9 @@ fn fdlopen_state_size(): i64 { return 256; }
 # Returns 0 on success, negative error code on failure.
 # ---------------------------------------------------------------
 fn _fdlopen_mmap_elf(path, out_info): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;   # Linux-host-only (raw open/fstat/mmap mis-dispatch on agnos)
+    #endif
     var fd = syscall(2, path, 0, 0);   # O_RDONLY
     if (fd < 0) { return 0 - 1; }
 
@@ -698,6 +712,9 @@ fn _fdlopen_enter_ldso(ldso_entry, new_rsp): i64 {
 # negative error code on failure.
 # ---------------------------------------------------------------
 fn _fdlopen_run_loader(state): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 3;   # Linux-host-only (raw auxv/loader syscalls mis-dispatch on agnos)
+    #endif
     # Read /proc/self/auxv once
     var auxv = alloc(4096);
     if (auxv == 0) { return 0 - 3; }
@@ -821,6 +838,9 @@ fn fdlopen_init_full(state): i64 {
 # x86_64 Linux `struct stat`: st_mode @24 (u32), st_uid @28 (u32). Returns 1 if
 # trusted, 0 otherwise.
 fn _fdlopen_verify_trusted(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;   # Linux-host-only (raw lstat mis-dispatches on agnos)
+    #endif
     var st[144];
     var r = syscall(6, path, &st);              # lstat(path, &st)
     if (r < 0) { return 0; }
