@@ -5,20 +5,22 @@
 
 ## Version
 
-**0.5.0** — **benchmarks** (`docs/benchmarks.md`, a v1.0 criterion), cut 2026-07-06
-(user tags). The real `tests/tentib.bcyr` harness under B-series fairness (single
-pinned CPU, warm cache, identical shapes): layer-sweep SIMD advantage **grows with
-size** (vs rosnet f64-SIMD **5.0× @128² → 18.4× @768²**; lane width + i8 cache
-residency), prep amortization (~4 ns/wt pack, once), whole-model **3,549 tok/s vs
-2,307 f64** (per-call re-pack included; pack-once deployment = 0.7.0), memory 32×
-measured, and the **honest quality delta** vs matched-size f64 attn11 1.13.0
-(CE 0.006 vs 0.11 at toy scale; b1.58 ≥3B parity + bitnet.cpp cited, not
-re-demonstrated). Suite **90/90**. Prior: **0.4.1** (the integer-SIMD ternary
-kernel — the toolchain gate lifted by cyrius 6.4.6/6.4.7 `iv_dp8`; bit-identical
-to scalar + beats the f64-SIMD matmul; whole-model = `bl_forward_q` mode 2),
-**0.4.0** (M3 — whole-model matmul-free integer inference, exact parity < 1e-9,
-argmax 10/10, 2-bit packed 32×), **0.3.0** (M2 — ternary transformer trains),
-**0.2.0** (M1 — BitLinear + STE), **0.1.0** (M0 — ternary quantizer).
+**0.6.0** — **allocation-clean + API freeze** (`docs/api.md`, a v1.0 criterion), cut
+2026-07-06 (user tags). The public surface settled + documented (tarka api.md
+pattern: freeze policy, not-frozen internals, conventions, output cells); the
+allocation audit recorded — **allocation only in `blk_init`/`tx_init`/`tx_int_init`
++ the one-shot trainers; every forward/backward/kernel path allocation-free**; the
+last indirect-only coverage closed with three direct gates (`ref_dot`,
+`bl_forward_q` mode 0-vs-2, the manual `tx_sgd` quartet). No behavior change.
+Suite **95/95**. Prior: **0.5.0** (benchmarks — `docs/benchmarks.md` + the real
+bcyr harness; SIMD advantage grows 5.0×→18.4× over f64-SIMD with layer size;
+whole-model 3,549 vs 2,307 tok/s; honest toy-scale quality delta vs f64 attn11
+CE 0.006 vs 0.11), **0.4.1** (the integer-SIMD ternary kernel — the toolchain gate
+lifted by cyrius 6.4.6/6.4.7 `iv_dp8`; bit-identical to scalar + beats the
+f64-SIMD matmul; whole-model = `bl_forward_q` mode 2), **0.4.0** (M3 — whole-model
+matmul-free integer inference, exact parity < 1e-9, argmax 10/10, 2-bit packed
+32×), **0.3.0** (M2 — ternary transformer trains), **0.2.0** (M1 — BitLinear +
+STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Toolchain
 
@@ -36,9 +38,10 @@ argmax 10/10, 2-bit packed 32×), **0.3.0** (M2 — ternary transformer trains),
   clip-mask, dx through Weff); FD-gate losses `bl_surr_lin_loss`/`bl_loss_of_x`/
   `bl_quant_loss_wonly`.
 - `src/model.cyr` — **M2 ternary LM**: `softmax_xent_fwd`/`_bwd` (ported from
-  attn11), `lm_init`/`lm_forward`/`lm_train`/`lm_eval_sweep`/`lm_correct`, and
-  `bl_xent_loss` (the FD-gate's quantized-loss probe). Embedding (full-precision) →
-  BitLinear head (ternary) → softmax-CE, SGD on the latent weight.
+  attn11), `lm_train` (public; `lm_init`/`lm_eval_sweep`/`lm_correct` are its
+  internals — 0.6.0 classification), and `bl_xent_loss` (the FD-gate's
+  quantized-loss probe). Embedding (full-precision) → BitLinear head (ternary) →
+  softmax-CE, SGD on the latent weight.
 - `src/layers.cyr` — **M2 differentiable layers**: `rmsnorm_fwd`/`bwd` (pre-norm),
   `gelu_fwd`/`bwd` (+ a `_tanh` from `f64_exp`), `attn_fwd`/`bwd` (single-head causal
   scaled-dot-product attention), each with a `*_loss` FD probe.
@@ -63,7 +66,7 @@ argmax 10/10, 2-bit packed 32×), **0.3.0** (M2 — ternary transformer trains),
 
 ## Tests
 
-- `tests/tentib.tcyr` — **90/90** green: rosnet smoke, M0 quantization, BitLinear
+- `tests/tentib.tcyr` — **95/95** green: rosnet smoke, M0 quantization, BitLinear
   forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
@@ -75,9 +78,11 @@ argmax 10/10, 2-bit packed 32×), **0.3.0** (M2 — ternary transformer trains),
   round-trip), **M3b** (branchless kernel bit-identical to branchy), **M3d** (0.4.1:
   SIMD kernel bit-identical to scalar across three K regimes — pure-tail K=4 /
   split K=20 / pure-`iv_dp8` K=32 — + whole-model mode 2 bit-identical incl. the
-  biased head), and **M3c** (whole-model integer inference: < 1e-9 relerr vs the
+  biased head), **M3c** (whole-model integer inference: < 1e-9 relerr vs the
   full-quant f64 forward, finite activation-quant delta vs the trained model,
-  argmax agreement at all T).
+  argmax agreement at all T), and the **0.6.0 API-freeze gates** (`ref_dot` exact,
+  `bl_forward_q` direct mode 0-vs-2 bit-identity + same γ, the manual
+  zero/loss/bwd/sgd quartet descends).
 - `tests/tentib.bcyr` — **the 0.5.0 benchmark harness** (drives `docs/benchmarks.md`):
   per-layer kernel sweep (branchy/branchless/SIMD-pack-once/rosnet-f64 at 128²–768²),
   prep-amortization costs, whole-model forward → tok/s (f64 / scalar-int / SIMD-int
@@ -99,9 +104,10 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**v0.5.0 cut (benchmarks — `docs/benchmarks.md` + the real bench harness).** The
-remaining SemVer path to 1.0: **0.6.0** alloc-clean + API freeze + `docs/api.md` ·
-**0.7.0** consumer readiness (the pack-once deployment inference entry point —
-load → quantize + pack once → integer inference; §2/§3 of benchmarks.md motivate
-it) · **0.8.0** security audit · **1.0.0**. Full per-version scope + acceptance in
+**v0.6.0 cut (alloc-clean + API freeze — `docs/api.md`).** The remaining SemVer
+path to 1.0: **0.7.0** consumer readiness (the pack-once deployment inference
+entry point — load latent weights → quantize + pack once → integer inference, a
+worked example from the public API alone; §2/§3 of benchmarks.md motivate it;
+must stay **additive** to the frozen surface) · **0.8.0** security audit ·
+**1.0.0** clean cut. Full per-version scope + acceptance in
 [`roadmap.md`](roadmap.md).

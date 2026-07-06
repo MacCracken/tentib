@@ -745,6 +745,41 @@ fn main() {
     while (cii < ciTV) { if (tget(ki_logits, cii) != tget(li_int, cii)) { ci_sok = 0; } cii = cii + 1; }
     assert(ci_sok == 1, "M3d: whole-model SIMD inference (mode 2) bit-identical to the scalar integer kernel (incl. the biased head)");
 
+    test_group("0.6.0 API-freeze gates: every public entry point exercised directly");
+    # ref_dot — the M0 full-precision baseline dot (exact-int f64s => exact result).
+    var rd_w = t_alloc(2); var rd_x = t_alloc(2);
+    tstore(rd_w, 0, f64_from(2)); tstore(rd_w, 1, f64_from(3));
+    tstore(rd_x, 0, f64_from(1)); tstore(rd_x, 1, f64_from(1));
+    assert(ref_dot(rd_w, rd_x, 2) == f64_from(5), "API: ref_dot exact on integer-valued f64s (2*1 + 3*1 = 5)");
+    # bl_forward_q — the per-layer mode dispatcher, called directly (drivers above
+    # reach it only through tx_fwd_q). ki_* scratch is live from tx_int_init; the
+    # M3 group's m3x/m3W (M=2, K=4, N=3) fit inside the ciC=4/ciF=8/ciV=6 sizing.
+    var bq_y0 = t_alloc(m3MN); var bq_y2 = t_alloc(m3MN);
+    var bq_g0 = bl_forward_q(0, m3x, m3W, 0, bq_y0, m3M, m3K, m3N);
+    var bq_g2 = bl_forward_q(2, m3x, m3W, 0, bq_y2, m3M, m3K, m3N);
+    assert(bq_g0 == bq_g2, "API: bl_forward_q returns the same gamma for mode 0 and mode 2 (same quantization)");
+    var bq_ok = 1; var bqi = 0;
+    while (bqi < m3MN) { if (tget(bq_y0, bqi) != tget(bq_y2, bqi)) { bq_ok = 0; } bqi = bqi + 1; }
+    assert(bq_ok == 1, "API: bl_forward_q mode 2 (SIMD) bit-identical to mode 0 (scalar) through the dispatcher");
+    # The manual training-loop quartet (tx_loss -> tx_zero_grads -> tx_bwd -> tx_sgd)
+    # composed BY THE CALLER, from a fresh init — the public surface tx_train wraps.
+    # (Re-points the tx_* globals; placed after every gate that reads the M3c model.)
+    tx_init(ciV, ciT, ciC, ciF);
+    tx_param_init(ciV, ciT, ciC, ciF, 7);
+    var mq_l0 = tx_loss(citok, citgt, ciV, ciT, ciC, ciF);
+    var mq_nlr = f64_div(f64_from(0 - 1), f64_from(10));
+    var mq_s = 0;
+    while (mq_s < 5) {
+        tx_zero_grads(ciV, ciT, ciC, ciF);
+        tx_loss(citok, citgt, ciV, ciT, ciC, ciF);
+        tx_bwd(citok, citgt, ciV, ciT, ciC, ciF);
+        tx_sgd(ciV, ciT, ciC, ciF, mq_nlr);
+        mq_s = mq_s + 1;
+    }
+    var mq_l1 = tx_loss(citok, citgt, ciV, ciT, ciC, ciF);
+    assert(f64_is_finite(mq_l1) == 1, "API: manually-composed train step (zero/loss/bwd/sgd) keeps the loss finite");
+    assert(f64_lt(mq_l1, mq_l0) == 1, "API: 5 manually-composed SGD steps descend the loss (the quartet tx_train wraps)");
+
     return assert_summary();
 }
 

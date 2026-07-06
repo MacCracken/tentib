@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — v0.5.0: benchmarks — the honest numbers behind the claims (90/90 gated)
+## Status — v0.6.0: allocation-clean + API freeze (95/95 gated)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -54,6 +54,11 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   included; pack-once deployment is the 0.7.0 entry point), the 32× memory story
   measured, and the **honest quality delta** vs a matched-size f64 attn11 (CE 0.006
   vs 0.11 at toy scale; b1.58 ≥3B parity cited, not re-demonstrated).
+- **API freeze (v0.6.0)** — [`docs/api.md`](docs/api.md): every public symbol
+  documented + directly gated (suite 90 → 95); the allocation audit recorded —
+  allocation only in `*_init` + the one-shot trainers, **every inference path
+  allocation-free**; internals (FD probes, STE masks, sublayer chains) explicitly
+  out of the freeze.
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39

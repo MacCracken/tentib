@@ -41,6 +41,7 @@ hide it.
 | **0.4.0** | M3 — matmul-free integer inference | the kernel through all 7 BitLinears of the trained transformer; exact parity < 1e-9 vs full-quant f64, argmax 10/10; 2-bit packed weights (32×); branchless scalar kernel (~25% over branchy). **86/86**. |
 | **0.4.1** | integer-SIMD ternary kernel | the gate lifted (cyrius 6.4.6/6.4.7 int SIMD, `iv_dp8`): `ternary_matmul_free_simd` (pack-once i8 transpose + u8-offset codes + 16-lane `iv_dp8` + branchless tail) **bit-identical** to scalar and **~7.5× faster than rosnet f64-SIMD** on 128×128 (1,946 vs 14,670 ns; ~45× over branchless) — *multiply-free is also faster* met. Whole-model = mode 2. Pin 6.2.37 → 6.4.10. **90/90**. |
 | **0.5.0** | benchmarks (`docs/benchmarks.md`) | the real `tests/tentib.bcyr` harness, B-series fairness: layer-sweep SIMD advantage **grows 5.0×→18.4×** over f64-SIMD (128²→768²; lane width + i8 cache residency); whole-model **3,549 vs 2,307 tok/s** (per-call re-pack included — pack-once deployment bounded by the sweep, → 0.7.0); memory 32× measured; **honest quality delta** vs matched-size f64 attn11 (CE 0.006 vs 0.11 toy-scale; b1.58 ≥3B parity cited). **90/90**. |
+| **0.6.0** | alloc-clean + API freeze (`docs/api.md`) | the public surface settled + documented (freeze policy, not-frozen internals, conventions, output cells); allocation audit: **allocation only in `*_init` + one-shot trainers, every fwd/bwd/kernel path allocation-free**; last indirect-only coverage closed (`ref_dot`, direct `bl_forward_q` 0-vs-2, the manual `tx_sgd` quartet). No behavior change. **95/95**. |
 
 Full detail per version in [`../../CHANGELOG.md`](../../CHANGELOG.md).
 
@@ -68,16 +69,14 @@ the measured 32× memory story, and the quality delta vs a matched-size f64 attn
 with the b1.58/bitnet.cpp references cited. The per-call-re-pack honesty note feeds
 directly into 0.7.0's pack-once deployment entry point.
 
-### 0.6.0 — allocation-clean + API freeze + `docs/api.md`  *[v1.0 criterion: API frozen]*
+### 0.6.0 — allocation-clean + API freeze + `docs/api.md`  ✅ **SHIPPED 2026-07-06** (see the table above)
 
-- **Allocation-clean:** rosnet's bump allocator never frees; repeated inference must
-  reuse scratch (the `*_init` pattern already does — audit every path, document the
-  lifetime contract, no per-call allocation in the hot loop).
-- **API freeze:** settle the exported surface (the quantizer, BitLinear fwd/bwd, the
-  block/LM, the kernel, `tx_fwd_q` / `tx_int_init` / `logits_argmax`). Document every
-  exported symbol + its contract in `docs/api.md`; ensure each is test-covered.
-- **Acceptance:** `docs/api.md` complete; no undocumented exported symbol; the suite
-  exercises every public entry point.
+Both halves met as specified: the allocation audit walked every `t_alloc`/`alloc`
+site (all in `*_init` + the one-shot trainers; every inference path allocation-free
+— the lifetime contract is documented in api.md), and `docs/api.md` freezes the
+surface with every public symbol documented + directly suite-gated (the 0.6.0
+API-freeze test group closed `ref_dot` / `bl_forward_q` / `tx_sgd`, the three
+symbols previously exercised only indirectly).
 
 ### 0.7.0 — downstream-consumer readiness
 
@@ -106,7 +105,7 @@ All v1.0 criteria green (below); public API frozen; clean cut.
 - [x] A ternary transformer that trains from scratch (loss descends) via akshara — **0.3.0**
 - [x] Packed-ternary + int8 matmul-free inference kernel reproduces the model's logits — **0.4.0**
 - [x] Benchmarks in `docs/benchmarks.md` (tok/s; quality delta vs same-size f64 attn11) — **0.5.0** (the speed half landed via **0.4.1**)
-- [ ] Public API frozen — every exported symbol documented and tested — **0.6.0**
+- [x] Public API frozen — every exported symbol documented and tested — **0.6.0**
 - [ ] CHANGELOG complete from v0.1.0; security/hardening audit pass — **0.8.0**
 
 ## Out of scope (for v1.0)

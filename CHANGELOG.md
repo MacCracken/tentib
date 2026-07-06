@@ -4,6 +4,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-06
+
+**Allocation-clean + API freeze** (`docs/api.md`, the "API frozen" v1.0 criterion).
+No behavior change to any shipped path — the cut settles and documents the surface,
+closes the last indirect-only test coverage, and records the allocation audit.
+Suite **90 → 95**.
+
+### Added — `docs/api.md` (the frozen public surface)
+- Every public symbol documented with its contract + "tested by" driver, in the
+  tarka api.md house pattern: freeze policy (stable through 1.x from the 1.0.0 cut;
+  minor versions add only), the **not-frozen internal mechanism** list (STE masks,
+  FD probes, sublayer chains, `lm_train`-local helpers, scratch globals), caller
+  conventions (everything-is-i64, no bounds checks, `b = 0` = no bias), and the
+  documented output cells (`tx_logits`, `ki_logits`, `mlp_out`).
+- **Allocation & lifetime contract** (the audit result): allocation happens ONLY
+  in `blk_init`/`tx_init`/`tx_int_init` + the one-shot trainers (`lm_train`,
+  `tx_train`); **every forward/backward/kernel path is allocation-free** — audited
+  by walking all 32 `t_alloc`/`alloc` sites outside the demo driver. Repeated
+  inference costs zero allocation; re-calling an `*_init` re-points its scratch
+  family (bump allocator — old buffers unreachable, not freed).
+
+### Tests (90 → 95) — the API-freeze gates
+- **`ref_dot`** exact-value gate (the M0 baseline was demo-only).
+- **`bl_forward_q` direct** (was reachable only through `tx_fwd_q`): mode 0 vs
+  mode 2 — same γ returned + outputs bit-identical through the dispatcher.
+- **The manual training-loop quartet** (`tx_zero_grads → tx_loss → tx_bwd →
+  tx_sgd`) composed by the caller from a fresh init: 5 steps descend the loss,
+  finite — gating the public surface `tx_train` wraps (`tx_sgd` was previously
+  exercised only inside `tx_train`).
+
+### Classified internal (not in the freeze)
+- `lm_init`/`lm_eval_sweep`/`lm_correct` (operate on `lm_train`-local buffers),
+  the FD probes + STE masks, the sublayer chains (`*_sublayer_*`, `block_q`),
+  numeric helpers. Readable + FD-gated; may change between minors.
+
 ## [0.5.0] — 2026-07-06
 
 **Benchmarks — the honest numbers behind the claims** (`docs/benchmarks.md`, a v1.0
