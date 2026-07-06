@@ -42,7 +42,8 @@ hide it.
 | **0.4.1** | integer-SIMD ternary kernel | the gate lifted (cyrius 6.4.6/6.4.7 int SIMD, `iv_dp8`): `ternary_matmul_free_simd` (pack-once i8 transpose + u8-offset codes + 16-lane `iv_dp8` + branchless tail) **bit-identical** to scalar and **~7.5× faster than rosnet f64-SIMD** on 128×128 (1,946 vs 14,670 ns; ~45× over branchless) — *multiply-free is also faster* met. Whole-model = mode 2. Pin 6.2.37 → 6.4.10. **90/90**. |
 | **0.5.0** | benchmarks (`docs/benchmarks.md`) | the real `tests/tentib.bcyr` harness, B-series fairness: layer-sweep SIMD advantage **grows 5.0×→18.4×** over f64-SIMD (128²→768²; lane width + i8 cache residency); whole-model **3,549 vs 2,307 tok/s** (per-call re-pack included — pack-once deployment bounded by the sweep, → 0.7.0); memory 32× measured; **honest quality delta** vs matched-size f64 attn11 (CE 0.006 vs 0.11 toy-scale; b1.58 ≥3B parity cited). **90/90**. |
 | **0.6.0** | alloc-clean + API freeze (`docs/api.md`) | the public surface settled + documented (freeze policy, not-frozen internals, conventions, output cells); allocation audit: **allocation only in `*_init` + one-shot trainers, every fwd/bwd/kernel path allocation-free**; last indirect-only coverage closed (`ref_dot`, direct `bl_forward_q` 0-vs-2, the manual `tx_sgd` quartet). No behavior change. **95/95**. |
-| **0.7.0** | consumer readiness — pack-once serving | additive: `tx_pack_init`/`tx_pack` (quantize + pack the 7 BitLinears once) + `tx_fwd_packed` (serving forward, bit-identical to modes 0/2, gated twice) → **13,472 tok/s vs 2,316 f64 (5.8×)**, 3.8× over mode 2; self-checking public-API-only `examples/quickstart.cyr` (train → pack → serve, PASS). **97/97**. |
+| **0.7.0** | consumer readiness — pack-once serving | additive: `tx_pack_init`/`tx_pack` (quantize + pack the 7 BitLinears once) + `tx_fwd_packed` (serving forward, bit-identical to modes 0/2, gated twice) → **~13.5k tok/s vs ~2.3k f64 (5.7×)**, ~4× over mode 2; self-checking public-API-only `examples/quickstart.cyr` (train → pack → serve, PASS). **97/97**. |
+| **0.8.0** | security/hardening audit + CHANGELOG completeness | audit re-derived from source (`docs/audit/2026-07-06-audit.md`): **6 fixed/guarded** (γ=0 quantizer sign bug FIXED; fail-loud `guard()` on non-ternary pack input, SIMD K ≤ 2²² exactness bound, packed-store misuse) + **5 verified sound** (incl. `_tanh` — ganita-overflow-class immune by construction); cold paths only, serving throughput unchanged; CHANGELOG verified gap-free 0.1.0→now + cross-links resolve; SECURITY.md rewritten to the audited posture. **101/101**. |
 
 Full detail per version in [`../../CHANGELOG.md`](../../CHANGELOG.md).
 
@@ -89,12 +90,15 @@ tarka/anukūlana house convention; self-checking, public API only, non-zero exit
 on mismatch — running it is the test). The eventual real consumer is
 **hoosh / murti** serving the ternary model; the surface is now theirs to call.
 
-### 0.8.0 — security/hardening audit + CHANGELOG completeness  *[v1.0 criterion]*
+### 0.8.0 — security/hardening audit + CHANGELOG completeness  ✅ **SHIPPED 2026-07-06** (see the table above)
 
-- Hardening review: bounds on the packed-ternary codec, the int8-quant clamps,
-  integer-overflow on the accumulate at realistic K, alloc sizing in `tx_int_init`.
-- CHANGELOG complete + accurate from 0.1.0; all in-repo doc cross-links valid.
-- **Acceptance:** audit notes recorded; no open hardening finding; CHANGELOG verified.
+Every named review target landed: packed-codec bounds (non-ternary input now
+fails loud at pack time), the int8-quant clamps verified, the accumulate
+overflow bounded and guarded (i64 scalar = safe at any K; SIMD i32 = guarded
+K ≤ 2²²), `tx_int_init`/`tx_pack_init` sizing verified against all 7 layer
+shapes — plus one real bug the review list didn't predict (the γ=0 quantizer
+sign bug, fixed + regression-gated). No open finding; CHANGELOG + cross-links
+verified. Record: `docs/audit/2026-07-06-audit.md`.
 
 ### 1.0.0 — clean cut
 
@@ -107,7 +111,7 @@ All v1.0 criteria green (below); public API frozen; clean cut.
 - [x] Packed-ternary + int8 matmul-free inference kernel reproduces the model's logits — **0.4.0**
 - [x] Benchmarks in `docs/benchmarks.md` (tok/s; quality delta vs same-size f64 attn11) — **0.5.0** (the speed half landed via **0.4.1**)
 - [x] Public API frozen — every exported symbol documented and tested — **0.6.0**
-- [ ] CHANGELOG complete from v0.1.0; security/hardening audit pass — **0.8.0**
+- [x] CHANGELOG complete from v0.1.0; security/hardening audit pass — **0.8.0**
 
 ## Out of scope (for v1.0)
 

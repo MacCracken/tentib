@@ -115,6 +115,9 @@ fn tpack2(Wq, n, packed): i64 {
     var i = 0;
     while (i < n) {
         var w = load64(Wq + i * 8);
+        # a non-ternary weight would silently pack as 0 (data corruption on
+        # round-trip) — fail loud instead (0.8.0; pack is a cold path)
+        guard((w == 0) | (w == 1) | (w == (0 - 1)), "tpack2: weight not in {-1,0,+1}");
         var code = 0;
         if (w == 1) { code = 1; }
         if (w == (0 - 1)) { code = 2; }
@@ -278,6 +281,10 @@ fn tsimd_pack_w(Wq, K, N, w8t, wsum): i64 {
         var k = 0;
         while (k < K) {
             var w = load64(Wq + (k * N + n) * 8);
+            # a non-ternary weight would store8-truncate to a wrong i8 AND void
+            # the kernel's no-saturation exactness bound (pair-sums <= 510 only
+            # holds for |w| <= 1) — silently-wrong dots. Fail loud (cold path).
+            guard((w == 0) | (w == 1) | (w == (0 - 1)), "tsimd_pack_w: weight not in {-1,0,+1}");
             store8(w8t + n * K + k, w);           # i64 -1 truncates to the i8 0xFF
             if (k < K16) { s = s + w; }
             k = k + 1;
@@ -294,6 +301,10 @@ fn tsimd_pack_w(Wq, K, N, w8t, wsum): i64 {
 # 16 weights (widening dot, still multiply-free in spirit — pmaddubsw against
 # {-1,0,+1} only sign-selects) + the branchless scalar tail for K % 16.
 fn ternary_matmul_free_simd(qx, sx, w8t, wsum, gamma, b, y, M, K, N, xu8): i64 {
+    # the bit-identity contract rests on the i32 accumulate never overflowing:
+    # |acc| <= 255*K must stay < 2^31, so K < ~8.4M — enforce a comfortable
+    # bound (once per call, not per element). 0.8.0 hardening.
+    guard(K <= 4194304, "ternary_matmul_free_simd: K > 2^22 voids the i32 exactness bound");
     var K16 = (K / 16) * 16;
     var m = 0;
     while (m < M) {
@@ -359,6 +370,11 @@ fn tx_pack_init(V, T, C, F): i64 {
 
 # Quantize + pack all 7 BitLinears from the live tx_* latent weights. Once.
 fn tx_pack(V, T, C, F): i64 {
+    # without tx_pack_init the pointer tables are 0 — packing would write through
+    # garbage pointers (silent heap corruption); without tx_init/tx_int_init the
+    # weight/scratch pointers are 0 too. Fail loud (0.8.0).
+    guard(pk_w8t != 0, "tx_pack: call tx_pack_init first");
+    guard((tx_Wa != 0) & (ki_Wq != 0), "tx_pack: call tx_init + tx_int_init first");
     var CC = C * C; var CF = C * F;
     var i = 0;
     while (i < 7) {
@@ -411,6 +427,7 @@ fn mlp_sublayer_pk(x, g2, T, C, F): i64 {
 
 # Whole-model packed forward — the deployment serving path. Writes ki_logits.
 fn tx_fwd_packed(tokens, V, T, C, F): i64 {
+    guard(pk_ready == 1, "tx_fwd_packed: call tx_pack first");
     var C8 = C * 8;
     var t = 0;
     while (t < T) {

@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — v0.7.0: consumer-ready — pack once, serve at 5.8× f64 (97/97 gated)
+## Status — v0.8.0: security/hardening audit done — v1.0 criteria all green (101/101 gated)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -61,10 +61,16 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   out of the freeze.
 - **Consumer readiness (v0.7.0)** — the **pack-once deployment serving path**
   (additive): `tx_pack_init`/`tx_pack` quantize + pack all 7 BitLinears once,
-  `tx_fwd_packed` serves — bit-identical to the reference kernels and **13,472
-  tok/s vs 2,316 f64 (5.8×)** at the bench config. Worked, self-checking consumer
+  `tx_fwd_packed` serves — bit-identical to the reference kernels and **13,675
+  tok/s vs 2,378 f64 (5.7×)** at the bench config. Worked, self-checking consumer
   example: [`examples/quickstart.cyr`](examples/quickstart.cyr) (train → pack →
   serve, public API only).
+- **Hardening audit (v0.8.0)** — [`docs/audit/2026-07-06-audit.md`](docs/audit/2026-07-06-audit.md):
+  re-derived from source; **6 findings fixed/guarded** (the γ=0 quantizer sign
+  bug; fail-loud `guard()` on non-ternary pack input, the SIMD K-bound, and
+  packed-store misuse) + **5 paths verified sound** (incl. `_tanh` — immune to
+  the ganita overflow class by construction). Hot loops carry zero checks;
+  packed serving throughput unchanged. CHANGELOG verified complete 0.1.0→now.
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39
@@ -82,8 +88,8 @@ M3  matmul-free integer inference through the trained transformer:
 M3-SIMD  the 0.4.1 kernel (iv_dp8, 16 int8 lanes/instr), 128x128 layer:
     bit-identical to scalar   1946 ns/call  vs  rosnet SIMD-f64 14670 ns  (~7.5x)
 
-0.7.0  pack once -> serve (267k-param model, T=32):
-    PACKED serving 13472 tok/s  vs  f64 2316 tok/s  (5.8x, bit-identical)
+0.7.0  pack once -> serve (267k-param model, T=32; 0.8.0-guarded run):
+    PACKED serving 13675 tok/s  vs  f64 2378 tok/s  (5.7x, bit-identical)
 ```
 
 Deps: rosnet 0.2.0 + tyche 0.1.1 + akshara 0.1.0 (the shared sovereign tokenizer).

@@ -3,9 +3,9 @@
 ## Reporting
 
 Report vulnerabilities to **cyriusmaccken@gmail.com**. Include reproduction
-steps and the tentib version from `VERSION` (currently **0.4.0**). Expect an
-initial response within one week. Coordinated disclosure is appreciated — do not
-open a public GitHub issue with exploit details.
+steps and the tentib version from `VERSION`. Expect an initial response within
+one week. Coordinated disclosure is appreciated — do not open a public GitHub
+issue with exploit details.
 
 ## Threat model
 
@@ -38,17 +38,19 @@ tentib *does not* defend against:
 |---|---|
 | **Input data** | The corpus is an embedded compile-time string, byte-tokenized by akshara into a fixed-size vocabulary; there is no runtime file or stdin read. Anyone who can change the corpus already controls the build. |
 | **Numeric / memory layout** | All training and inference buffers (latent f64 weights, optimizer state, activation caches, the integer kernel's scratch) are allocated once at fixed, dimension-derived sizes via the `*_init` pattern; no allocation or unbounded growth in the training or inference loop. Indices are computed from compile-time dims. |
-| **Packed-ternary codec** | `tpack2` / `tunpack2` pack `{−1, 0, +1}` to 2 bits/weight over fixed, dimension-derived buffers; the round-trip is gated in `tests/tentib.tcyr`. The packed bytes are produced and consumed in-process — there is no external packed-weight file to validate yet. |
-| **Integer accumulate** | The matmul-free kernel accumulates int8 activations over ternary weights into i64; at the model's small K the signed accumulate cannot overflow i64. Realistic-K overflow bounds are a tracked hardening item for **0.8.0**. |
+| **Packed-ternary codec** | `tpack2` / `tunpack2` pack `{−1, 0, +1}` to 2 bits/weight over fixed, dimension-derived buffers; the round-trip is gated in `tests/tentib.tcyr`. Since 0.8.0, a non-ternary input weight **fails loud** at pack time (both `tpack2` and the SIMD `tsimd_pack_w`) instead of silently corrupting. The packed bytes are produced and consumed in-process — there is no external packed-weight file to validate yet. |
+| **Integer accumulate** | The scalar kernels accumulate into i64 (\|acc\| ≤ 127·K — cannot overflow at any allocatable K). The SIMD kernel's i32 accumulate is exact for K ≲ 8.4M and **guarded** at K ≤ 2²² since 0.8.0 (once per call). |
 | **PRNG** | rosnet's weight init / sampling go through tyche (xorshift/splitmix-class) — used for reproducibility only, **never** for any security purpose. |
 | **Supply chain** | The cyrius toolchain version is pinned in `cyrius.cyml` (single source of truth). The sibling deps (rosnet / tyche / akshara) are pinned by exact git tag. CI installs the toolchain via the upstream `scripts/install.sh`. |
 
-## Maturity note
+## Hardening posture (0.8.0 audit)
 
-tentib is **pre-1.0 (0.4.0)** and has **not** had a formal security/hardening
-audit. That audit is an explicit roadmap item — **0.8.0** (bounds on the
-packed-ternary codec, the int8-quant clamps, integer-overflow on the accumulate
-at realistic K, alloc sizing) is a stated v1.0 criterion. Until then, treat the
-surfaces above as described from the code, not as audited guarantees. The repo's
-correctness gate is the finite-difference suite (`tests/tentib.tcyr`), not a
-security review.
+The **0.8.0 security/hardening audit is done** — record at
+[`docs/audit/2026-07-06-audit.md`](docs/audit/2026-07-06-audit.md) (6 findings
+fixed/guarded, 5 paths verified sound by re-deriving from source). Posture:
+public-API preconditions whose violation would mean silent heap corruption or
+silently-wrong numerics are guarded **fail-loud** (`guard()` — cold paths only;
+hot loops carry zero checks; the packed serving throughput is unchanged). Buffer
+*sizing* stays caller-guarantees per the rosnet substrate contract, documented
+per symbol in [`docs/api.md`](docs/api.md). The repo's correctness gate remains
+the finite-difference suite (`tests/tentib.tcyr`, 101/101).

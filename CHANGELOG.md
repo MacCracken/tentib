@@ -4,6 +4,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-06
+
+**Security/hardening audit + CHANGELOG completeness** — the last v1.0 criterion.
+Audit record: [`docs/audit/2026-07-06-audit.md`](docs/audit/2026-07-06-audit.md)
+(re-derived from source, comments not trusted). Posture = the tarka precedent:
+fail-loud `guard()` on public preconditions whose violation means silent
+corruption or silently-wrong numerics — **cold paths only, hot loops carry zero
+checks** (packed serving throughput unchanged: 13,675 tok/s this run). Suite
+**97 → 101**.
+
+### Fixed — found by the audit
+- **`ternary_one(w, gamma=0)` quantized all-zero weight vectors to all-“−1”**:
+  w/0 → Inf/NaN → `f64_to` → INT_MIN → clipped to −1 (silent sign garbage through
+  the public M0 pair; the M1+ chain was already safe — `bl_weight_effective`'s
+  γ=0 branch verified real). Now γ==0 → 0 (b1.58: γ==0 ⟺ all-zero tensor).
+  Regression-gated.
+
+### Added — fail-loud guards (`guard(cond, msg)`, new public primitive)
+- **`tpack2` / `tsimd_pack_w`**: a non-ternary weight no longer silently packs as
+  0 / store8-truncates (the latter also voided the SIMD kernel's no-saturation
+  exactness bound) — pack-time validation, fail-loud.
+- **`ternary_matmul_free_simd`**: K ≤ 2²² enforced once per call (the i32
+  accumulate is exact only for K ≲ 8.4M — the bit-identity contract's bound).
+- **`tx_pack`**: fails loud before writing through null pointer tables if
+  `tx_pack_init` / `tx_init` / `tx_int_init` haven't run (was silent heap
+  corruption); **`tx_fwd_packed`**: fails loud before `tx_pack` (was silent
+  garbage logits).
+
+### Verified sound (audited, no change)
+- `_tanh` (stable `e^(−2|x|)` form — the ganita `f64_tanh` overflow class does
+  not apply, ±inf saturates to ±1) · `act_quant_int` zero-row + ±127 clamps ·
+  the M1 degenerate-γ chain · `tx_int_init`/`tx_pack_init` sizing formulas vs
+  all 7 BitLinear shapes · scalar kernels' i64 accumulate (no overflow at any
+  allocatable K).
+
+### Docs
+- **CHANGELOG verified complete + gap-free 0.1.0 → 0.8.0**; all relative doc
+  cross-links resolve (scripted check). `SECURITY.md`: stale version literal
+  dropped, hardening-posture section added, the "0.8.0 pending" maturity note
+  replaced with the audit record. `api.md`: `guard` added to the frozen surface
+  + a guarded-preconditions convention note. `benchmarks.md`: run-of-record
+  refreshed with guards live (pack ~4 → ~8 ns/weight — the only measurable cost,
+  paid once per weight matrix; serving unchanged).
+
 ## [0.7.0] — 2026-07-06
 
 **Downstream-consumer readiness — the pack-once deployment serving path.** The

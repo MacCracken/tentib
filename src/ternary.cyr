@@ -11,6 +11,17 @@
 fn tload(p, i): i64 { return load64(p + i * 8); }
 fn tstore(p, i, v): i64 { store64(p + i * 8, v); return 0; }
 
+# Fail-loud precondition guard (the tarka convention): Cyrius has no bounds
+# checks, so a violated public-API precondition means silent heap corruption or
+# silently-wrong numerics — print and stop instead. Cold paths only (pack-time /
+# call-entry); never inside a hot loop. 0.8.0 hardening.
+fn guard(cond, msg): i64 {
+    if (cond == 1) { return 0; }
+    puts("tentib guard: "); puts(msg); _putc(10);
+    sys_exit(1);
+    return 0;
+}
+
 # absmean scale gamma = mean(|w_i|) — the b1.58 per-tensor ternary scale.
 fn absmean(w, n): i64 {
     var s = f64_from(0);
@@ -24,7 +35,11 @@ fn absmean(w, n): i64 {
 
 # quantize one weight to a ternary integer in {-1, 0, +1}:
 #   clip(round(w / gamma), -1, +1)
+# gamma == 0 (an all-zero tensor) => 0: w/0 is Inf/NaN, whose f64_to is INT_MIN,
+# which the clip turned into -1 — an all-zero vector silently quantized to all
+# -1 (0.8.0 audit fix). The b1.58 semantic is gamma==0 <=> every weight is 0.
 fn ternary_one(w, gamma): i64 {
+    if (f64_eq(gamma, f64_from(0)) == 1) { return 0; }
     var r = f64_to(f64_round(f64_div(w, gamma)));
     if (r > 1) { r = 1; }
     if (r < (0 - 1)) { r = 0 - 1; }

@@ -42,35 +42,36 @@ Bit-identity is not traded for the speed: the SIMD kernel's output is
 
 | step | cost | paid |
 |------|-----:|------|
-| `tsimd_pack_w` (quantized i64 → transposed i8 + `wsum`) | 2,377,450 ns (~4 ns/weight) | **once per weight matrix** |
-| `act_quant_int` (one f64 row → int8 codes) | 8,277 ns | once per token row |
+| `tsimd_pack_w` (quantized i64 → transposed i8 + `wsum`) | 4,632,914 ns (~8 ns/weight, incl. the 0.8.0 ternary-validity guard) | **once per weight matrix** |
+| `act_quant_int` (one f64 row → int8 codes) | 7,561 ns | once per token row |
 
-Pack-once amortizes after ~81 matmul calls at this shape (2.38 ms ÷ 29.4 µs);
-per-call re-packing would dominate the matmul ~80:1. That is why the mode-2
+Pack-once amortizes after ~160 matmul calls at this shape (4.63 ms ÷ 29.4 µs);
+per-call re-packing would dominate the matmul ~160:1. That is why the mode-2
 whole-model number below (which re-packs per call, by fairness design) understates
 the deployment path — and why the 0.7.0 **packed serving** row, which hoists the
-pack, is 3.8× faster than mode 2 on the same model.
+pack, is ~4.2× faster than mode 2 on the same model.
 
 ## 3. Whole-model forward → tok/s
 
 A b1.58-shaped transformer (F = 4C), random-init, **266,880 params**
 (V=256 · T=32 · C=128 · F=512), T=32 tokens per forward, 30 measured forwards
-(packed-row run of record 2026-07-06, same host/core):
+(run of record 2026-07-06 with the 0.8.0 guards live, same host/core):
 
 | path | ns/forward | tok/s | vs f64 |
 |------|-----------:|------:|-------:|
-| f64 weight-only (`tx_fwd` — rosnet matmul) | 13,816,006 | 2,316 | 1.0× |
-| integer scalar (`tx_fwd_q` mode 0) | 70,573,734 | 453 | 0.20× |
-| integer SIMD (`tx_fwd_q` mode 2, 0.4.1) | 8,937,348 | 3,580 | 1.5× |
-| **PACKED serving (`tx_fwd_packed`, 0.7.0)** | **2,375,236** | **13,472** | **5.8×** |
+| f64 weight-only (`tx_fwd` — rosnet matmul) | 13,451,628 | 2,378 | 1.0× |
+| integer scalar (`tx_fwd_q` mode 0) | 69,640,126 | 459 | 0.19× |
+| integer SIMD (`tx_fwd_q` mode 2, 0.4.1) | 9,920,976 | 3,225 | 1.3× |
+| **PACKED serving (`tx_fwd_packed`, 0.7.0)** | **2,339,894** | **13,675** | **5.7×** |
 
 **Honesty notes.** The first three paths re-quantize the weights every forward
 (the f64 path's `bl_forward_wonly` does too — matched per-call cost by design);
 mode 2 *additionally* re-packs to i8 every forward, so most of its 8.9 ms is
 prep, not matmul — that is the reference-fairness surface. **The packed row is
-the deployment surface** (0.7.0: `tx_pack_init`/`tx_pack` once — 6.4 ms at this
-config, amortized after ~3 forwards — then `tx_fwd_packed` serves with only the
-per-token activation quant per call), bit-identical to modes 0/2 (suite-gated).
+the deployment surface** (0.7.0: `tx_pack_init`/`tx_pack` once — 7.3 ms at this
+config incl. the 0.8.0 pack-time guards, amortized after ~3 forwards — then
+`tx_fwd_packed` serves with only the per-token activation quant per call),
+bit-identical to modes 0/2 (suite-gated).
 Its remaining 2.4 ms/forward is dominated by the shared non-linear f64 interludes
 (RMSNorm, attention core, GELU — kept f64 per b1.58) plus the T×V head; the
 linear layers themselves run at the §1 sweep rates.

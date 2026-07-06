@@ -33,6 +33,12 @@ but free to change between minor versions.
 - **Bias arguments:** pass `b = 0` for "no bias" — any nonzero pointer is read.
 - **Ternary weights** `Wq` are i64 arrays holding {−1, 0, +1}; activations
   quantize per-row to int8 codes in [−127, +127] (also stored as i64).
+- **Guarded preconditions (0.8.0):** violations that would mean silent corruption
+  or silently-wrong numerics **fail loud** via `guard()` — non-ternary weights at
+  pack time (`tpack2`, `tsimd_pack_w`), K > 2²² in `ternary_matmul_free_simd`
+  (the i32 exactness bound), and packed-store misuse (`tx_pack` before its inits,
+  `tx_fwd_packed` before `tx_pack`). Cold paths only; hot loops are unchecked.
+  Audit record: [`audit/2026-07-06-audit.md`](audit/2026-07-06-audit.md).
 
 ## Allocation & lifetime (the 0.6.0 alloc-clean audit)
 
@@ -57,6 +63,7 @@ path; the invariant is:
 | symbol | contract | tested by |
 |--------|----------|-----------|
 | `tload(p, i)` → f64 / `tstore(p, i, v)` | element access on a flat f64 tensor | suite (throughout) |
+| `guard(cond, msg)` | fail-loud precondition guard (prints + exits 1) — the 0.8.0 hardening primitive, tarka convention | suite (pass path; every guarded entry) |
 | `absmean(w, n)` → f64 | the b1.58 scale γ = mean(abs(w)) | demo, suite, bench |
 | `ternary_one(w, gamma)` → i64 | one weight → {−1, 0, +1} = clip(round(w/γ)) | suite |
 | `ternary_quantize(w, n, Wq)` → f64 | quantize n weights into `Wq`; returns γ | demo, suite, bench |
@@ -126,7 +133,7 @@ self-checking — running it is a test).
 | symbol | contract | tested by |
 |--------|----------|-----------|
 | `tx_pack_init(V, T, C, F)` | allocate the packed store (7 per-layer i8 weight buffers + `wsum` tables + γs) | suite, bench, example |
-| `tx_pack(V, T, C, F)` | quantize + pack all 7 BitLinears from the live `tx_*` latents — **once**; ~4 ns/weight | suite, bench, example |
+| `tx_pack(V, T, C, F)` | quantize + pack all 7 BitLinears from the live `tx_*` latents — **once**; ~8 ns/weight (incl. the 0.8.0 guards); fails loud if the inits haven't run | suite, bench, example |
 | `tx_fwd_packed(tokens, V, T, C, F)` | serving forward from the packed store — per call only the per-token activation quant runs, weights untouched; logits → `ki_logits`. **Bit-identical** to `tx_fwd_q` modes 0/2 (suite-gated, twice — the store is serve-time read-only) | suite, bench, example |
 
 Internal (not frozen): `bl_forward_pk`, `attn_sublayer_pk`, `mlp_sublayer_pk`,
@@ -146,6 +153,6 @@ See [`benchmarks.md`](benchmarks.md): the SIMD kernel is pack-once-then-hot —
 `tsimd_pack_w` costs ~4 ns/weight once; the kernel then beats the f64-SIMD matmul
 5–18× (growing with layer size). `bl_forward_q`/`tx_fwd_q` re-quantize per call by
 design (reference fairness); **the pack-once deployment entry point shipped in
-0.7.0 (additive)** — `tx_pack` + `tx_fwd_packed` serve the whole model at **5.8×
-the f64 path** (13,472 vs 2,316 tok/s at the bench config), the one-time pack
-amortizing after ~3 forwards.
+0.7.0 (additive)** — `tx_pack` + `tx_fwd_packed` serve the whole model at **5.7×
+the f64 path** (13,675 vs 2,378 tok/s at the bench config, 0.8.0-guarded run),
+the one-time pack amortizing after ~3 forwards.

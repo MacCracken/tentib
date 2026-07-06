@@ -761,6 +761,22 @@ fn main() {
     while (cii < ciTV) { if (tget(ki_logits, cii) != tget(li_int, cii)) { pk_ok2 = 0; } cii = cii + 1; }
     assert(pk_ok2 == 1, "0.7.0: a second serve from the same packed store reproduces the logits (store is serve-time read-only)");
 
+    test_group("0.8.0 hardening gates (audit fixes)");
+    # gamma == 0 (all-zero weights): ternary_one divided by zero -> Inf/NaN ->
+    # f64_to -> INT_MIN -> clipped to -1, so an all-zero vector quantized to all
+    # -1 (silent sign garbage). Fixed: gamma==0 => 0 (b1.58: gamma==0 <=> all-zero).
+    var hz_w = t_alloc(4);   # t_alloc zero-fills
+    var hz_q = t_alloc(4);
+    var hz_g = ternary_quantize(hz_w, 4, hz_q);
+    assert(hz_g == f64_from(0), "0.8.0: all-zero weights quantize with gamma == 0");
+    var hz_ok = 1; var hzi = 0;
+    while (hzi < 4) { if (tload(hz_q, hzi) != 0) { hz_ok = 0; } hzi = hzi + 1; }
+    assert(hz_ok == 1, "0.8.0: all-zero weights quantize to all-ZERO ternary codes (was all -1 pre-fix)");
+    assert(ternary_one(f64_from(3), f64_from(0)) == 0, "0.8.0: ternary_one(w, gamma=0) returns 0, not the INT_MIN-clip -1");
+    # guard() itself: the pass path is a no-op (the fail path exits the process —
+    # exercised by construction on every guarded entry throughout this suite).
+    assert(guard(1, "never printed") == 0, "0.8.0: guard(cond=1) passes through");
+
     test_group("0.6.0 API-freeze gates: every public entry point exercised directly");
     # ref_dot — the M0 full-precision baseline dot (exact-int f64s => exact result).
     var rd_w = t_alloc(2); var rd_x = t_alloc(2);

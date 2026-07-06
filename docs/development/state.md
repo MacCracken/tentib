@@ -5,17 +5,19 @@
 
 ## Version
 
-**0.7.0** — **downstream-consumer readiness: the pack-once deployment serving
-path**, cut 2026-07-06 (user tags). Additive to the frozen surface:
-`tx_pack_init`/`tx_pack` (quantize + pack all 7 BitLinears once, ~4 ns/wt) +
-`tx_fwd_packed` (serving forward — per call only activation quant; **bit-identical**
-to `tx_fwd_q` modes 0/2, gated twice). Whole-model deployment throughput:
-**13,472 tok/s vs 2,316 f64 (5.8×)**, 3.8× over mode 2 (benchmarks.md §3 updated).
-Worked self-checking consumer example `examples/quickstart.cyr` (train → pack →
-serve, public API only, exits non-zero on mismatch — verified PASS). Suite
-**97/97**. Prior: **0.6.0** (alloc-clean + API freeze — `docs/api.md`; allocation
-only in `*_init` + one-shot trainers, every inference path allocation-free; direct
-gates for `ref_dot`/`bl_forward_q`/`tx_sgd`). Prior: **0.5.0** (benchmarks — `docs/benchmarks.md` + the real
+**0.8.0** — **security/hardening audit + CHANGELOG completeness** (the LAST v1.0
+criterion — all six now green), cut 2026-07-06 (user tags). Audit record
+`docs/audit/2026-07-06-audit.md` (re-derived from source): **6 findings
+fixed/guarded** — the γ=0 quantizer sign bug FIXED (all-zero weights quantized to
+all-“−1” via Inf→INT_MIN→clip; the M1 chain was already safe) + fail-loud
+`guard()` on non-ternary pack input (`tpack2`/`tsimd_pack_w`), the SIMD K ≤ 2²²
+exactness bound, and packed-store misuse (`tx_pack`/`tx_fwd_packed` ordering) —
+**5 paths verified sound** (incl. `_tanh`, immune to the ganita overflow class by
+its stable form). Cold paths only; packed serving unchanged (13,675 tok/s
+guarded run). SECURITY.md rewritten to the audited posture. Suite **101/101**.
+Prior: **0.7.0** (pack-once serving `tx_pack_init`/`tx_pack`/`tx_fwd_packed`,
+bit-identical, 5.7× f64 whole-model; self-checking `examples/quickstart.cyr`),
+**0.6.0** (alloc-clean + API freeze — `docs/api.md`). Prior: **0.5.0** (benchmarks — `docs/benchmarks.md` + the real
 bcyr harness; SIMD advantage grows 5.0×→18.4× over f64-SIMD with layer size;
 whole-model 3,549 vs 2,307 tok/s; honest toy-scale quality delta vs f64 attn11
 CE 0.006 vs 0.11), **0.4.1** (the integer-SIMD ternary kernel — the toolchain gate
@@ -71,7 +73,7 @@ STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Tests
 
-- `tests/tentib.tcyr` — **97/97** green: rosnet smoke, M0 quantization, BitLinear
+- `tests/tentib.tcyr` — **101/101** green: rosnet smoke, M0 quantization, BitLinear
   forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
@@ -86,9 +88,11 @@ STE), **0.1.0** (M0 — ternary quantizer).
   biased head), **M3c** (whole-model integer inference: < 1e-9 relerr vs the
   full-quant f64 forward, finite activation-quant delta vs the trained model,
   argmax agreement at all T), the **0.7.0 pack-once gates** (packed serving
-  bit-identical to the scalar integer path + reproduced on a second serve), and
-  the **0.6.0 API-freeze gates** (`ref_dot` exact, `bl_forward_q` direct mode
-  0-vs-2 bit-identity + same γ, the manual zero/loss/bwd/sgd quartet descends).
+  bit-identical to the scalar integer path + reproduced on a second serve), the
+  **0.8.0 hardening gates** (all-zero weights → γ=0 + all-zero codes, the
+  ternary_one γ=0 fix, guard pass-path), and the **0.6.0 API-freeze gates**
+  (`ref_dot` exact, `bl_forward_q` direct mode 0-vs-2 bit-identity + same γ, the
+  manual zero/loss/bwd/sgd quartet descends).
 - `tests/tentib.bcyr` — **the 0.5.0 benchmark harness** (drives `docs/benchmarks.md`):
   per-layer kernel sweep (branchy/branchless/SIMD-pack-once/rosnet-f64 at 128²–768²),
   prep-amortization costs, whole-model forward → tok/s (f64 / scalar-int / SIMD-int
@@ -110,7 +114,9 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**v0.7.0 cut (consumer readiness — pack-once serving + quickstart).** The
-remaining SemVer path to 1.0: **0.8.0** security/hardening audit + CHANGELOG
-completeness · **1.0.0** clean cut (all criteria green; 5 of 6 boxes already
-ticked). Full per-version scope + acceptance in [`roadmap.md`](roadmap.md).
+**v0.8.0 cut (security/hardening audit — the last v1.0 criterion).** All six
+v1.0 criteria are green; the remaining step is the **1.0.0 clean cut** (no code
+change expected — the freeze + criteria close it, per the tarka/prajna/anukūlana
+precedent). Post-1.0 levers live in [`roadmap.md`](roadmap.md) (GPU ternary
+kernels via mabda; hoosh/murti serving consumption; rotation-PTQ pairing with
+the Type-3 lane).
