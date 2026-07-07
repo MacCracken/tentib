@@ -9,8 +9,8 @@ issue with exploit details.
 
 ## Threat model
 
-tentib is a single-process, CPU-only, **0.x** reference binary: a ternary
-(1.58-bit) ML trainer + matmul-free integer inference kernel. It has **no
+tentib is a single-process, CPU-only reference binary (**1.x stable**, API
+frozen): a ternary (1.58-bit) ML trainer + matmul-free integer inference kernel. It has **no
 networking**, no privileged operations, and no persistence — it neither reads
 nor writes files on its own. Its only input is the embedded, compile-time corpus
 (a literal string byte-tokenized through akshara) plus the hyperparameters

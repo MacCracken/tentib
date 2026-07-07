@@ -1,13 +1,13 @@
-# tentib — Public API (settled at v0.6.0; frozen through the 1.x series)
+# tentib — Public API (frozen at v1.0.0; settled at v0.6.0)
 
 > Satisfies the v1.0 criterion *"Public API frozen — every exported symbol
 > documented and tested."*
 
 ## Freeze policy
 
-The **stable public API** below is settled as of v0.6.0 and is frozen for the 1.x
-series at the 1.0.0 cut: signatures and semantics will not change without a major
-version bump; minor versions may **add** symbols. Every public symbol is exercised
+The **stable public API** below was settled at v0.6.0 and is **frozen for the
+1.x series as of the 1.0.0 cut**: signatures and semantics will not change
+without a major version bump; minor versions may **add** symbols. Every public symbol is exercised
 **directly** by at least one committed driver — the demo (`src/main.cyr`), the suite
 (`tests/tentib.tcyr`, 95/95), or the bench harness (`tests/tentib.bcyr`) — noted per
 row. The 0.6.0 suite group "API-freeze gates" closes the last indirect-only cases

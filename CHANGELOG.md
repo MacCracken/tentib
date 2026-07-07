@@ -4,6 +4,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-07-06
+
+**v1.0 — STABLE. The clean cut** (tarka/prajna/anukūlana precedent): **no code
+change from 0.8.0** — the freeze and the criteria close it. tentib is the
+sovereign integer-native / ternary (1.58-bit) ML reference: BitNet-b1.58 ternary
+weights, STE training, and a matmul-free integer inference path that is
+**bit-identical to its f64-latent reference and faster than the f64-SIMD matmul**
+— trained, packed, and served entirely in Cyrius with no BLAS / libc / autodiff.
+
+### All six v1.0 criteria green
+- **BitLinear + STE, FD-gated** (0.2.0) — prove the surrogate, not the
+  discontinuity; γ-cancellation + falsifiers.
+- **A ternary transformer trains from scratch** (0.3.0) — RMSNorm + causal attn +
+  GELU-MLP, all linears ternary, on akshara-tokenized text; every level FD-gated.
+- **The matmul-free integer kernel reproduces the model** (0.4.0) — whole-model,
+  exact parity < 1e-9, argmax 10/10, 2-bit packed weights (32×); + the 0.4.1
+  integer-SIMD kernel (`iv_dp8`), bit-identical and 5–18× the f64-SIMD matmul.
+- **Benchmarks** (0.5.0) — `docs/benchmarks.md`, B-series fairness; pack-once
+  serving **~13.5k tok/s vs ~2.3k f64 (5.7×)** whole-model (0.7.0); honest
+  toy-scale quality delta vs a matched-size f64 attn11, b1.58 ≥3B parity cited.
+- **Public API frozen** (0.6.0) — `docs/api.md`, every symbol documented +
+  directly gated; allocation audit (inference paths allocation-free). **The
+  freeze is now in force for the 1.x series**: signatures/semantics stable,
+  minors add only.
+- **CHANGELOG complete + security/hardening audit pass** (0.8.0) —
+  `docs/audit/2026-07-06-audit.md`; 6 findings fixed/guarded, 5 paths verified
+  sound; fail-loud guards on cold paths only.
+
+### Changed (docs only)
+- Version-bearing docs swept to 1.0.0 (README status, api.md freeze declaration,
+  SECURITY.md maturity language). Suite **101/101**; demo + bench + quickstart
+  re-verified at the cut.
+
+### Post-1.0 (user-driven levers, roadmap § out-of-scope)
+- GPU ternary kernels (mabda) · hoosh/murti serving consumption of
+  `tx_fwd_packed` · rotation-PTQ (QuaRot/SpinQuant-class) pairing with the
+  Type-3 import lane · aarch64 NEON when cyrius Phase 5 lands.
+
 ## [0.8.0] — 2026-07-06
 
 **Security/hardening audit + CHANGELOG completeness** — the last v1.0 criterion.

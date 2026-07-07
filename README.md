@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — v0.8.0: security/hardening audit done — v1.0 criteria all green (101/101 gated)
+## Status — v1.0.0 STABLE (101/101 gated; API frozen for the 1.x series)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -71,6 +71,9 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   packed-store misuse) + **5 paths verified sound** (incl. `_tanh` — immune to
   the ganita overflow class by construction). Hot loops carry zero checks;
   packed serving throughput unchanged. CHANGELOG verified complete 0.1.0→now.
+- **v1.0.0 STABLE** — the clean cut: all six v1.0 criteria green, no code change
+  from 0.8.0; the [`docs/api.md`](docs/api.md) freeze is in force for the 1.x
+  series (signatures/semantics stable, minors add only).
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39

@@ -5,19 +5,19 @@
 
 ## Version
 
-**0.8.0** — **security/hardening audit + CHANGELOG completeness** (the LAST v1.0
-criterion — all six now green), cut 2026-07-06 (user tags). Audit record
-`docs/audit/2026-07-06-audit.md` (re-derived from source): **6 findings
-fixed/guarded** — the γ=0 quantizer sign bug FIXED (all-zero weights quantized to
-all-“−1” via Inf→INT_MIN→clip; the M1 chain was already safe) + fail-loud
-`guard()` on non-ternary pack input (`tpack2`/`tsimd_pack_w`), the SIMD K ≤ 2²²
-exactness bound, and packed-store misuse (`tx_pack`/`tx_fwd_packed` ordering) —
-**5 paths verified sound** (incl. `_tanh`, immune to the ganita overflow class by
-its stable form). Cold paths only; packed serving unchanged (13,675 tok/s
-guarded run). SECURITY.md rewritten to the audited posture. Suite **101/101**.
-Prior: **0.7.0** (pack-once serving `tx_pack_init`/`tx_pack`/`tx_fwd_packed`,
-bit-identical, 5.7× f64 whole-model; self-checking `examples/quickstart.cyr`),
-**0.6.0** (alloc-clean + API freeze — `docs/api.md`). Prior: **0.5.0** (benchmarks — `docs/benchmarks.md` + the real
+**1.0.0 — STABLE**, cut 2026-07-06 (user-named; user tags). The clean cut
+(tarka/prajna/anukūlana precedent): **no code change from 0.8.0** — all six v1.0
+criteria green (BitLinear+STE FD-gated · ternary transformer trains ·
+matmul-free integer kernel reproduces the model · benchmarks · API frozen ·
+CHANGELOG + audit). The `docs/api.md` freeze is **in force for the 1.x series**
+(minors add only). The one-day 0.4.1→1.0.0 arc: int-SIMD kernel (`iv_dp8`,
+bit-identical, 5–18× the f64-SIMD matmul, growing with layer size) → benchmarks
+(B-series fairness; honest quality delta vs f64 attn11) → API freeze +
+alloc-audit → pack-once serving (**~13.5k tok/s vs ~2.3k f64 = 5.7×**
+whole-model; `examples/quickstart.cyr`) → security audit (6 fixed/guarded incl.
+the γ=0 quantizer sign bug, 5 verified sound). Suite **101/101**. Post-1.0 =
+user-driven levers only (GPU/mabda, hoosh-murti serving consumption,
+rotation-PTQ, NEON on cyrius Phase 5). Prior: **0.5.0** (benchmarks — `docs/benchmarks.md` + the real
 bcyr harness; SIMD advantage grows 5.0×→18.4× over f64-SIMD with layer size;
 whole-model 3,549 vs 2,307 tok/s; honest toy-scale quality delta vs f64 attn11
 CE 0.006 vs 0.11), **0.4.1** (the integer-SIMD ternary kernel — the toolchain gate
@@ -114,9 +114,9 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**v0.8.0 cut (security/hardening audit — the last v1.0 criterion).** All six
-v1.0 criteria are green; the remaining step is the **1.0.0 clean cut** (no code
-change expected — the freeze + criteria close it, per the tarka/prajna/anukūlana
-precedent). Post-1.0 levers live in [`roadmap.md`](roadmap.md) (GPU ternary
-kernels via mabda; hoosh/murti serving consumption; rotation-PTQ pairing with
-the Type-3 lane).
+**v1.0.0 is cut — tentib is stable and in maintenance.** No scheduled work.
+Post-1.0 levers (user-driven, roadmap § out-of-scope): GPU ternary kernels via
+mabda · hoosh/murti serving consumption of `tx_fwd_packed` · rotation-PTQ
+(QuaRot/SpinQuant-class) pairing with the Type-3 import lane · aarch64 NEON when
+cyrius SIMD Phase 5 lands. Dep-pin bumps (rosnet 0.2.0 / tyche 0.1.1 /
+akshara 0.1.0 → their 1.x freezes) ride the next natural touch.

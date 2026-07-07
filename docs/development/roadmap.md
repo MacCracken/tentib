@@ -44,6 +44,7 @@ hide it.
 | **0.6.0** | alloc-clean + API freeze (`docs/api.md`) | the public surface settled + documented (freeze policy, not-frozen internals, conventions, output cells); allocation audit: **allocation only in `*_init` + one-shot trainers, every fwd/bwd/kernel path allocation-free**; last indirect-only coverage closed (`ref_dot`, direct `bl_forward_q` 0-vs-2, the manual `tx_sgd` quartet). No behavior change. **95/95**. |
 | **0.7.0** | consumer readiness — pack-once serving | additive: `tx_pack_init`/`tx_pack` (quantize + pack the 7 BitLinears once) + `tx_fwd_packed` (serving forward, bit-identical to modes 0/2, gated twice) → **~13.5k tok/s vs ~2.3k f64 (5.7×)**, ~4× over mode 2; self-checking public-API-only `examples/quickstart.cyr` (train → pack → serve, PASS). **97/97**. |
 | **0.8.0** | security/hardening audit + CHANGELOG completeness | audit re-derived from source (`docs/audit/2026-07-06-audit.md`): **6 fixed/guarded** (γ=0 quantizer sign bug FIXED; fail-loud `guard()` on non-ternary pack input, SIMD K ≤ 2²² exactness bound, packed-store misuse) + **5 verified sound** (incl. `_tanh` — ganita-overflow-class immune by construction); cold paths only, serving throughput unchanged; CHANGELOG verified gap-free 0.1.0→now + cross-links resolve; SECURITY.md rewritten to the audited posture. **101/101**. |
+| **1.0.0** | **STABLE — the clean cut** | no code change from 0.8.0; all six v1.0 criteria green; the `docs/api.md` freeze in force for the 1.x series (minors add only). **101/101**. |
 
 Full detail per version in [`../../CHANGELOG.md`](../../CHANGELOG.md).
 
@@ -100,9 +101,10 @@ shapes — plus one real bug the review list didn't predict (the γ=0 quantizer
 sign bug, fixed + regression-gated). No open finding; CHANGELOG + cross-links
 verified. Record: `docs/audit/2026-07-06-audit.md`.
 
-### 1.0.0 — clean cut
+### 1.0.0 — clean cut  ✅ **SHIPPED 2026-07-06** (see the table above)
 
-All v1.0 criteria green (below); public API frozen; clean cut.
+All v1.0 criteria green (below); public API frozen; no code change from 0.8.0.
+tentib is stable — post-1.0 work is user-driven (the out-of-scope levers below).
 
 ## v1.0 criteria → version
 
