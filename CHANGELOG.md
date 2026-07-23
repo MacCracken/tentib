@@ -34,8 +34,13 @@ so it is **bit-exact at ANY K**, not just K≤8.
 - **Tiling + signed logic bit-identical on host** (2026-07-23): `build/gpumm` exits **96** —
   `ternary_matmul_free_gpu` (CPU-tiled, negative data, cross-tile K=16) is byte-for-byte equal to the
   production `ternary_matmul_free`.
-- The GPU `#82` dispatch is **iron-only** (QEMU has no AMD GPU). The archaemenid crown burn (`run /bin/gpumm`
-  → `run: exit 95`) is the remaining confirmation, tracked in agnosticos `iron-nuc-zen-log.md`.
+- **CROWN PROVEN ON IRON** (2026-07-23): `run /bin/gpumm` → **`exit 95`** on archaemenid (AMD Cezanne) —
+  byte-identical outputs AND all 8 tiles on the GPU, so a real ternary BitLinear projection's integer
+  accumulate ran on the gfx90c shader cores via `#82`, **bit-exact at K=16 (cross-tile i64 accumulation)** —
+  the any-K integer advantage over the f64 `#83` path. This is the AGNOS 1.54.x GPU crown (C6), second
+  consumer (after rupantara/f64). **Bonus:** first iron confirmation of `#82` on NEGATIVE integers (its boot
+  self-test only used positives; the signed two's-complement path is now proven). Tracked in agnosticos
+  `iron-nuc-zen-log.md#tracker-156x-ml-crown-tentib`.
 
 ## [1.0.0] — 2026-07-06
 

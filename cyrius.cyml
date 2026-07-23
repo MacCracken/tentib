@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "tentib — sovereign integer-native / ternary (1.58-bit) ML reference in Cyrius (BitNet reversed; the i64 thesis applied to the weights)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.4.10"
+cyrius = "6.4.72"
 repository = "https://github.com/MacCracken/tentib"
 
 [build]
