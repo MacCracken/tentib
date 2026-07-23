@@ -4,6 +4,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-07-23
+
+**AGNOS GPU offload (the 1.54.x GPU crown / C6, integer path): tentib's ternary integer matmul can run on the
+AMD gfx90c shader cores.** Additive — `ternary_matmul_free_gpu` is a new peer of `ternary_matmul_free`; the CLI
+and the frozen 1.x public API are unchanged (kernel internals are explicitly not frozen). This is the SECOND
+GPU-crown consumer after rupantara's f64 path (`#83`), and the stronger one: integer accumulate is associative,
+so it is **bit-exact at ANY K**, not just K≤8.
+
+### Added
+- **`src/gpu.cyr` — `ternary_matmul_free_gpu(qx, sx, Wq, gamma, b, y, M, K, N)`**, a bit-exact peer of
+  `ternary_matmul_free` that tiles the integer accumulate `SUM_k qx·Wq` into 8×8×8 blocks and dispatches each
+  on the gfx90c shader cores via the AGNOS ring-3 syscall **`#82`** (`gpu_dispatch`, i32 8×8 matmul), summing
+  the tile results in i64 CPU-side; the f64 dequant (`gamma·sx·acc + b`) stays byte-identical to the CPU
+  reference. **Bit-exact at any K** — integer addition is associative, so cross-tile i64 accumulation equals
+  the reference's sequential sum exactly. **Signed-correct**: qx is int8-range and Wq is {−1,0,+1} so acc goes
+  negative; `#82`'s MAC is `v_mul_lo_u32`+`v_add_u32` (two's-complement mod 2³², sign-transparent), and the
+  low-32 result is sign-extended on readback. On non-AGNOS / no-GPU, each tile is computed directly from the
+  i64 arrays — identical result. Returns the GPU tile count.
+- **`programs/gpumm.cyr` — the crown proof.** Runs a real ternary projection `ternary_matmul_free(qx, sx, Wq,
+  γ, 0, y, 8, 16, 32)` twice — CPU vs `ternary_matmul_free_gpu` — on **negative** activations + real ternary
+  weights, and byte-compares the 2048-byte outputs. **K=16 = two k-tiles**, so the cross-tile accumulation the
+  any-K claim rests on is exercised. Exit code: **95** = byte-identical AND all 8 tiles on the GPU (crown);
+  **96** = byte-identical, 0 GPU tiles (host/QEMU — tiling + signed logic proven, no GPU); **90** = mismatch.
+
+### Verified
+- **tentib builds `--agnos` for the first time** (the crown-proof subset — kernel + rosnet/tyche/akshara; the
+  file-streaming symbols are stubbed and unreachable).
+- **Tiling + signed logic bit-identical on host** (2026-07-23): `build/gpumm` exits **96** —
+  `ternary_matmul_free_gpu` (CPU-tiled, negative data, cross-tile K=16) is byte-for-byte equal to the
+  production `ternary_matmul_free`.
+- The GPU `#82` dispatch is **iron-only** (QEMU has no AMD GPU). The archaemenid crown burn (`run /bin/gpumm`
+  → `run: exit 95`) is the remaining confirmation, tracked in agnosticos `iron-nuc-zen-log.md`.
+
 ## [1.0.0] — 2026-07-06
 
 **v1.0 — STABLE. The clean cut** (tarka/prajna/anukūlana precedent): **no code

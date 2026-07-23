@@ -1,0 +1,74 @@
+# programs/gpumm.cyr — tentib ML-layer-on-GPU crown proof (AGNOS gfx90c, INTEGER #82 path).
+#
+# Runs a real tentib ternary BitLinear projection — the integer matmul `ternary_matmul_free(qx, sx, Wq, gamma,
+# 0, y, M=8, K=16, N=32)` (kernel.cyr) — TWICE on the same operands: once via the production CPU kernel, once
+# via ternary_matmul_free_gpu (src/gpu.cyr), which tiles the integer accumulate into 8x8x8 blocks and
+# dispatches each on the AMD Cezanne gfx90c shader cores through the agnos ring-3 syscall #82. Byte-compares
+# the two 8x32 = 2048-byte f64 outputs.
+#
+# Bit-EXACT (not tolerance) at ANY K — the tentib differentiator over the f64 #83 path (which is bit-exact
+# only at K<=8). Integer accumulate is ASSOCIATIVE, so tiling K into 8-blocks and summing the tile results in
+# i64 equals the reference's sequential i64 accumulate EXACTLY; the f64 dequant is identical CPU code on both
+# sides. **K=16 uses TWO k-tiles, so the cross-tile i64 accumulation the claim rests on is actually
+# exercised** (not just a single-tile pass). The data is deterministic with NEGATIVE activations (qx in
+# [-100,99]) and real ternary weights (Wq in {-1,0,+1}), so a match also proves the GPU's signed two's-
+# complement path (`v_mul_lo_u32`+`v_add_u32`), which #82's positive-only boot self-test never exercised.
+#
+# ORACLE = the EXIT CODE (`run: exit N`):  M=8/K=16/N=32 => 1 m-tile x 2 k-tiles x 4 n-tiles = 8 GPU tiles.
+#   95 = byte-identical AND all 8 tiles on the GPU (CROWN: a real ternary matmul on gfx90c, bit-exact vs CPU).
+#   96 = byte-identical, 0 GPU tiles (host/QEMU — tiling proven, no GPU). 97 = partial GPU dispatch.
+#   90 = BYTE MISMATCH — the GPU (or the signed gather/readback) is wrong; the byte diff is the guard.
+
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "src/ternary.cyr"
+include "src/bitlinear.cyr"
+include "src/layers.cyr"
+include "src/model.cyr"
+include "lib/akshara.cyr"
+include "src/block.cyr"
+include "src/kernel.cyr"
+include "src/gpu.cyr"
+
+var qx_b[128];    # qx : M x K = 8 x 16  i64  (int8-range activations, some negative)
+var sx_b[8];      # sx : M     = 8       i64  (f64 per-row scales)
+var wq_b[512];    # Wq : K x N = 16 x 32 i64  (ternary weights {-1,0,+1})
+var yc[256];      # y_cpu : M x N = 8 x 32 f64
+var yg[256];      # y_gpu
+
+fn fill(): i64 {
+    var m = 0;
+    while (m < 8) {
+        store64(&sx_b + m * 8, f64_div(f64_from(m + 1), f64_from(37)));
+        var k = 0;
+        while (k < 16) { store64(&qx_b + (m * 16 + k) * 8, ((m * 7 + k * 3) % 200) - 100); k = k + 1; }
+        m = m + 1;
+    }
+    var k2 = 0;
+    while (k2 < 16) {
+        var n = 0;
+        while (n < 32) { store64(&wq_b + (k2 * 32 + n) * 8, ((k2 * 5 + n * 2) % 3) - 1); n = n + 1; }
+        k2 = k2 + 1;
+    }
+    return 0;
+}
+
+fn gpumm_main(): i64 {
+    alloc_init();
+    fill();
+    var gamma = f64_div(f64_from(1), f64_from(13));
+    ternary_matmul_free(&qx_b, &sx_b, &wq_b, gamma, 0, &yc, 8, 16, 32);                       # CPU reference
+    var gpu_tiles = ternary_matmul_free_gpu(&qx_b, &sx_b, &wq_b, gamma, 0, &yg, 8, 16, 32);   # GPU-tiled peer (#82)
+
+    var i = 0;
+    while (i < 256) {
+        if (load64(&yc + i * 8) != load64(&yg + i * 8)) { return 90; }   # MISMATCH
+        i = i + 1;
+    }
+    if (gpu_tiles == 8) { return 95; }    # CROWN (1 m-tile x 2 k-tiles x 4 n-tiles)
+    if (gpu_tiles == 0) { return 96; }    # plumbing OK, no GPU (host/QEMU)
+    return 97;                             # partial dispatch
+}
+
+fn _entry(): i64 { var r = gpumm_main(); syscall(SYS_EXIT, r); return 0; }
+_entry();

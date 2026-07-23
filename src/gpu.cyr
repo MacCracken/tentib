@@ -1,0 +1,131 @@
+# src/gpu.cyr — tentib GPU offload of the ternary integer matmul (AGNOS gfx90c).
+#
+# ternary_matmul_free_gpu(qx, sx, Wq, gamma, b, y, M, K, N) is a BIT-EXACT peer of ternary_matmul_free
+# (kernel.cyr): it runs the integer accumulate `acc = SUM_k qx[m,k]*Wq[k,n]` on the AMD Cezanne gfx90c shader
+# cores via the agnos ring-3 syscall #82 (gpu_dispatch, i32 8x8 matmul), one 8x8x8 tile per call, summing the
+# tile results in i64 CPU-side. The trailing f64 dequant `gamma*sx[m]*acc + b` stays byte-identical to the
+# CPU reference — the ONLY f64 ops, M*N of them, exactly as in ternary_matmul_free.
+#
+# BIT-EXACT AT ANY K (not just K<=8 like the f64 #83 path): integer addition is ASSOCIATIVE, so tiling K into
+# 8-blocks and summing the tile results in i64 yields the SAME integer acc as the reference's sequential i64
+# accumulate — exactly, no rounding. SIGNED: qx is int8-range and Wq is {-1,0,+1}, so products/acc go NEGATIVE.
+# #82's shader MAC is `v_mul_lo_u32` + `v_add_u32` (matmul_i32.s:62) — two's-complement mod 2^32, sign-
+# transparent — so a negative acc comes back as its low-32 two's-complement, which `tmf_sx32` sign-extends.
+# |acc| <= K*127 for ternary, far inside i32, so the mod-2^32 wrap never bites.
+#
+# On non-agnos, or when #82 returns <0 (no GPU / self-test unproven), each tile is computed DIRECTLY from the
+# i64 qx/Wq arrays (no i32 round-trip, no sign ambiguity) — identical result. Returns the GPU tile count.
+
+var tmf_a[64];      # i32 A-tile (qx block) — 256 B used of the 512 the [64] reserves
+var tmf_b[64];      # i32 B-tile (Wq block)
+var tmf_c[64];      # i32 C-tile (#82 result, low-32 two's-complement)
+var tmf_acc[64];    # i64 per-output accumulators across k-tiles
+
+# Sign-extend a low-32 two's-complement value to i64 (works whether load32 zero- or sign-extends).
+fn tmf_sx32(v): i64 {
+    var c = v & 0xFFFFFFFF;
+    if (c >= 0x80000000) { c = c - 0x100000000; }
+    return c;
+}
+
+fn ternary_matmul_free_gpu(qx, sx, Wq, gamma, b, y, M, K, N): i64 {
+    var gpu_tiles = 0;
+    var mt = 0;
+    while (mt < M) {
+        var nt = 0;
+        while (nt < N) {
+            var z = 0;
+            while (z < 64) { store64(&tmf_acc + z * 8, 0); z = z + 1; }
+
+            var kt = 0;
+            while (kt < K) {
+                # Gather the 8xK qx-block into tmf_a (i32, row-major 8x8, zero-padded).
+                var i = 0;
+                while (i < 8) {
+                    var k = 0;
+                    while (k < 8) {
+                        var av = 0;
+                        if (i < M - mt) { if (k < K - kt) { av = load64(qx + ((mt + i) * K + kt + k) * 8); } }
+                        store32(&tmf_a + (i * 8 + k) * 4, av);
+                        k = k + 1;
+                    }
+                    i = i + 1;
+                }
+                # Gather the Kx8 Wq-block into tmf_b (i32, row-major 8x8, zero-padded).
+                var kr = 0;
+                while (kr < 8) {
+                    var j = 0;
+                    while (j < 8) {
+                        var bv = 0;
+                        if (kr < K - kt) { if (j < N - nt) { bv = load64(Wq + ((kt + kr) * N + nt + j) * 8); } }
+                        store32(&tmf_b + (kr * 8 + j) * 4, bv);
+                        j = j + 1;
+                    }
+                    kr = kr + 1;
+                }
+
+                var used_gpu = 0;
+                #ifdef CYRIUS_TARGET_AGNOS
+                if (syscall(82, &tmf_a, &tmf_b, &tmf_c) == 0) { used_gpu = 1; }
+                #endif
+                if (used_gpu == 1) {
+                    gpu_tiles = gpu_tiles + 1;
+                    # acc += sign-extended C (padded lanes are 0 = sum of zero-padded operands).
+                    var ci = 0;
+                    while (ci < 64) {
+                        store64(&tmf_acc + ci * 8, load64(&tmf_acc + ci * 8) + tmf_sx32(load32(&tmf_c + ci * 4)));
+                        ci = ci + 1;
+                    }
+                }
+                if (used_gpu == 0) {
+                    # CPU fallback: acc[i,j] += SUM_{k in tile} qx[mt+i,kt+k]*Wq[kt+k,nt+j], straight from i64.
+                    var fi = 0;
+                    while (fi < 8) {
+                        if (fi < M - mt) {
+                            var fj = 0;
+                            while (fj < 8) {
+                                if (fj < N - nt) {
+                                    var s = 0;
+                                    var fk = 0;
+                                    while (fk < 8) {
+                                        if (fk < K - kt) {
+                                            s = s + load64(qx + ((mt + fi) * K + kt + fk) * 8)
+                                                  * load64(Wq + ((kt + fk) * N + nt + fj) * 8);
+                                        }
+                                        fk = fk + 1;
+                                    }
+                                    store64(&tmf_acc + (fi * 8 + fj) * 8, load64(&tmf_acc + (fi * 8 + fj) * 8) + s);
+                                }
+                                fj = fj + 1;
+                            }
+                        }
+                        fi = fi + 1;
+                    }
+                }
+                kt = kt + 8;
+            }
+
+            # Dequant + scatter — byte-identical to ternary_matmul_free's tail.
+            var oi = 0;
+            while (oi < 8) {
+                if (oi < M - mt) {
+                    var scale = f64_mul(load64(sx + (mt + oi) * 8), gamma);
+                    var oj = 0;
+                    while (oj < 8) {
+                        if (oj < N - nt) {
+                            var acc = load64(&tmf_acc + (oi * 8 + oj) * 8);
+                            var yv = f64_mul(f64_from(acc), scale);
+                            if (b != 0) { yv = f64_add(yv, load64(b + (nt + oj) * 8)); }
+                            store64(y + ((mt + oi) * N + nt + oj) * 8, yv);
+                        }
+                        oj = oj + 1;
+                    }
+                }
+                oi = oi + 1;
+            }
+            nt = nt + 8;
+        }
+        mt = mt + 8;
+    }
+    return gpu_tiles;
+}
