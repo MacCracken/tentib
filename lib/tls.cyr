@@ -14,7 +14,7 @@
 # `fdlopen_init_full` / `fdlopen_dlopen` / `fdlopen_dlsym` resolve.
 # tls.cyr doesn't auto-include fdlopen because the preprocessor
 # output cap (1 MB expanded) is tight for programs that pull
-# in many heavy stdlib modules (e.g. `tests/tcyr/large_input.tcyr`
+# in many heavy stdlib modules (e.g. `tests/tcyr/compiler/large_input.tcyr`
 # already runs at 98% of cap) — an auto-include would put them
 # over.
 #
@@ -1067,7 +1067,7 @@ fn tls_write_early_data(ctx, buf, len): i64 {
     if (ctx == 0) { return 0 - 1; }
     if (_fn_SSL_write_early_data == 0) { return 0 - 1; }
     var ssl = load64(ctx + 8);
-    var written[1];
+    var written[8];
     store64(&written, 0);
     var rc = fncall4(_fn_SSL_write_early_data, ssl, buf, len, &written);
     if (rc != 1) { return 0 - 1; }
@@ -1085,7 +1085,7 @@ fn tls_read_early_data(ctx, buf, maxlen): i64 {
     if (ctx == 0) { return 0 - 1; }
     if (_fn_SSL_read_early_data == 0) { return 0 - 1; }
     var ssl = load64(ctx + 8);
-    var rdb[1];
+    var rdb[8];
     store64(&rdb, 0);
     var status = fncall4(_fn_SSL_read_early_data, ssl, buf, maxlen, &rdb);
     if (status == SSL_READ_EARLY_DATA_SUCCESS) { return load64(&rdb); }

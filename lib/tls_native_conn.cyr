@@ -727,16 +727,46 @@ fn tls_native_write(ctx, buf, len): i64 {
 # instead of returning 0 (false EOF) on the first one. A standard TLS 1.3
 # server (OpenSSL/nginx) sends a NewSessionTicket immediately after the
 # handshake; before this, the first read collapsed to EOF before any data.
+# Partial-record delivery: one TLS record's plaintext is up to 16384 bytes; when
+# it exceeds the caller's `maxlen` this delivers `maxlen` now and HOLDS the
+# remainder in the ctx (TLS_CTX_OFF_READ_HOLD*), returning it on the next calls
+# before another record is decrypted. So a caller may read in sub-record chunks
+# (an h2 9-byte frame header, the tail of a bounded response buffer) and honors
+# the documented "up to maxlen" contract. The prior "whole record or
+# TLS_ERR_BUFFER_FULL" behavior both broke that contract and, on BUFFER_FULL,
+# discarded a record whose AEAD read sequence had already advanced — a silent
+# stream desync / data loss that broke large HTTP responses read in small chunks.
 fn tls_native_read(ctx, buf, maxlen): i64 {
     if (ctx == 0) { return TLS_ERR_INVALID_PARAM; }
     if (load64(ctx + TLS_CTX_OFF_STATE) != TLS_STATE_CONNECTED) { return TLS_ERR_PROTOCOL; }
+    if (maxlen <= 0) { return TLS_ERR_INVALID_PARAM; }   # a 0 ask would look like EOF
+    # 1) Drain plaintext held from a prior over-length record before touching the
+    #    socket. LEN>0 is only ever set together with the buffer pointer, so
+    #    TLS_CTX_OFF_READ_HOLD is non-zero whenever there is anything to drain.
+    var hlen = load64(ctx + TLS_CTX_OFF_READ_HOLD_LEN);
+    var hoff = load64(ctx + TLS_CTX_OFF_READ_HOLD_OFF);
+    if (hlen > hoff) {
+        var hgive = hlen - hoff;
+        if (hgive > maxlen) { hgive = maxlen; }
+        memcpy(buf, load64(ctx + TLS_CTX_OFF_READ_HOLD) + hoff, hgive);
+        hoff = hoff + hgive;
+        if (hoff >= hlen) {
+            store64(ctx + TLS_CTX_OFF_READ_HOLD_LEN, 0);
+            store64(ctx + TLS_CTX_OFF_READ_HOLD_OFF, 0);
+        } else {
+            store64(ctx + TLS_CTX_OFF_READ_HOLD_OFF, hoff);
+        }
+        return hgive;
+    }
     var fd = load64(ctx + TLS_CTX_OFF_SOCK_FD);
     var cap = TLS_RECORD_MAX_CIPHERTEXT + TLS_RECORD_HEADER_LEN;
-    # One allocation holds the ciphertext [0..cap) AND a full-size plaintext
-    # scratch [cap..) — handshake records must decrypt into a max-size buffer
-    # (a large NewSessionTicket would trip TLS_ERR_BUFFER_FULL against a small
-    # caller `maxlen` and consume the AEAD sequence, wedging the connection).
-    var inbuf = _tn_alloc(ctx, cap + TLS_RECORD_MAX_PLAINTEXT);
+    # One allocation holds the ciphertext [0..cap) AND a decrypt scratch [cap..)
+    # for one record's TLSInnerPlaintext (`content ‖ inner_content_type ‖
+    # padding`, RFC 8446 §5.2). A MAX-size record decrypts to content(2^14) + the
+    # type byte = 2^14+1 — ABOVE TLS_RECORD_MAX_PLAINTEXT — and a padded record
+    # reaches the TLSCiphertext ceiling, so the scratch (and _tn_open_record's
+    # out_max) must be TLS_RECORD_MAX_CIPHERTEXT, not TLS_RECORD_MAX_PLAINTEXT.
+    var inbuf = _tn_alloc(ctx, cap + TLS_RECORD_MAX_CIPHERTEXT);
     if (inbuf == 0) { return _tn_ctx_fail(ctx, TLS_ERR_OOM); }
     var plain = inbuf + cap;
     var guard = 0;
@@ -745,16 +775,34 @@ fn tls_native_read(ctx, buf, maxlen): i64 {
         var rl = _tn_sock_read_record_skip_ccs(fd, inbuf, cap);
         if (rl < 0) { return _tn_ctx_fail(ctx, TLS_ERR_IO); }
         var ict = 0;
-        var n = _tn_open_record(ctx, inbuf, rl, plain, TLS_RECORD_MAX_PLAINTEXT, &ict);
+        var n = _tn_open_record(ctx, inbuf, rl, plain, TLS_RECORD_MAX_CIPHERTEXT, &ict);
         if (n < 0) { return n; }
         if (ict == TLS_CT_APPLICATION_DATA) {
             # A 0-length application_data record is legal (RFC 8446 §5.1) and is
             # NOT end-of-stream — drain it and keep reading, so only a real
             # close_notify returns 0. Non-empty data is delivered to the caller.
             if (n > 0) {
-                if (n > maxlen) { return TLS_ERR_BUFFER_FULL; }
-                memcpy(buf, plain, n);
-                return n;
+                if (n <= maxlen) {
+                    memcpy(buf, plain, n);
+                    return n;
+                }
+                # Record longer than the caller's ask: the record is already
+                # decrypted and its AEAD sequence advanced, so stash the tail in
+                # the hold buffer (n <= TLS_RECORD_MAX_PLAINTEXT via the §5.4 guard
+                # in tls_native_record_open; maxlen >= 1, so rem <= 16383 fits the
+                # 16384-byte hold), then deliver the first `maxlen` bytes.
+                var hb = load64(ctx + TLS_CTX_OFF_READ_HOLD);
+                if (hb == 0) {
+                    hb = _tn_alloc(ctx, TLS_RECORD_MAX_PLAINTEXT);
+                    if (hb == 0) { return _tn_ctx_fail(ctx, TLS_ERR_OOM); }
+                    store64(ctx + TLS_CTX_OFF_READ_HOLD, hb);
+                }
+                var rem = n - maxlen;
+                memcpy(hb, plain + maxlen, rem);
+                store64(ctx + TLS_CTX_OFF_READ_HOLD_LEN, rem);
+                store64(ctx + TLS_CTX_OFF_READ_HOLD_OFF, 0);
+                memcpy(buf, plain, maxlen);
+                return maxlen;
             }
         }
         if (ict == TLS_CT_ALERT) { return 0; }   # close_notify → EOF

@@ -58,7 +58,7 @@ fn ws_state(ws): i64 { return load64(ws + 8); }
 # through getrandom(2) (getentropy on macOS); on failure we MUST NOT emit a weak
 # mask — return -1 so the caller aborts the send. Returns 0 on success.
 fn _ws_gen_mask(ws): i64 {
-    var mask[4];
+    var mask[8];
     if (sys_getrandom(&mask, 4, 0) != 4) { return 0 - 1; }
     store64(ws + 16, load64(&mask) & 0xFFFFFFFF);
     return 0;
@@ -261,8 +261,8 @@ fn ws_recv_frame(ws, opcode_out, len_out): i64 {
 
 # Receive text message (convenience — returns string or 0)
 fn ws_recv(ws): i64 {
-    var opcode[1];
-    var len[1];
+    var opcode[8];
+    var len[8];
     var data = ws_recv_frame(ws, &opcode, &len);
     if (data == 0) { return 0; }
     if (load64(&opcode) == WS_OP_TEXT) { return data; }

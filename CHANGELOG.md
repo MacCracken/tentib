@@ -4,6 +4,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-08-18
+
+### Changed
+
+- **Cyrius pin `6.4.72` -> `6.5.27`** (2026-08-17, ecosystem-wide ML/AI-arc realign ahead of
+  the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib
+  snapshot, clearing the toolchain-drift and `./lib/ shadows version-pinned` warnings.
+  Suite **101/101**, identical to the pre-bump baseline; the frozen 1.x public API is untouched.
+
+### Changed
+
+- **The crown proof stages on AGNOS as `/bin/gputern`, not `/bin/gpumm`** (agnos 1.56.32). No change
+  to this repo — `programs/gpumm.cyr` keeps its name, and so does the local `build/gpumm` you get
+  from a host build. Only the *rootfs* name moved.
+
+- **Substrate dependency set brought current: `tyche` 0.1.1 -> 1.0.1, `rosnet` 0.2.0 -> 1.1.1,
+  `akshara` 0.1.0 -> 1.0.2.** All three cut **1.0.0** in early July and froze their public surfaces;
+  no consumer had moved off the pre-1.0 tags, so the freeze was real and its propagation was not.
+  tentib sits in the last release wave, downstream of all three. This is a tag realign with no behavior change — every symbol
+  tentib calls is inside the frozen sets. Verified each bump took rather than merely built: vendored
+  `lib/tyche.cyr` at `1.0.1`, `lib/rosnet.cyr` at `1.1.1`, `lib/akshara.cyr` at `1.0.2`.
+  Suite **101/101**, unchanged.
+
+  Why: agnos's `stage-tools.sh` was staging this program and the standalone **gpumm** repo's seam
+  probe under the same `/bin/gpumm`. tentib's row ran later and won the copy, so the 36,816 B seam
+  probe never reached the image while both rows reported success. `/bin/gpumm` goes back to the
+  gpumm repo (its own name, and the reference consumer of the `#82`/`#83` seam); this proof is named
+  for the ternary integer path it demonstrates, alongside `gpulayer` (rupantara) and `gpuattn`
+  (attn11 — which builds a `programs/gpumm.cyr` of its own and has always staged under a distinct
+  name). agnos's `stage_one` also gained a duplicate-name guard so the next collision fails loudly.
+
+  ⚠ **The 1.0.1 entry below says `run /bin/gpumm`** — accurate when written on 2026-07-23, and left
+  as written. To re-run the iron crown today, `run /bin/gputern`.
+
 ## [1.0.1] — 2026-07-23
 
 **AGNOS GPU offload (the 1.54.x GPU crown / C6, integer path): tentib's ternary integer matmul can run on the

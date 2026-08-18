@@ -1,3 +1,11 @@
+#host_only
+# ^ v6.5.24 bare-metal forbidden-module check (bare-metal deliverable #4). This
+#   module is host-OS-only, so a `--target=<arch>-bare-metal-elf` build (which sets
+#   CYRIUS_KERNEL=1) that includes it now FAILS with a clear error instead of
+#   compiling silently and faulting at runtime inside the kernel. `#` opens a comment
+#   in cyrius, so this line is inert for every host target. See PP_IS_HOST_ONLY in
+#   src/frontend/lex_pp.cyr; remove the marker if this module is ever made
+#   freestanding.
 # process.cyr — process management
 # Usage: include "lib/process.cyr"
 # Requires: lib/syscalls.cyr, lib/string.cyr, lib/alloc.cyr, lib/tagged.cyr
@@ -56,7 +64,7 @@ fn run(cmd, arg1, arg2): Result {
     var pid = sys_fork();
     if (pid < 0) { return Err(0 - pid); }
     if (pid == 0) { _exec3(cmd, arg1, arg2); }
-    var status_buf[1];
+    var status_buf[4];
     sys_waitpid(pid, &status_buf, 0);
     var status = load32(&status_buf);
     if (WIFEXITED(status) == 1) { return Ok(WEXITSTATUS(status)); }
@@ -99,7 +107,7 @@ fn run_capture(cmd, arg1, arg2, buf, buflen): Result {
         }
     }
     sys_close(read_fd);
-    var status_buf[1];
+    var status_buf[4];
     sys_waitpid(pid, &status_buf, 0);
     return Ok(total);
 }
@@ -115,7 +123,7 @@ fn spawn(cmd, arg1, arg2): Result {
 
 # Wait for a specific pid. Returns Result(exit_code).
 fn wait_pid(pid): Result {
-    var status_buf[1];
+    var status_buf[4];
     var r = sys_waitpid(pid, &status_buf, 0);
     if (r < 0) { return Err(0 - r); }
     var status = load32(&status_buf);
@@ -188,7 +196,7 @@ fn exec_vec(args): i64 {
         sys_execve(cmd, argv, envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var st = load32(&stbuf);
     if (WIFEXITED(st) == 1) { return WEXITSTATUS(st); }
@@ -235,7 +243,7 @@ fn exec_capture(args, buf, buflen): i64 {
         else { total = total + n; if (total >= buflen) { rgo = 0; } }
     }
     sys_close(rfd);
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     return total;
 }
@@ -271,7 +279,7 @@ fn exec_env(args, env): i64 {
         sys_execve(cmd, argv, envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var st = load32(&stbuf);
     if (WIFEXITED(st) == 1) { return WEXITSTATUS(st); }
@@ -318,7 +326,7 @@ fn exec_vec_str(args): i64 {
         sys_execve(cmd, argv, envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var st = load32(&stbuf);
     if (WIFEXITED(st) == 1) { return WEXITSTATUS(st); }
@@ -364,7 +372,7 @@ fn exec_capture_str(args, buf, buflen): i64 {
         else { total = total + n; if (total >= buflen) { rgo = 0; } }
     }
     sys_close(rfd);
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     return total;
 }
@@ -398,7 +406,7 @@ fn exec_env_str(args, env): i64 {
         sys_execve(cmd, argv, envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var st = load32(&stbuf);
     if (WIFEXITED(st) == 1) { return WEXITSTATUS(st); }
@@ -470,7 +478,7 @@ fn exec_cmd(cmdline): i64 {
         sys_execve("/bin/sh", &argv, envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var st = load32(&stbuf);
     if (WIFEXITED(st) == 1) { return WEXITSTATUS(st); }

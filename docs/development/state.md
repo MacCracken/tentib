@@ -29,8 +29,10 @@ STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.4.10` (in `cyrius.cyml [package].cyrius`; bumped from 6.2.37
+- **Cyrius pin**: `6.5.27` (in `cyrius.cyml [package].cyrius`; bumped from 6.2.37
   at 0.4.1 — `cyrius lib sync --full`, 86/86 re-validated pre-kernel-work)
+
+**Pin bumped to `6.5.27` 2026-08-17** (ecosystem-wide ML/AI-arc realign, ahead of the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib snapshot; suite re-verified green at the new pin.
 
 ## Source
 

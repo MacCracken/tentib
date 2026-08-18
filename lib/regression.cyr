@@ -219,7 +219,7 @@ fn regression_pipe_to_bin_capture(bin_path, src_path, out_path, envp): i64 {
         else { written = written + w; }
     }
     sys_close(wfd);
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     if (WIFEXITED(status) == 1) { return WEXITSTATUS(status); }
@@ -261,7 +261,7 @@ fn regression_run_with_timeout(bin_path, timeout_ms, envp): i64 {
         sys_execve(bin_path, &argv, envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     var elapsed = 0;
     while (elapsed < timeout_ms) {
         var w = sys_waitpid(pid, &stbuf, 1);
@@ -317,7 +317,7 @@ fn regression_exec_capture_status(bin_path, buf, buflen, envp, status_out): i64 
         sys_exit(127);
     }
     sys_close(out_fd);
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     var code = 0 - 1;
@@ -358,7 +358,7 @@ fn regression_exec_run(bin_path, envp): i64 {
         sys_execve(bin_path, &argv, envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     if (WIFEXITED(status) == 1) { return WEXITSTATUS(status); }
@@ -389,7 +389,7 @@ fn regression_exec_with_arg_capture(bin_path, arg, buf, buflen, envp): i64 {
         sys_exit(127);
     }
     sys_close(out_fd);
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var total = file_read_all(out_path, buf, buflen);
     sys_unlink(out_path);
@@ -421,7 +421,7 @@ fn regression_exec_with_arg_capture_both(bin_path, arg, buf, buflen, envp): i64 
         sys_exit(127);
     }
     sys_close(out_fd);
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var total = file_read_all(out_path, buf, buflen);
     sys_unlink(out_path);
@@ -516,7 +516,7 @@ fn regression_ssh_skip_check(target): i64 {
         sys_execve("/bin/ssh",     &argv, &envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     if (WIFEXITED(status) == 1) {
@@ -546,7 +546,7 @@ fn regression_scp_to(target, local_path, remote_path, envp): i64 {
         sys_execve("/bin/scp",     &argv, envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     if (WIFEXITED(status) == 1) { return WEXITSTATUS(status); }
@@ -576,7 +576,7 @@ fn regression_ssh_remote_exit(target, command, envp): i64 {
         sys_execve("/bin/ssh",     &argv, envp);
         sys_exit(127);
     }
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     if (WIFEXITED(status) == 1) { return WEXITSTATUS(status); }
@@ -608,7 +608,7 @@ fn regression_ssh_remote_exec_capture(target, command, out_path, envp): i64 {
         sys_exit(127);
     }
     sys_close(out_fd);
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     if (WIFEXITED(status) == 1) { return WEXITSTATUS(status); }
@@ -667,7 +667,7 @@ fn regression_exec_in_dir3(work_dir, bin_path, arg1, arg2, arg3, out_path, envp)
         sys_exit(127);
     }
     sys_close(out_fd);
-    var stbuf[1];
+    var stbuf[4];
     sys_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     if (WIFEXITED(status) == 1) { return WEXITSTATUS(status); }
