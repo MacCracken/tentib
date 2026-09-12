@@ -397,7 +397,7 @@ fn tx_pack(V, T, C, F): i64 {
 fn bl_forward_pk(i, x, b, y, M, K, N): i64 {
     act_quant_int(x, M, K, ki_q, ki_sx);
     ternary_matmul_free_simd(ki_q, ki_sx, load64(pk_w8t + i * 8), load64(pk_wsum + i * 8),
-                             load64(pk_gamma + i * 8), b, y, M, K, N, ki_xu8);
+      load64(pk_gamma + i * 8), b, y, M, K, N, ki_xu8);
     return 0;
 }
 

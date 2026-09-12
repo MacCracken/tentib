@@ -90,7 +90,7 @@ fn ternary_matmul_free_gpu(qx, sx, Wq, gamma, b, y, M, K, N): i64 {
                                     while (fk < 8) {
                                         if (fk < K - kt) {
                                             s = s + load64(qx + ((mt + fi) * K + kt + fk) * 8)
-                                                  * load64(Wq + ((kt + fk) * N + nt + fj) * 8);
+                                            * load64(Wq + ((kt + fk) * N + nt + fj) * 8);
                                         }
                                         fk = fk + 1;
                                     }

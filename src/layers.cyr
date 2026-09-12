@@ -103,7 +103,7 @@ fn gelu_bwd(x, dy, dx, n): i64 {
         var sech2 = f64_sub(one, f64_mul(t, t));                           # 1 - tanh^2
         var dinner = f64_mul(c, f64_add(one, f64_mul(f64_mul(three, a), x2)));
         var grad = f64_add(f64_mul(half, f64_add(one, t)),
-                           f64_mul(f64_mul(half, xv), f64_mul(sech2, dinner)));
+          f64_mul(f64_mul(half, xv), f64_mul(sech2, dinner)));
         store64(dx + i * 8, f64_mul(load64(dy + i * 8), grad));
         i = i + 1;
     }
