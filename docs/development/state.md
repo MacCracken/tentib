@@ -5,6 +5,11 @@
 
 ## Version
 
+**1.0.4** (2026-11-09) — maintenance: toolchain 6.6.2 → 6.6.20 + substrate deps
+realigned to their 6.6.20-pinned tags. No source change; suite 101/101. Patch line
+since 1.0.0: 1.0.1 (AGNOS GPU integer offload, `ternary_matmul_free_gpu`) · 1.0.2
+(pin 6.5.27, deps to their 1.x freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20).
+
 **1.0.0 — STABLE**, cut 2026-07-06 (user-named; user tags). The clean cut
 (tarka/prajna/anukūlana precedent): **no code change from 0.8.0** — all six v1.0
 criteria green (BitLinear+STE FD-gated · ternary transformer trains ·
@@ -29,10 +34,11 @@ STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.27` (in `cyrius.cyml [package].cyrius`; bumped from 6.2.37
-  at 0.4.1 — `cyrius lib sync --full`, 86/86 re-validated pre-kernel-work)
-
-**Pin bumped to `6.5.27` 2026-08-17** (ecosystem-wide ML/AI-arc realign, ahead of the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib snapshot; suite re-verified green at the new pin.
+- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`; bumped from 6.6.2
+  at 1.0.4, 2026-11-09). `cyrius lib sync --full` re-vendored the whole 6.6.20 stdlib
+  snapshot (113 files, byte-matching); `cyrius.lock` regenerated (3 commit pins, 116
+  hashes, `--verify` clean); suite re-verified 101/101 at the new pin.
+- Pin history (1.x): 6.4.72 → 6.5.27 (1.0.2) → 6.6.2 (1.0.3) → 6.6.20 (1.0.4).
 
 ## Source
 
@@ -105,10 +111,13 @@ STE), **0.1.0** (M0 — ternary quantizer).
 
 Direct (declared in `cyrius.cyml`):
 
-- stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math
-- **rosnet** 0.2.0 (latent f64 weights + `linear_fwd`/`linear_bwd`) — M1, active
-- **tyche** 0.1.1 (PRNG; rosnet's `t_randn` → `rng_normal`) — M1, active
-- **akshara** 0.1.0 (tokenizer; `corpus_set`/`gd_ld` byte-vocab path) — M2, active
+- stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math, fnptr
+- **rosnet** 1.1.3 (latent f64 weights + `linear_fwd`/`linear_bwd`) — M1, active
+- **tyche** 1.1.1 (PRNG; rosnet's `t_randn` → `rng_normal`) — M1, active
+- **akshara** 1.0.4 (tokenizer; `corpus_set`/`gd_ld` byte-vocab path) — M2, active
+
+All three are the tags cut at cyrius 6.6.20 (rosnet 1.1.3 → tyche 1.1.1;
+akshara 1.0.4 → rosnet 1.1.3), so the chain is self-consistent.
 
 ## Consumers
 
@@ -120,5 +129,5 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 Post-1.0 levers (user-driven, roadmap § out-of-scope): GPU ternary kernels via
 mabda · hoosh/murti serving consumption of `tx_fwd_packed` · rotation-PTQ
 (QuaRot/SpinQuant-class) pairing with the Type-3 import lane · aarch64 NEON when
-cyrius SIMD Phase 5 lands. Dep-pin bumps (rosnet 0.2.0 / tyche 0.1.1 /
-akshara 0.1.0 → their 1.x freezes) ride the next natural touch.
+cyrius SIMD Phase 5 lands. Toolchain/dep realigns ride each ecosystem pin
+sweep (latest: 6.6.20 at 1.0.4).

@@ -4,6 +4,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-11-09
+
+A toolchain and dependency realign. No source change; the frozen 1.x public API is untouched.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`.** `cyrius lib sync --full` re-vendored the whole version-matched
+  stdlib snapshot: `lib/` byte-matches the 6.6.20 snapshot, 113 files, five of them new (`alloc_cx`,
+  `boxed`, `hashseed`, `poison`, `tls_hostid`). The snapshot dropped nothing, so nothing was pruned.
+  `cyrius fmt --check` is clean on every source, so the new pin brought no format drift.
+
+- **Substrate deps realigned to the tags each cut at its own 6.6.20 pin: `tyche` 1.0.1 → 1.1.1,
+  `rosnet` 1.1.1 → 1.1.3, `akshara` 1.0.2 → 1.0.4.** The chain is self-consistent: rosnet 1.1.3 pins
+  tyche 1.1.1, and akshara 1.0.4 pins rosnet 1.1.3. Every symbol tentib calls is inside their frozen
+  1.x sets. Vendored `lib/tyche.cyr`, `lib/rosnet.cyr` and `lib/akshara.cyr` byte-match the tagged
+  `dist/` bundles. One upstream change reaches tentib: tyche 1.1.0 moved `rng_normal` to a portable
+  logarithm, which shifts 0.011% of x86_64 draws by 1–3 ulp. rosnet's `t_randn` inherits that, and
+  tentib's weight init draws through it. The suite does not compare drawn values, and it passes unchanged.
+  rosnet 1.1.3 and akshara 1.0.4 also narrowed their `dist/*.deps` sidecars to the stdlib leaves each
+  bundle needs. tentib already declares all of those leaves in its own `[deps] stdlib`, so this
+  change does not affect it.
+
+- **`cyrius.lock` regenerated from scratch.** `cyrius deps` added the new commit pins but kept the
+  superseded tyche 1.0.1 / rosnet 1.1.1 / akshara 1.0.2 pins beside them. The regenerated lock has
+  one pin per dep (`68bb5db` tyche, `5aa4ad7` rosnet, `60f56f5` akshara), 116 file hashes, and the
+  `cyrius 6.6.20` toolchain line the 6.6.20 format records. `cyrius deps --verify` is clean.
+
+Re-verified at the new pin: build; suite **101/101** (unchanged); the demo; the `examples/quickstart.cyr`
+self-check (PASS); `programs/gpumm.cyr` on host exits **96** (byte-identical, no GPU, which is the
+expected host result) and still cross-builds with `--agnos`; fuzz 1/1. Bench ratios reproduce: packed
+serving runs at 13,032 tok/s against 2,171 for f64 (6.0×), and the per-layer SIMD speedup over f64 is
+8.5× → 19.7× (128² → 768²).
+
 ## [1.0.3] - 2026-09-11
 
 ### Changed
