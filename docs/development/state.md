@@ -5,10 +5,11 @@
 
 ## Version
 
-**1.0.4** (2026-11-09) — maintenance: toolchain 6.6.2 → 6.6.20 + substrate deps
-realigned to their 6.6.20-pinned tags. No source change; suite 101/101. Patch line
-since 1.0.0: 1.0.1 (AGNOS GPU integer offload, `ternary_matmul_free_gpu`) · 1.0.2
-(pin 6.5.27, deps to their 1.x freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20).
+**1.1.0** (2026-11-09) — onto the cyrius 6.7 series: toolchain 6.6.20 → 6.7.9 +
+substrate deps moved to their 6.7.9-pinned tags. No source change; suite 101/101;
+demo values byte-identical to 6.6.20. Releases since 1.0.0: 1.0.1 (AGNOS GPU
+integer offload, `ternary_matmul_free_gpu`) · 1.0.2 (pin 6.5.27, deps to their 1.x
+freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20) · 1.1.0 (pin 6.7.9).
 
 **1.0.0 — STABLE**, cut 2026-07-06 (user-named; user tags). The clean cut
 (tarka/prajna/anukūlana precedent): **no code change from 0.8.0** — all six v1.0
@@ -34,11 +35,14 @@ STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`; bumped from 6.6.2
-  at 1.0.4, 2026-11-09). `cyrius lib sync --full` re-vendored the whole 6.6.20 stdlib
+- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`; bumped from 6.6.20
+  at 1.1.0, 2026-11-09). `cyrius lib sync --full` re-vendored the whole 6.7.9 stdlib
   snapshot (113 files, byte-matching); `cyrius.lock` regenerated (3 commit pins, 116
-  hashes, `--verify` clean); suite re-verified 101/101 at the new pin.
-- Pin history (1.x): 6.4.72 → 6.5.27 (1.0.2) → 6.6.2 (1.0.3) → 6.6.20 (1.0.4).
+  hashes, `--verify` and `--locked` clean); suite re-verified 101/101 at the new pin.
+  tentib's source contains none of the constructs the 6.7.x language changes touch
+  (newly reserved words, `!`, unary `-` / `~` on constants, typed `*T` pointers, `f32`).
+- Pin history (1.x): 6.4.72 → 6.5.27 (1.0.2) → 6.6.2 (1.0.3) → 6.6.20 (1.0.4) →
+  6.7.9 (1.1.0).
 
 ## Source
 
@@ -112,12 +116,12 @@ STE), **0.1.0** (M0 — ternary quantizer).
 Direct (declared in `cyrius.cyml`):
 
 - stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math, fnptr
-- **rosnet** 1.1.3 (latent f64 weights + `linear_fwd`/`linear_bwd`) — M1, active
-- **tyche** 1.1.1 (PRNG; rosnet's `t_randn` → `rng_normal`) — M1, active
-- **akshara** 1.0.4 (tokenizer; `corpus_set`/`gd_ld` byte-vocab path) — M2, active
+- **rosnet** 1.2.0 (latent f64 weights + `linear_fwd`/`linear_bwd`) — M1, active
+- **tyche** 1.2.0 (PRNG; rosnet's `t_randn` → `rng_normal`) — M1, active
+- **akshara** 1.1.0 (tokenizer; `corpus_set`/`gd_ld` byte-vocab path) — M2, active
 
-All three are the tags cut at cyrius 6.6.20 (rosnet 1.1.3 → tyche 1.1.1;
-akshara 1.0.4 → rosnet 1.1.3), so the chain is self-consistent.
+All three are the tags cut at cyrius 6.7.9 (rosnet 1.2.0 → tyche 1.2.0;
+akshara 1.1.0 → rosnet 1.2.0), so the chain is self-consistent.
 
 ## Consumers
 
@@ -130,4 +134,4 @@ Post-1.0 levers (user-driven, roadmap § out-of-scope): GPU ternary kernels via
 mabda · hoosh/murti serving consumption of `tx_fwd_packed` · rotation-PTQ
 (QuaRot/SpinQuant-class) pairing with the Type-3 import lane · aarch64 NEON when
 cyrius SIMD Phase 5 lands. Toolchain/dep realigns ride each ecosystem pin
-sweep (latest: 6.6.20 at 1.0.4).
+sweep (latest: 6.7.9 at 1.1.0).

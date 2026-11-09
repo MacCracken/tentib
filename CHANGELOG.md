@@ -4,6 +4,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-11-09
+
+This release moves tentib onto the cyrius 6.7 series, as tyche 1.2.0, rosnet 1.2.0 and akshara 1.1.0
+did. Nothing in `src/` changed, and the frozen 1.x public API is untouched.
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`** (through 6.7.0–6.7.8). `cyrius lib sync --full` re-vendored the
+  stdlib. `lib/` byte-matches the 6.7.9 snapshot: the same 113 files as 6.6.20, 67 of them with new
+  content. Nothing was added or removed. `cyrius fmt --check` passes on every source, and lint gives
+  the same 19 line-length warnings it gave at 6.6.2 and 6.6.20.
+  I checked the 6.7.x language changes against tentib's own code (`src/`, `programs/`, `examples/`,
+  `tests/`, with comments and strings excluded):
+  - **6.7.0–6.7.8** reserve `trait`, `const`, `true`, `false`, `do` and `dyn`. tentib uses none of
+    them as names.
+  - **6.7.3** makes `!` a real operator; before that, a lone `!x` compiled as `x`. tentib has no `!`
+    except in `!=`.
+  - **6.7.9** makes unary `-` and `~` on a constant bind tighter. tentib has no unary `-` and no `~`.
+    It writes negatives as `0 - n`.
+  - **6.7.8–6.7.9** change how typed `*T` pointers step and dereference, and **6.7.6** rounds every
+    write into an `f32`. tentib has no typed pointers and no `f32`. Its tensors are untyped addresses
+    read with `load8` / `load64`.
+  - **6.7.6** deprecates `cyrius tests`, and 6.7.12 removes it. CI and the docs already use bare
+    `cyrius test`.
+  - tentib's four `>>` shifts read a sign bit or a 2-bit code under an `& 1` / `& 3` mask, so they
+    give the same result whether `>>` is logical or arithmetic.
+
+- **Substrate deps moved to the tags each cut at its own 6.7.9 pin: `tyche` 1.1.1 → 1.2.0,
+  `rosnet` 1.1.3 → 1.2.0, `akshara` 1.0.4 → 1.1.0.** The pins agree: rosnet 1.2.0 pins tyche 1.2.0,
+  and akshara 1.1.0 pins rosnet 1.2.0. Each of the three reports no change to its source, API or
+  output. Each checked that by comparing a dump of its outputs between 6.6.20 and 6.7.9, and found it
+  byte-identical. Vendored `lib/tyche.cyr`, `lib/rosnet.cyr` and `lib/akshara.cyr` byte-match the
+  tagged `dist/` bundles.
+
+- **`cyrius.lock` regenerated from scratch**, as in 1.0.4. It has one commit pin per dep (`2c393fe`
+  tyche, `f065c58` rosnet, `09ed724` akshara), 116 file hashes, and the trailer `cyrius 6.7.9`.
+  `cyrius deps --verify` passes, and so does `cyrius deps --locked`, which is new in 6.7.6.
+
+Re-verified at the new pin:
+- The build passes, and the suite passes **101/101** (unchanged).
+- The demo prints the same values as at 6.6.20: its output matches line for line apart from the
+  timing lines (39 lines compared).
+- The `examples/quickstart.cyr` self-check passes.
+- `programs/gpumm.cyr` exits **96** on the host, the expected result without a GPU, and still builds
+  with `--agnos`.
+- Fuzz passes 1/1.
+- The bench ratios reproduce: packed serving runs at 13,387 tok/s against 2,265 for f64 (5.9×). The
+  per-layer SIMD speedup over f64 grows from 8.2× at 128² to 19.0× at 768².
+
 ## [1.0.4] — 2026-11-09
 
 A toolchain and dependency realign. No source change; the frozen 1.x public API is untouched.

@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "tentib — sovereign integer-native / ternary (1.58-bit) ML reference in Cyrius (BitNet reversed; the i64 thesis applied to the weights)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 repository = "https://github.com/MacCracken/tentib"
 
 [build]
@@ -24,13 +24,13 @@ stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "b
 # even though tentib only calls rosnet directly.
 [deps.tyche]
 git = "https://github.com/MacCracken/tyche"
-tag = "1.1.1"
+tag = "1.2.0"
 modules = ["dist/tyche.cyr"]
 
 # Dense f64 tensor algebra: storage, BLAS-1, matmul + gradient (linear_fwd/linear_bwd).
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet"
-tag = "1.1.3"
+tag = "1.2.0"
 modules = ["dist/rosnet.cyr"]
 
 # Sovereign tokenizer (अक्षर) — the shared text→token-id layer (with attn11/tarka).
@@ -39,5 +39,5 @@ modules = ["dist/rosnet.cyr"]
 # stubbed in the build units (M2 bite-F real-corpus training).
 [deps.akshara]
 git = "https://github.com/MacCracken/akshara"
-tag = "1.0.4"
+tag = "1.1.0"
 modules = ["dist/akshara.cyr"]
