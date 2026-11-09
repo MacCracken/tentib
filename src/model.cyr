@@ -20,7 +20,10 @@
 
 # Forward: per row, max-subtract softmax into probs(M*V); returns mean NLL over M.
 # targets(M) are RAW i64 class indices (load64, used as offset tgt*8) — NOT f64.
+# A target outside [0, V) used to read past the probs row (silently-wrong loss);
+# it fails loud since 1.1.2.
 fn softmax_xent_fwd(logits, targets, probs, M, V): i64 {
+    guard(_ids_in_range(targets, M, V), "softmax_xent_fwd: target id outside [0, V)");
     var total = f64_from(0);
     var m = 0;
     while (m < M) {
@@ -48,7 +51,10 @@ fn softmax_xent_fwd(logits, targets, probs, M, V): i64 {
 }
 
 # Backward: dlogits(M*V) = (probs - onehot(targets)) / M. Consumes normalized probs.
+# An out-of-range target used to drop the onehot term (silently-wrong gradient);
+# it fails loud since 1.1.2.
 fn softmax_xent_bwd(probs, targets, dlogits, M, V): i64 {
+    guard(_ids_in_range(targets, M, V), "softmax_xent_bwd: target id outside [0, V)");
     var invM = f64_div(f64_from(1), f64_from(M));
     var m = 0;
     while (m < M) {
@@ -107,7 +113,11 @@ fn lm_correct(E, W_head, b_head, V, D, logits, probs, tgt_buf, Wq, Weff): i64 {
         bl_forward_wonly(E + x * D * 8, W_head, b_head, logits, 1, D, V, Wq, Weff);
         var best = 0; var bestv = load64(logits);
         var i = 1;
-        while (i < V) { var lv = load64(logits + i * 8); if (f64_gt(lv, bestv) == 1) { bestv = lv; best = i; } i = i + 1; }
+        while (i < V) {
+            var lv = load64(logits + i * 8);
+            if (f64_gt(lv, bestv) == 1) { bestv = lv; best = i; }
+            i = i + 1;
+        }
         if (best == ((x + 1) % V)) { n = n + 1; }
         x = x + 1;
     }

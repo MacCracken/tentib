@@ -1,5 +1,9 @@
 # Call-site argument-count mismatch is silently accepted (no arity check) — binds garbage / shifts args
 
+> **Status: RESOLVED upstream** (checked 2026-11-09, tentib 1.1.2). Every installed cyrius from 6.6.0
+> through 6.7.18 rejects the repro at compile time: `error: 'f' expects 2 arguments, got 1`. The fix
+> landed between 6.2.37 (where this was filed) and 6.6.0. Kept below as filed.
+
 **Filed:** 2026-06-23 (by a tentib consumer — tentib 0.4.0 M3c, the matmul-free kernel
 gained a bias param and three call sites went stale)
 **Severity:** P2 — silent-miscompile footgun. Compiles clean (`OK`), wrong runtime

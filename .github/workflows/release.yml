@@ -2,10 +2,14 @@ name: Release
 
 on:
   push:
-    tags: ['[0-9]*']
+    # X.Y.Z with an optional suffix (the cyrius init template's filter). A stray
+    # tag that only starts with a digit does not start a release.
+    tags: ['[0-9]+.[0-9]+.[0-9]+*']
 
+# Read-only by default. Only the release job, which publishes, gets
+# contents: write, so the CI gate it calls never holds a write token.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
@@ -16,20 +20,29 @@ jobs:
     name: Build & Release
     needs: [ci]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned 2026-06-19)
+      # Pinned to a full commit SHA, as in ci.yml. persist-credentials false:
+      # git archive needs no token, and the curl | sh installer below runs in
+      # this job, which holds contents: write.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Verify version
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TAG_VERSION="${GITHUB_REF_NAME}"
-          test "$FILE_VERSION" = "$TAG_VERSION" || { echo "VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"; exit 1; }
+          CYML_RAW=$(grep '^version = ' cyrius.cyml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          if [ "$CYML_RAW" = "\${file:VERSION}" ]; then CYML_VERSION="$FILE_VERSION"; else CYML_VERSION="$CYML_RAW"; fi
+          TAG="${GITHUB_REF_NAME}"
+          [ "$FILE_VERSION" = "$TAG" ] || { echo "VERSION ($FILE_VERSION) != tag ($TAG)"; exit 1; }
+          [ "$CYML_VERSION" = "$TAG" ] || { echo "cyrius.cyml ($CYML_RAW) != tag ($TAG)"; exit 1; }
+          echo "Version verified: $TAG"
 
       - name: Install Cyrius toolchain
-        # Upstream install.sh lays out $HOME/.cyrius/{bin,lib,versions/<v>} — the
-        # hand-rolled curl+cp-into-bin form skips versions/<v>/ and so fails the
-        # `cyrius deps` pin-check / `cyrius lib sync` once git deps (rosnet/tyche/
-        # akshara at M1) land. Reference: tarka (same dep profile) / patra / sit.
+        # Same upstream install.sh form as CI: version read from cyrius.cyml's
+        # [package].cyrius pin (never hardcoded).
         run: |
           set -e
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
@@ -38,14 +51,33 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
-      - name: Build
+      - name: Build (DCE)
         run: |
           cyrius deps
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          echo "tentib: $(wc -c < build/${{ github.event.repository.name }}) bytes"
 
+      - name: Archive
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          NAME="${{ github.event.repository.name }}"
+          git archive --format=tar.gz --prefix="${NAME}-${TAG}/" -o "${NAME}-${TAG}-src.tar.gz" HEAD
+          sha256sum "${NAME}-${TAG}-src.tar.gz" "build/${NAME}" > SHA256SUMS
+
+      - name: Extract changelog
+        run: |
+          awk "/^## \\[${GITHUB_REF_NAME}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > "$RUNNER_TEMP/body.md"
+          [ -s "$RUNNER_TEMP/body.md" ] || echo "No changelog entry for ${GITHUB_REF_NAME}." > "$RUNNER_TEMP/body.md"
+
+      # The one step that uses the write token, so a moved tag here could rewrite
+      # what a release ships: pinned to a full commit SHA.
       - name: Create release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2 (pinned 2026-06-19)
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          generate_release_notes: true
-          files: build/*
+          name: "tentib ${{ github.ref_name }}"
+          body_path: ${{ runner.temp }}/body.md
+          files: |
+            ${{ github.event.repository.name }}-*-src.tar.gz
+            build/${{ github.event.repository.name }}
+            SHA256SUMS

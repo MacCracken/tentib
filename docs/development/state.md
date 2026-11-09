@@ -5,16 +5,26 @@
 
 ## Version
 
-**1.1.1** (2026-11-09): toolchain 6.7.9 → 6.7.18, and the substrate deps moved to their
-latest releases. No source change; suite 101/101; demo values byte-identical to 6.7.9.
-**The f64 comparison baseline moved:** rosnet 1.2.2–1.4.1 made `linear_fwd` 2.4–2.9× faster,
-with the same bits. Per-layer SIMD vs f64 is now **3.7×→7.3×** (it was 5.0×→18.4×), and packed
-serving is **13,382 vs 3,166 tok/s = 4.2×** (it was 5.7×). The figures below and in
-`docs/benchmarks.md`'s tables are the 2026-07-06 run of record. `docs/benchmarks.md` carries a
-dated note, and a full re-baseline is still open.
+**1.1.2** (2026-11-09): the P(-1) hardening, optimization and repair sweep
+([`docs/audit/2026-11-09-audit.md`](../audit/2026-11-09-audit.md)). 2 MEDIUM fixed: an
+out-of-range token id made `tx_bwd` write past `tx_dtokemb`, and `bl_ste_mask_x` zeroed the
+max element's gradient in ~14% of rows. 9 LOW fixed: target ids, dims vs the init sizing, NaN
+through the integer path, the guard's stderr channel, `absmean(·, 0)`, test gaps, the test-stub
+warnings, CI integrity, and bench history. No signature changed. A 333,281-value golden dump is
+bit-identical to 1.1.1 except the mask fix's one value. Faster with the same bits: the f64
+forward −33%, packing −53%, packed serving −6% (14.2k tok/s), a training step −19%. Suite
+**139** (incl. 20 guard fail paths in forked children); a 5,000-round property fuzzer; both
+also on aarch64 (qemu) in CI. `cyrius audit` clean. Posture:
+[ADR 0002](../adr/0002-hardening-preserves-bits.md).
+
+**1.1.1** (2026-11-09): toolchain 6.7.9 → 6.7.18 and the deps' latest releases. rosnet
+1.2.2–1.4.1 made `linear_fwd` 2.4–2.9× faster, so the "vs f64" ratios shrank. The figures
+below and in `docs/benchmarks.md`'s tables are the 2026-07-06 run of record; its dated notes
+carry the 1.1.1 and 1.1.2 numbers, and a full re-baseline is still open.
+
 Releases since 1.0.0: 1.0.1 (AGNOS GPU integer offload, `ternary_matmul_free_gpu`) ·
 1.0.2 (pin 6.5.27, deps to their 1.x freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20) ·
-1.1.0 (pin 6.7.9) · 1.1.1 (pin 6.7.18, latest deps).
+1.1.0 (pin 6.7.9) · 1.1.1 (pin 6.7.18, latest deps) · 1.1.2 (P(-1) sweep).
 
 **1.0.0 — STABLE**, cut 2026-07-06 (user-named; user tags). The clean cut
 (tarka/prajna/anukūlana precedent): **no code change from 0.8.0** — all six v1.0
@@ -87,12 +97,18 @@ STE), **0.1.0** (M0 — ternary quantizer).
   exactness bounds documented in-file). **0.7.0 pack-once serving**:
   `tx_pack_init`/`tx_pack` (7-layer packed store, built once) + `tx_fwd_packed`
   (deployment forward; internal `bl_forward_pk`/`*_sublayer_pk` chain).
+- `src/gpu.cyr` — `ternary_matmul_free_gpu`: the integer accumulate tiled 8×8×8 onto the
+  AGNOS `#82` dispatch, bit-exact at any K; the host computes every tile itself (gated in
+  the suite at ragged shapes since 1.1.2). Built by `programs/gpumm.cyr`.
 - `src/main.cyr` — demo driver (M0 quantizer · M1 BitLinear · M2 transformer-trains ·
   M3 matmul-free kernel · M3b branchless bench · M3c whole-model integer inference).
+- `src/test.cyr` — the `[build].test` stub (defines akshara's hooks).
+- `scripts/bench-history.sh` — builds the bench harness once, runs it pinned (core 4)
+  RUNS times, appends the medians to `bench-history.csv` (1.1.2).
 
 ## Tests
 
-- `tests/tentib.tcyr` — **101/101** green: rosnet smoke, M0 quantization, BitLinear
+- `tests/tentib.tcyr` — **139/139** green (x86_64 and aarch64): rosnet smoke, M0 quantization, BitLinear
   forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
@@ -111,12 +127,19 @@ STE), **0.1.0** (M0 — ternary quantizer).
   **0.8.0 hardening gates** (all-zero weights → γ=0 + all-zero codes, the
   ternary_one γ=0 fix, guard pass-path), and the **0.6.0 API-freeze gates**
   (`ref_dot` exact, `bl_forward_q` direct mode 0-vs-2 bit-identity + same γ, the
-  manual zero/loss/bwd/sgd quartet descends).
+  manual zero/loss/bwd/sgd quartet descends), and the **1.1.2 sweep group** (the
+  activation-mask fix, NaN propagation, `absmean(·, 0)`, the GPU fallback at four
+  ragged shapes, prefix serving, and 20 guard fail paths in forked children with two
+  exit-0 controls).
 - `tests/tentib.bcyr` — **the 0.5.0 benchmark harness** (drives `docs/benchmarks.md`):
   per-layer kernel sweep (branchy/branchless/SIMD-pack-once/rosnet-f64 at 128²–768²),
   prep-amortization costs, whole-model forward → tok/s (f64 / scalar-int / SIMD-int
-  at a b1.58-shaped 267k-param config). B-series fairness; ratios reproduce, absolute
-  ns vary with boost. `tests/tentib.fcyr` — fuzz stub (no-op).
+  at a b1.58-shaped 267k-param config) + packed serving + (1.1.2) a training step.
+  B-series fairness; ratios reproduce, absolute ns vary with boost.
+- `tests/tentib.fcyr` — **seeded property fuzzer** (1.1.2): 5,000 rounds, ~3 s,
+  properties P1–P8 (kernel agreement, code range, pack round-trip, Weff = code·γ,
+  integer vs f64 within the summation bound, NaN rows, mask identity, whole-model
+  modes + prefix serving).
 
 ## Dependencies
 
@@ -142,5 +165,6 @@ Post-1.0 levers (user-driven, roadmap § out-of-scope): GPU ternary kernels via
 mabda · hoosh/murti serving consumption of `tx_fwd_packed` · rotation-PTQ
 (QuaRot/SpinQuant-class) pairing with the Type-3 import lane · aarch64 NEON when
 cyrius SIMD Phase 5 lands. Toolchain/dep realigns ride each ecosystem pin
-sweep (latest: 6.7.18 at 1.1.1). Open: re-baseline `docs/benchmarks.md`'s tables, the
-README and `docs/api.md` against the faster rosnet f64 path (dated note in place, 1.1.1).
+sweep (latest: 6.7.18 at 1.1.1); the latest P(-1) sweep is 1.1.2. Open: re-baseline
+`docs/benchmarks.md`'s tables, the README and `docs/api.md` (dated 1.1.1 and 1.1.2
+notes in place; maintainer's call).

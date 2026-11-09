@@ -11,18 +11,30 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token. Nothing here writes to the repository, and when release.yml
+# calls this workflow the called side can only lower the caller's permissions,
+# so the CI gate never holds the release job's contents: write.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned 2026-06-19)
+      # Third-party actions are pinned to a full commit SHA (a tag can be moved);
+      # the comment names the release the SHA was taken from. persist-credentials
+      # false keeps the token out of .git/config, where the curl | sh installer
+      # below could read it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
-        # Upstream install.sh lays out $HOME/.cyrius/{bin,lib,versions/<v>} — the
-        # hand-rolled curl+cp-into-bin form skips versions/<v>/ and so fails the
-        # `cyrius deps` pin-check / `cyrius lib sync` once git deps (rosnet/tyche/
-        # akshara at M1) land. Reference: tarka (same dep profile) / patra / sit.
+        # The toolchain version is the cyrius.cyml [package].cyrius pin — the
+        # single source of truth, never hardcoded here. Upstream install.sh lays
+        # out $HOME/.cyrius/{bin,lib,versions/<v>}; the hand-rolled curl+cp-into-bin
+        # form skips versions/<v>/ and so fails the `cyrius deps` pin-check.
         run: |
           set -e
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
@@ -32,17 +44,168 @@ jobs:
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
-        run: cyrius deps
+        # Fetches tyche / rosnet / akshara at their pinned tags and proves lib/ is
+        # exactly what cyrius.lock records.
+        run: |
+          cyrius deps
+          cyrius deps --verify
+          cyrius deps --locked
+
+      - name: Format check
+        run: |
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr programs/*.cyr examples/*.cyr; do
+            cyrius fmt "$f" --check
+          done
+
+      - name: Lint
+        # Hard gate: any warning fails, in every source tentib ships.
+        run: |
+          fail=0
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr programs/*.cyr examples/*.cyr; do
+            out=$(cyrius lint "$f" 2>&1 || true)
+            echo "$out"
+            if echo "$out" | grep -qE '^[[:space:]]*(warn|error) '; then
+              echo "lint: warnings in $f"; fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
+
+      - name: Vet
+        # cyaudit vet: every file the demo includes resolves, and none is untrusted.
+        run: cyrius vet src/main.cyr
+
+      - name: Docs check
+        # Every public fn of the library modules carries a doc comment. (The
+        # entry points main.cyr / test.cyr hold only main and consumer hooks.)
+        run: |
+          fail=0
+          for f in src/ternary.cyr src/bitlinear.cyr src/layers.cyr src/model.cyr src/block.cyr src/kernel.cyr src/gpu.cyr; do
+            out=$(cyrius doc --check "$f" 2>&1)
+            echo "$f: $(echo "$out" | tail -1)"
+            if echo "$out" | grep -q 'undocumented:'; then echo "$out"; fail=1; fi
+          done
+          [ $fail -eq 0 ] || { echo "doc: undocumented public fns"; exit 1; }
 
       - name: Build
         run: |
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
+      - name: Verify ELF
+        run: xxd -l 4 build/${{ github.event.repository.name }} | grep -q "7f45 4c46"
+
+      - name: Run demo
+        run: ./build/${{ github.event.repository.name }}
+
       - name: Test
-        # v5.6.28: bare `cyrius test` picks up the [build].test entry
-        # AND auto-discovers tests/*.tcyr — avoids the previous
-        # `cyrius test src/test.cyr` form that hard-failed when the
-        # stub didn't exist (Issue 1) and also wouldn't ever exercise
-        # tests/${proj}.tcyr.
+        # Bare `cyrius test` runs the [build].test entry and tests/*.tcyr: the
+        # finite-difference gates, the bit-identity gates, and (1.1.2) every
+        # guard's fail path in a forked child.
         run: cyrius test
+
+      - name: Example + GPU program
+        # quickstart self-checks (exit 0 = packed serving == the scalar kernel);
+        # gpumm on a host without #82 exits 96 (byte-identical, 0 GPU tiles).
+        run: |
+          cyrius build examples/quickstart.cyr build/quickstart
+          ./build/quickstart
+          cyrius build programs/gpumm.cyr build/gpumm
+          set +e; ./build/gpumm; rc=$?; set -e
+          [ "$rc" -eq 96 ] || { echo "gpumm: exit $rc, expected 96 (host, no GPU)"; exit 1; }
+          cyrius build --agnos programs/gpumm.cyr build/gputern_agnos
+
+      - name: Fuzz
+        # Seeded property fuzzing (tests/tentib.fcyr); exit 1 = a property failed.
+        run: |
+          CYRIUS_DCE=1 cyrius build tests/tentib.fcyr build/fuzz
+          timeout 300 ./build/fuzz || { echo "FUZZ: property failure, crash or timeout"; exit 1; }
+
+      - name: Benchmarks
+        # Smoke only: runner numbers vary, so this proves the harness runs.
+        continue-on-error: true
+        run: CYRIUS_DCE=1 cyrius bench tests/tentib.bcyr
+
+  aarch64:
+    name: aarch64 (cross + qemu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Install qemu (user-mode aarch64)
+        # `qemu-user` is the real package on current runner images; its binary is
+        # qemu-aarch64 (older images: qemu-aarch64-static). The cross-built
+        # binaries are static ELFs, so either runs them.
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+          QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+          [ -n "$QEMU" ] || { echo "no qemu-aarch64 binary after installing qemu-user"; exit 1; }
+          "$QEMU" --version | head -1
+          echo "QEMU=$QEMU" >> "$GITHUB_ENV"
+
+      - name: Resolve deps
+        run: cyrius deps
+
+      - name: Cross-build + run the suite and fuzz on aarch64
+        # The integer kernels' bit-identity, the NaN propagation (f64_to(NaN) is 0
+        # on aarch64, INT_MIN on x86_64) and the guard fail paths, checked on the
+        # second target.
+        run: |
+          mkdir -p build
+          cyrius build --aarch64 tests/tentib.tcyr build/test_a64
+          "$QEMU" build/test_a64
+          cyrius build --aarch64 tests/tentib.fcyr build/fuzz_a64
+          timeout 600 "$QEMU" build/fuzz_a64
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan for dangerous patterns
+        # Informational. tentib opens no files and runs no processes (the suite's
+        # fork harness is test-only), so these never fire on src/ today; kept for
+        # parity with the sibling repos and to catch a regression.
+        run: |
+          if grep -rn 'syscall(59' src/ 2>/dev/null | grep -v "# "; then echo "WARN: raw execve"; fi
+          if grep -rnE 'sys_system|exec_cmd' src/ 2>/dev/null; then echo "WARN: shell execution"; fi
+          if grep -rn '"/etc/' src/ 2>/dev/null; then echo "WARN: hardcoded /etc paths"; fi
+          echo "security scan complete"
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check required docs
+        run: |
+          MISSING=0
+          for doc in README.md CHANGELOG.md VERSION LICENSE SECURITY.md CONTRIBUTING.md CLAUDE.md cyrius.cyml \
+                     docs/api.md docs/benchmarks.md docs/development/state.md; do
+            if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
+          done
+          exit $MISSING
+      - name: Verify version consistency
+        run: |
+          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
+          CYML_RAW=$(grep '^version = ' cyrius.cyml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          # ${file:VERSION} means cyrius.cyml takes its version from VERSION.
+          if [ "$CYML_RAW" = "\${file:VERSION}" ]; then CYML_VERSION="$FILE_VERSION"; else CYML_VERSION="$CYML_RAW"; fi
+          [ "$FILE_VERSION" = "$CYML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_RAW)"; exit 1; }
+          grep -q "^## \[$FILE_VERSION\]" CHANGELOG.md || { echo "version $FILE_VERSION not in CHANGELOG.md"; exit 1; }
+          echo "Version consistent: $FILE_VERSION (cyml: $CYML_RAW)"

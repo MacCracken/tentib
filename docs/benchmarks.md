@@ -34,6 +34,14 @@ is reproduced by the committed harness — no hand-curated numbers.
 > f64, they measured the older rosnet, and §1's lane-width reasoning ("2-wide SSE2") no longer
 > describes rosnet on an AVX2 CPU. The tables, the README and `docs/api.md` have not been
 > re-baselined yet.
+>
+> **1.1.2 (2026-11-09): tentib's own paths got faster, with the same bits.** The P(-1)
+> sweep sped up the quantizer, the packer and the activation quant (the kernels were not
+> touched; the per-layer rows did not move). Same host, `taskset -c 4`, median of three
+> runs (`scripts/bench-history.sh`, `bench-history.csv`): f64 forward 11.16 → 7.44 ms;
+> integer SIMD mode 2 10.84 → 6.30 ms; packed serving 2.40 → 2.25 ms (13.3k → 14.2k tok/s);
+> one-time `tx_pack` 8.28 → 3.93 ms; a training step 27.85 → 22.43 ms. Because the f64
+> reference path got faster too, packed serving is 3.3× the f64 path at this config.
 
 ## 1. Per-layer kernel sweep (M=1 row, K×N; ns/call)
 

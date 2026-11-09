@@ -36,6 +36,7 @@ var wq_b[512];    # Wq : K x N = 16 x 32 i64  (ternary weights {-1,0,+1})
 var yc[256];      # y_cpu : M x N = 8 x 32 f64
 var yg[256];      # y_gpu
 
+# Deterministic operands: signed int8-range qx, ternary Wq, positive row scales.
 fn fill(): i64 {
     var m = 0;
     while (m < 8) {
@@ -53,6 +54,7 @@ fn fill(): i64 {
     return 0;
 }
 
+# Run the CPU and GPU-tiled kernels on the same operands; the exit code is the oracle.
 fn gpumm_main(): i64 {
     alloc_init();
     fill();

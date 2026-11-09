@@ -8,26 +8,56 @@
 # f64 values live as i64 bit patterns (the sovereign convention); arrays are
 # 8-byte slots indexed the rosnet way: load64(p + i*8) / store64(p + i*8, v).
 
+# Element i of a flat f64 tensor (its i64 bit pattern).
 fn tload(p, i): i64 { return load64(p + i * 8); }
+# Store the f64 bit pattern v as element i of a flat tensor.
 fn tstore(p, i, v): i64 { store64(p + i * 8, v); return 0; }
+
+# Write a NUL-terminated string to stderr (fd 2). Library code reports through
+# this, not through a consumer-defined puts / _putc on stdout (1.1.2).
+fn _tentib_err(s): i64 {
+    var n = 0;
+    while (load8(s + n) != 0) { n = n + 1; }
+    sys_write(2, s, n);
+    return 0;
+}
 
 # Fail-loud precondition guard (the tarka convention): Cyrius has no bounds
 # checks, so a violated public-API precondition means silent heap corruption or
 # silently-wrong numerics — print and stop instead. Cold paths only (pack-time /
-# call-entry); never inside a hot loop. 0.8.0 hardening.
+# call-entry); never inside a hot loop. 0.8.0 hardening; since 1.1.2 the message
+# goes to stderr and the exit status is 1.
 fn guard(cond, msg): i64 {
     if (cond == 1) { return 0; }
-    puts("tentib guard: "); puts(msg); _putc(10);
+    _tentib_err("tentib guard: "); _tentib_err(msg); _tentib_err("\n");
     sys_exit(1);
     return 0;
 }
 
+# 1 when each of the n i64 ids at ids[0..n) lies in [0, V), else 0. Token and
+# target ids are DATA (a tokenized corpus, a serving prompt) that every
+# whole-model path uses as a row offset, so they are checked at call entry —
+# O(n) per call, never inside a kernel loop (1.1.2).
+fn _ids_in_range(ids, n, V): i64 {
+    var i = 0;
+    while (i < n) {
+        var v = load64(ids + i * 8);
+        if (v < 0) { return 0; }
+        if (v >= V) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # absmean scale gamma = mean(|w_i|) — the b1.58 per-tensor ternary scale.
+# An empty tensor (n <= 0) has gamma = +0, the "all-zero tensor" value that
+# ternary_one maps to 0; it used to return 0/0 = NaN (1.1.2).
 fn absmean(w, n): i64 {
+    if (n <= 0) { return f64_from(0); }
     var s = f64_from(0);
     var i = 0;
     while (i < n) {
-        s = f64_add(s, f64_abs(tload(w, i)));
+        s = f64_add(s, f64_abs(load64(w + i * 8)));     # sequential: the sum's bits depend on order
         i = i + 1;
     }
     return f64_div(s, f64_from(n));

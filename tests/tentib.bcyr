@@ -22,10 +22,13 @@ include "src/block.cyr"      # tx_init / tx_param_init / tx_fwd (M2)
 include "src/kernel.cyr"     # the matmul-free kernels incl. 0.4.1 SIMD (M3)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+# The harness's printer: a NUL-terminated string to stdout.
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
 # akshara loader/streaming consumer symbols — unused (corpus_set/gd_ld only)
 fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: stdin reading is refused (-1).
 fn read_stdin(buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: seeking is refused (-1).
 fn file_seek(fd, off): i64 { return 0 - 1; }
 
 # ---- 1. per-layer kernel sweep ------------------------------------------------
@@ -38,11 +41,17 @@ var bWq = 0; var bWe = 0; var bxe = 0;
 var byi = 0; var byb = 0; var bys = 0; var byf = 0;
 var bw8t = 0; var bwsum = 0; var bxu8 = 0;
 
+# One timed call: the branchy scalar kernel on the layer_setup operands.
 fn bw_branchy(): i64 { return ternary_matmul_free(bqx, bsi, bWq, bg, 0, byi, 1, bK, bN); }
+# One timed call: the branchless scalar kernel.
 fn bw_branchless(): i64 { return ternary_matmul_free_bl(bqx, bsi, bWq, bg, 0, byb, 1, bK, bN); }
+# One timed call: the SIMD kernel on the pre-packed weights.
 fn bw_simd(): i64 { return ternary_matmul_free_simd(bqx, bsi, bw8t, bwsum, bg, 0, bys, 1, bK, bN, bxu8); }
+# One timed call: rosnet's f64 linear_fwd on the dequantized operands.
 fn bw_rosnet(): i64 { return linear_fwd(bxe, bWe, 0, byf, 1, bK, bN); }
+# One timed call: tsimd_pack_w (the once-per-weight pack).
 fn bw_pack(): i64 { return tsimd_pack_w(bWq, bK, bN, bw8t, bwsum); }
+# One timed call: act_quant_int on one token row.
 fn bw_actq(): i64 { return act_quant_int(bx, 1, bK, bqx, bsi); }
 
 # Build one random quantized layer at K x N (fresh buffers; rosnet's bump
@@ -74,6 +83,7 @@ fn timed(fp, warm, iters): i64 {
     return bench_avg_ns(b);
 }
 
+# Print num/den with one decimal (den != 0).
 fn f2dec(num, den): i64 {   # print num/den with 1 decimal (den != 0)
     var whole = num / den;
     var tenth = ((num * 10) / den) % 10;
@@ -81,6 +91,7 @@ fn f2dec(num, den): i64 {   # print num/den with 1 decimal (den != 0)
     return 0;
 }
 
+# Time the four kernels at one K x N and print the row.
 fn layer_row(K, N, seed, iters): i64 {
     layer_setup(K, N, seed);
     var tby = timed(&bw_branchy, 3, iters);
@@ -100,16 +111,31 @@ fn layer_row(K, N, seed, iters): i64 {
 # ---- 2. whole-model forward -> tok/s -------------------------------------------
 var wmV = 0; var wmT = 0; var wmC = 0; var wmF = 0; var wmtok = 0;
 
+# One whole-model f64 forward (the timed unit).
 fn wm_f64(): i64 { return tx_fwd(wmtok, wmV, wmT, wmC, wmF); }
+# One whole-model scalar-integer forward.
 fn wm_int(): i64 { return tx_fwd_q(0, wmtok, wmV, wmT, wmC, wmF); }
+# One whole-model integer-SIMD forward (re-packs per call).
 fn wm_simd(): i64 { return tx_fwd_q(2, wmtok, wmV, wmT, wmC, wmF); }
+# One packed-serving forward.
 fn wm_packed(): i64 { return tx_fwd_packed(wmtok, wmV, wmT, wmC, wmF); }
+var wmtgt = 0;
+var wmnlr = 0;
+# One SGD training step on the f64 path: zero grads, forward + loss, backward, update.
+fn wm_step(): i64 {
+    tx_zero_grads(wmV, wmT, wmC, wmF);
+    tx_loss(wmtok, wmtgt, wmV, wmT, wmC, wmF);
+    tx_bwd(wmtok, wmtgt, wmV, wmT, wmC, wmF);
+    return tx_sgd(wmV, wmT, wmC, wmF, wmnlr);
+}
 
+# Tokens per second for an average forward time in ns.
 fn toks_per_s(avg_ns): i64 {   # T tokens per forward
     if (avg_ns == 0) { return 0; }
     return (wmT * 1000000000) / avg_ns;
 }
 
+# Build, time and print the whole-model rows at one config.
 fn wm_bench(V, T, C, F, seed, iters): i64 {
     wmV = V; wmT = T; wmC = C; wmF = F;
     tx_init(V, T, C, F);
@@ -133,13 +159,24 @@ fn wm_bench(V, T, C, F, seed, iters): i64 {
     var td = timed(&wm_packed, 2, iters);         # ...then serve
     puts("  f64 weight-only        = "); fmt_int(tf); puts(" ns/fwd  ("); fmt_int(toks_per_s(tf)); puts(" tok/s)\n");
     puts("  integer scalar         = "); fmt_int(ti); puts(" ns/fwd  ("); fmt_int(toks_per_s(ti)); puts(" tok/s)\n");
-    puts("  integer SIMD (0.4.1)   = "); fmt_int(ts); puts(" ns/fwd  ("); fmt_int(toks_per_s(ts)); puts(" tok/s)  simd-vs-f64=");
+    puts("  integer SIMD (0.4.1)   = "); fmt_int(ts);
+    puts(" ns/fwd  ("); fmt_int(toks_per_s(ts)); puts(" tok/s)  simd-vs-f64=");
     f2dec(tf, ts); puts("x\n");
-    puts("  PACKED serving (0.7.0) = "); fmt_int(td); puts(" ns/fwd  ("); fmt_int(toks_per_s(td)); puts(" tok/s)  packed-vs-f64=");
+    puts("  PACKED serving (0.7.0) = "); fmt_int(td);
+    puts(" ns/fwd  ("); fmt_int(toks_per_s(td)); puts(" tok/s)  packed-vs-f64=");
     f2dec(tf, td); puts("x   (one-time tx_pack = "); fmt_int(tpk); puts(" ns, amortized over the serve)\n");
+    # Training throughput (1.1.2): one full SGD step, f64 path. Runs last because it
+    # moves the latent weights.
+    wmtgt = t_alloc(T);
+    t = 0;
+    while (t < T) { store64(wmtgt + t * 8, (rng_u64() & 0x7FFFFFFFFFFFFFFF) % V); t = t + 1; }
+    wmnlr = f64_div(f64_from(0 - 1), f64_from(100));
+    var tst = timed(&wm_step, 2, iters);
+    puts("  training step (f64)    = "); fmt_int(tst); puts(" ns/step\n");
     return 0;
 }
 
+# The benchmark harness; see docs/benchmarks.md for the method.
 fn main(): i64 {
     alloc_init();
     puts("tentib bench — single thread, warm cache; every path re-quantizes per call\n");

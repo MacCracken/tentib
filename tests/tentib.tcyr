@@ -13,12 +13,17 @@ include "src/model.cyr"     # softmax_xent / lm_* — minimal trainable ternary 
 include "lib/akshara.cyr"   # corpus_set / gd_ld — sovereign tokenizer (M2 bite-F)
 include "src/block.cyr"     # attn_sublayer_* / tx_* — transformer block + LM (M2 bite-E/F)
 include "src/kernel.cyr"    # ternary_matmul_free / act_quant_int / tpack2 — matmul-free kernel (M3)
+include "src/gpu.cyr"       # ternary_matmul_free_gpu — its host fallback is gated here (1.1.2)
 
 # akshara consumer symbols (unused — we drive the pure corpus_set/gd_ld path)
 fn _putc(ch): i64 { return 0; }
+# Silenced: the suite reports through assert, so puts prints nothing here.
 fn puts(s): i64 { return 0; }
+# akshara hook, not wired here: file loading is refused (-1).
 fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: stdin reading is refused (-1).
 fn read_stdin(buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: seeking is refused (-1).
 fn file_seek(fd, off): i64 { return 0 - 1; }
 
 # |a-b| < 1e-9 — tolerance compare for f64 results that aren't bit-exact integers
@@ -28,7 +33,9 @@ fn bl_close(a, b): i64 {
 
 # --- finite-difference gate harness (tarka tests/tarka.tcyr pattern) ---
 fn bl_eps(): i64 { return f64_div(f64_from(1), f64_from(10000)); }    # 1e-4
+# FD-gate tolerance: 1e-5 relative error.
 fn bl_tol(): i64 { return f64_div(f64_from(1), f64_from(100000)); }   # 1e-5
+# Relative error |fd - an| / (|an| + 1e-9), safe at an = 0.
 fn bl_relerr(fd, an): i64 {
     var num = f64_abs(f64_sub(fd, an));
     var den = f64_add(f64_abs(an), f64_div(f64_from(1), f64_from(1000000000)));
@@ -83,20 +90,133 @@ fn m3s_simd_matches(M, K, N, seed): i64 {
 # central FD of the quantized softmax-CE loss wrt embedding entry embx[k] (EXACT — embx is smooth input)
 fn fd_emb(embx, k, W, b, tgt_buf, D, V, Wq, Weff, logits, probs): i64 {
     var sv = load64(embx + k * 8);
-    store64(embx + k * 8, f64_add(sv, bl_eps())); var lp = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
-    store64(embx + k * 8, f64_sub(sv, bl_eps())); var lm = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
+    store64(embx + k * 8, f64_add(sv, bl_eps()));
+    var lp = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
+    store64(embx + k * 8, f64_sub(sv, bl_eps()));
+    var lm = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
     store64(embx + k * 8, sv);
     return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
 }
 # central FD of the quantized softmax-CE loss wrt head weight W[idx] (FALSIFIER — round/clip flat)
 fn fd_xentw(embx, W, idx, b, tgt_buf, D, V, Wq, Weff, logits, probs): i64 {
     var sv = load64(W + idx * 8);
-    store64(W + idx * 8, f64_add(sv, bl_eps())); var lp = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
-    store64(W + idx * 8, f64_sub(sv, bl_eps())); var lm = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
+    store64(W + idx * 8, f64_add(sv, bl_eps()));
+    var lp = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
+    store64(W + idx * 8, f64_sub(sv, bl_eps()));
+    var lm = bl_xent_loss(embx, W, b, tgt_buf, D, V, Wq, Weff, logits, probs);
     store64(W + idx * 8, sv);
     return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), bl_eps()));
 }
 
+# --- 1.1.2: fail-path harness for guard() ------------------------------------
+# guard() exits the process, so its fail path is tested in a forked child: the
+# child runs one scenario with stderr sent to /dev/null and exits 0 if the call
+# returned. The parent gets the child's exit status: 1 = the guard fired, 0 = the
+# call went through, -1 = the child died on a signal (e.g. SIGSEGV).
+fn child_exit(fp): i64 {
+    var pid = sys_fork();
+    if (pid == 0) {
+        var fd = sys_open("/dev/null", O_WRONLY, 0);
+        if (fd >= 0) { sys_dup2(fd, 2); }
+        fncall0(fp);
+        sys_exit(0);
+    }
+    var st[8];
+    store64(&st, 0);
+    sys_waitpid(pid, &st, 0);
+    var s = load64(&st) & 0xFFFFFFFF;
+    if ((s & 0x7F) != 0) { return 0 - 1; }
+    return (s >> 8) & 0xFF;
+}
+
+# Scenario state, set by main before the forks (the child inherits a copy).
+var g_V = 0; var g_T = 0; var g_C = 0; var g_F = 0;
+var g_tok = 0; var g_tgt = 0; var g_bad = 0; var g_buf = 0; var g_buf2 = 0;
+
+# Control: returns, so the child exits 0.
+fn sc_ok_noop(): i64 { return 0; }
+# Control: tx_fwd at T - 1 is legal and returns.
+fn sc_ok_short_t(): i64 { return tx_fwd(g_tok, g_V, g_T - 1, g_C, g_F); }
+# tpack2 over a weight of 2 (must fail).
+fn sc_tpack2_bad(): i64 {
+    store64(g_buf, 0); store64(g_buf + 8, 2); store64(g_buf + 16, 1);
+    return tpack2(g_buf, 3, g_buf2);
+}
+# tsimd_pack_w over a weight of -2 (must fail).
+fn sc_pack_w_bad(): i64 {
+    store64(g_buf, 1); store64(g_buf + 8, 0 - 2);
+    return tsimd_pack_w(g_buf, 2, 1, g_buf2, g_buf2 + 64);
+}
+# The SIMD kernel at K = 2^22 + 1 (must fail before touching memory).
+fn sc_simd_big_k(): i64 { return ternary_matmul_free_simd(0, 0, 0, 0, 0, 0, 0, 1, 4194305, 1, 0); }
+# tx_pack with the packed store unallocated (must fail).
+fn sc_tx_pack_noinit(): i64 { pk_w8t = 0; return tx_pack(g_V, g_T, g_C, g_F); }
+# tx_fwd_packed before tx_pack (must fail).
+fn sc_packed_not_ready(): i64 { pk_ready = 0; return tx_fwd_packed(g_tok, g_V, g_T, g_C, g_F); }
+# tx_fwd with token id V (must fail).
+fn sc_fwd_tok_hi(): i64 { return tx_fwd(g_bad, g_V, g_T, g_C, g_F); }
+# tx_fwd with token id -1 (must fail).
+fn sc_fwd_tok_neg(): i64 { store64(g_bad, 0 - 1); return tx_fwd(g_bad, g_V, g_T, g_C, g_F); }
+# tx_bwd with token id V after a valid tx_loss (must fail).
+fn sc_bwd_tok(): i64 {
+    tx_loss(g_tok, g_tgt, g_V, g_T, g_C, g_F);
+    return tx_bwd(g_bad, g_tgt, g_V, g_T, g_C, g_F);
+}
+# softmax_xent_fwd with target id V (must fail).
+fn sc_xent_fwd_tgt(): i64 { return softmax_xent_fwd(tx_logits, g_bad, tx_probs, g_T, g_V); }
+# softmax_xent_bwd with target id -1 (must fail).
+fn sc_xent_bwd_tgt(): i64 { store64(g_bad, 0 - 1); return softmax_xent_bwd(tx_probs, g_bad, tx_dlogits, g_T, g_V); }
+# tx_fwd with a C other than tx_init's (must fail).
+fn sc_fwd_c(): i64 { return tx_fwd(g_tok, g_V, g_T, g_C + 1, g_F); }
+# tx_fwd with T one past tx_init's (must fail).
+fn sc_fwd_t(): i64 { return tx_fwd(g_tok, g_V, g_T + 1, g_C, g_F); }
+# tx_fwd with T = 0 (must fail).
+fn sc_fwd_t0(): i64 { return tx_fwd(g_tok, g_V, 0, g_C, g_F); }
+# tx_fwd with the model marked uninitialized (must fail).
+fn sc_fwd_noinit(): i64 { tx_T0 = 0; return tx_fwd(g_tok, g_V, g_T, g_C, g_F); }
+# tx_fwd_packed with token id V (must fail).
+fn sc_packed_tok(): i64 { return tx_fwd_packed(g_bad, g_V, g_T, g_C, g_F); }
+# tx_fwd_q with the integer scratch marked unallocated (must fail).
+fn sc_fwdq_noint(): i64 { ki_T0 = 0; return tx_fwd_q(0, g_tok, g_V, g_T, g_C, g_F); }
+# bl_forward_q with N past the tx_int_init sizing (must fail).
+fn sc_blq_cap(): i64 { return bl_forward_q(0, tx_resid0, tx_Wm, 0, tx_logits, 1, g_C, g_F * 4); }
+# block_fwd with an F other than blk_init's (must fail).
+fn sc_block_f(): i64 { return block_fwd(tx_resid0, tx_gns, tx_Wa, tx_Wm, g_T, g_C, g_F + 1); }
+# tx_sgd with a V other than tx_init's (must fail).
+fn sc_sgd_v(): i64 { return tx_sgd(g_V + 1, g_T, g_C, g_F, f64_from(0)); }
+# tx_pack with dims other than the model's (must fail).
+fn sc_pack_dims(): i64 { return tx_pack(g_V, g_T, g_C, g_F * 2); }
+
+# 1 when every element of p[0..n) is NaN (f64_eq(v, v) is 0 only for NaN)
+fn all_nan(p, n): i64 {
+    var i = 0;
+    while (i < n) { if (f64_eq(load64(p + i * 8), load64(p + i * 8)) == 1) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# ternary_matmul_free_gpu's host fallback (src/gpu.cyr) vs the scalar kernel at a
+# shape whose M, K, N need not be multiples of the 8x8x8 tile: 1 = bit-identical
+# outputs and 0 GPU tiles (the host has no #82).
+fn gpu_fallback_matches(M, K, N, seed, withb): i64 {
+    var MK = M * K; var KN = K * N; var MN = M * N;
+    var x = t_alloc(MK); var W = t_alloc(KN); var Wq = t_alloc(KN); var We = t_alloc(KN);
+    var qx = t_alloc(MK); var si = t_alloc(M); var yc = t_alloc(MN); var yg = t_alloc(MN);
+    var b = 0;
+    rng_seed(seed);
+    t_randn(x, MK, f64_from(1));
+    t_randn(W, KN, f64_div(f64_from(1), f64_from(2)));
+    if (withb == 1) { b = t_alloc(N); t_randn(b, N, f64_from(1)); }
+    var g = bl_weight_effective(W, KN, Wq, We);
+    act_quant_int(x, M, K, qx, si);
+    ternary_matmul_free(qx, si, Wq, g, b, yc, M, K, N);
+    var tiles = ternary_matmul_free_gpu(qx, si, Wq, g, b, yg, M, K, N);
+    if (tiles != 0) { return 0; }
+    var i = 0;
+    while (i < MN) { if (tget(yg, i) != tget(yc, i)) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# The correctness suite; returns the failed-assertion count.
 fn main() {
     alloc_init();
 
@@ -231,10 +351,12 @@ fn main() {
         }
         i = i + 1;
     }
-    assert(f64_gt(mrq, f64_div(f64_from(1), f64_from(2))) == 1, "falsifier: FD-through-quantized diverges (>0.5) -> surrogate necessary");
+    assert(f64_gt(mrq, f64_div(f64_from(1), f64_from(2))) == 1,
+      "falsifier: FD-through-quantized diverges (>0.5) -> surrogate necessary");
 
     # FALSIFIER 2: a masked (saturated) entry's surrogate FD is NONZERO (the mask wasn't vacuous)
-    assert(f64_gt(f64_abs(fd_wgrad(gx, gW, 4, gdy, gM, gK, gN, gyscr)), bl_tol()) == 1, "falsifier: surrogate FD nonzero at a masked entry");
+    assert(f64_gt(f64_abs(fd_wgrad(gx, gW, 4, gdy, gM, gK, gN, gyscr)), bl_tol()) == 1,
+      "falsifier: surrogate FD nonzero at a masked entry");
 
     # gamma != 1 — exercises the gamma-CANCELLATION. A spurious gamma factor in dW (the
     # rejected Lens-1 derivation) is invisible at gamma=1 but fails here by exactly gamma.
@@ -254,7 +376,8 @@ fn main() {
         }
         j = j + 1;
     }
-    assert(f64_lt(mrw3, bl_tol()) == 1, "gate(g!=1): STE dW == FD(surrogate) at gamma=3 (gamma cancels, NO gamma factor)");
+    assert(f64_lt(mrw3, bl_tol()) == 1,
+      "gate(g!=1): STE dW == FD(surrogate) at gamma=3 (gamma cancels, NO gamma factor)");
 
     # descent: a few STE-SGD steps reduce the quantized loss (the surrogate trains)
     var loss0 = bl_quant_loss_wonly(gx, gW, 0, gM, gK, gN, gWq, gWeff, gyscr);
@@ -280,7 +403,8 @@ fn main() {
     bl_act_quant(ax, 1, 3, axeff, asx);
     assert(bl_close(tget(asx, 0), oneK) == 1, "act: per-row scale s = absmax/127");
     assert(bl_close(tget(axeff, 1), f64_from(0 - 1)) == 1, "act: max-magnitude activation dequantizes exactly (-1.0)");
-    assert(f64_lt(f64_abs(f64_sub(tget(axeff, 0), f64_div(f64_from(1), f64_from(2)))), oneK) == 1, "act: round-trip error < one int8 step");
+    assert(f64_lt(f64_abs(f64_sub(tget(axeff, 0), f64_div(f64_from(1), f64_from(2)))), oneK) == 1,
+      "act: round-trip error < one int8 step");
     # absmax==0 guard (zero token row) — must not 127/0
     var zx = t_alloc(2); var zxeff = t_alloc(2); var zsx = t_alloc(1);
     tstore(zx, 0, f64_from(0)); tstore(zx, 1, f64_from(0));
@@ -369,7 +493,8 @@ fn main() {
             var re6 = bl_relerr(fd_wgrad(emb, eW, ei, edyf, 1, eK, eV, eyscr), tload(eGW, ei));
             if (f64_gt(re6, emrw) == 1) { emrw = re6; }
         } else {
-            assert(bl_close(tload(eGW, ei), f64_from(0)) == 1, "M2: saturated head dW = 0 (clip-mask through the loss)");
+            assert(bl_close(tload(eGW, ei), f64_from(0)) == 1,
+              "M2: saturated head dW = 0 (clip-mask through the loss)");
         }
         ei = ei + 1;
     }
@@ -394,14 +519,16 @@ fn main() {
         }
         ei = ei + 1;
     }
-    assert(f64_gt(emrq, f64_div(f64_from(1), f64_from(2))) == 1, "M2 falsifier: FD-through-quantized-loss diverges (>0.5) — STE surrogate required");
+    assert(f64_gt(emrq, f64_div(f64_from(1), f64_from(2))) == 1,
+      "M2 falsifier: FD-through-quantized-loss diverges (>0.5) — STE surrogate required");
 
     test_group("M2 bite-A: the ternary LM trains from scratch (SGD descent)");
     var tstats = t_alloc(3);
     lm_train(8, 4, 1000, 1, tstats);   # V=8, D=4, 1000 SGD steps on the successor bigram
     assert(f64_is_finite(tget(tstats, 1)) == 1, "train: final CE finite");
     assert(f64_lt(tget(tstats, 1), tget(tstats, 0)) == 1, "train: final CE < initial CE (descent)");
-    assert(f64_lt(tget(tstats, 1), f64_div(f64_from(3), f64_from(2))) == 1, "train: final CE < 1.5 (well below uniform ln 8 ~ 2.08)");
+    assert(f64_lt(tget(tstats, 1), f64_div(f64_from(3), f64_from(2))) == 1,
+      "train: final CE < 1.5 (well below uniform ln 8 ~ 2.08)");
     assert(tget(tstats, 2) >= 6, "train: argmax memorizes >= 6/8 successor tokens");
 
     test_group("M2 bite-B: RMSNorm forward/backward FD gate");
@@ -412,7 +539,8 @@ fn main() {
     t_randn(nx, nD, f64_from(1));                       # x ~ N(0,1)
     var fifth = f64_div(f64_from(1), f64_from(5));
     var ni = 0;
-    while (ni < nD) { tstore(ng, ni, f64_add(f64_from(1), f64_mul(rng_normal(), fifth))); ni = ni + 1; }   # gain ~ 1 + N(0,0.2)
+    # gain ~ 1 + N(0,0.2)
+    while (ni < nD) { tstore(ng, ni, f64_add(f64_from(1), f64_mul(rng_normal(), fifth))); ni = ni + 1; }
     var nrstd = rmsnorm_fwd(nx, ng, ny, nD);
     t_copy(ndy, ny, nD);                               # dy = y  (loss = 1/2||y||^2)
     t_zero(ndg, nD);
@@ -446,7 +574,8 @@ fn main() {
 
     test_group("M2 bite-C: GELU forward/backward FD gate");
     var ccD = 6;
-    var ccx = t_alloc(ccD); var ccy = t_alloc(ccD); var ccdy = t_alloc(ccD); var ccdx = t_alloc(ccD); var ccyscr = t_alloc(ccD);
+    var ccx = t_alloc(ccD); var ccy = t_alloc(ccD); var ccdy = t_alloc(ccD);
+    var ccdx = t_alloc(ccD); var ccyscr = t_alloc(ccD);
     rng_seed(9);
     t_randn(ccx, ccD, f64_div(f64_from(3), f64_from(2)));   # x ~ N(0,1.5) — spans both signs
     gelu_fwd(ccx, ccy, ccD);
@@ -562,7 +691,8 @@ fn main() {
     var u3C = 4; var u3T = 3; var u3F = 8; var u3TC = u3T * u3C; var u3CC = u3C * u3C; var u3CF = u3C * u3F;
     blk_init(u3T, u3C, u3F);
     var u3x = t_alloc(u3TC); var u3gns = t_alloc(2 * u3C); var u3Wa = t_alloc(4 * u3CC); var u3Wm = t_alloc(2 * u3CF);
-    var u3dx = t_alloc(u3TC); var u3dgns = t_alloc(2 * u3C); var u3dWa = t_alloc(4 * u3CC); var u3dWm = t_alloc(2 * u3CF); var u3dout = t_alloc(u3TC);
+    var u3dx = t_alloc(u3TC); var u3dgns = t_alloc(2 * u3C); var u3dWa = t_alloc(4 * u3CC);
+    var u3dWm = t_alloc(2 * u3CF); var u3dout = t_alloc(u3TC);
     rng_seed(37);
     t_randn(u3x, u3TC, f64_from(1));
     var u3j = 0; while (u3j < 2 * u3C) { tstore(u3gns, u3j, f64_from(1)); u3j = u3j + 1; }   # g1, g2 = 1
@@ -583,7 +713,8 @@ fn main() {
         if (f64_gt(u3re, u3mr) == 1) { u3mr = u3re; }
         u3k = u3k + 1;
     }
-    assert(f64_lt(u3mr, bl_tol()) == 1, "E3: full block dx == central FD (< 1e-5) — both sublayers + residual threading");
+    assert(f64_lt(u3mr, bl_tol()) == 1,
+      "E3: full block dx == central FD (< 1e-5) — both sublayers + residual threading");
 
     test_group("M2 bite-E4a: transformer LM fwd/bwd — end-to-end embedding-gradient FD gate");
     var w4V = 6; var w4T = 4; var w4C = 4; var w4F = 8;
@@ -603,11 +734,13 @@ fn main() {
         store64(tx_tokemb + w4k * 8, f64_add(w4sv, bl_eps())); var w4lp = tx_loss(w4tok, w4tgt, w4V, w4T, w4C, w4F);
         store64(tx_tokemb + w4k * 8, f64_sub(w4sv, bl_eps())); var w4lm = tx_loss(w4tok, w4tgt, w4V, w4T, w4C, w4F);
         store64(tx_tokemb + w4k * 8, w4sv);
-        var w4re = bl_relerr(f64_div(f64_sub(w4lp, w4lm), f64_mul(f64_from(2), bl_eps())), load64(tx_dtokemb + w4k * 8));
+        var w4fd = f64_div(f64_sub(w4lp, w4lm), f64_mul(f64_from(2), bl_eps()));
+        var w4re = bl_relerr(w4fd, load64(tx_dtokemb + w4k * 8));
         if (f64_gt(w4re, w4mr) == 1) { w4mr = w4re; }
         w4k = w4k + 1;
     }
-    assert(f64_lt(w4mr, bl_tol()) == 1, "E4a: d_tokemb == FD of CE loss (embed scatter + block + final-norm + head + softmax-CE)");
+    assert(f64_lt(w4mr, bl_tol()) == 1,
+      "E4a: d_tokemb == FD of CE loss (embed scatter + block + final-norm + head + softmax-CE)");
 
     var w4mrp = f64_from(0); w4k = 0;
     while (w4k < w4T * w4C) {
@@ -615,7 +748,8 @@ fn main() {
         store64(tx_posemb + w4k * 8, f64_add(w4s2, bl_eps())); var w4p2 = tx_loss(w4tok, w4tgt, w4V, w4T, w4C, w4F);
         store64(tx_posemb + w4k * 8, f64_sub(w4s2, bl_eps())); var w4m2 = tx_loss(w4tok, w4tgt, w4V, w4T, w4C, w4F);
         store64(tx_posemb + w4k * 8, w4s2);
-        var w4r2 = bl_relerr(f64_div(f64_sub(w4p2, w4m2), f64_mul(f64_from(2), bl_eps())), load64(tx_dposemb + w4k * 8));
+        var w4fd2 = f64_div(f64_sub(w4p2, w4m2), f64_mul(f64_from(2), bl_eps()));
+        var w4r2 = bl_relerr(w4fd2, load64(tx_dposemb + w4k * 8));
         if (f64_gt(w4r2, w4mrp) == 1) { w4mrp = w4r2; }
         w4k = w4k + 1;
     }
@@ -629,7 +763,8 @@ fn main() {
     tx_train(w5tok, w5tgt, 6, 4, 4, 8, 1000, 1, w5st);   # V=6, T=4, C=4, F=8, 1000 SGD steps
     assert(f64_is_finite(tget(w5st, 1)) == 1, "E4b: final CE finite");
     assert(f64_lt(tget(w5st, 1), tget(w5st, 0)) == 1, "E4b: final CE < initial CE (the transformer descends)");
-    assert(f64_lt(tget(w5st, 1), f64_div(f64_from(1), f64_from(2))) == 1, "E4b: final CE < 0.5 (memorizes the sequence; uniform baseline ln 6 ~ 1.79)");
+    assert(f64_lt(tget(w5st, 1), f64_div(f64_from(1), f64_from(2))) == 1,
+      "E4b: final CE < 0.5 (memorizes the sequence; uniform baseline ln 6 ~ 1.79)");
 
     test_group("M2 bite-F: the ternary transformer trains on a REAL akshara-tokenized corpus");
     var fct = alloc(16);   # "hello world" as raw ASCII bytes
@@ -645,8 +780,10 @@ fn main() {
     var fcst = t_alloc(2);
     tx_train(fctok, fctgt, fcV, fcT, 4, 8, 1500, 1, fcst);
     assert(f64_is_finite(tget(fcst, 1)) == 1, "bite-F: final CE finite");
-    assert(f64_lt(tget(fcst, 1), tget(fcst, 0)) == 1, "bite-F: final CE < initial (trains on real akshara-tokenized text)");
-    assert(f64_lt(tget(fcst, 1), f64_div(f64_from(1), f64_from(2))) == 1, "bite-F: final CE < 0.5 (learns the corpus; baseline ln 8 ~ 2.08)");
+    assert(f64_lt(tget(fcst, 1), tget(fcst, 0)) == 1,
+      "bite-F: final CE < initial (trains on real akshara-tokenized text)");
+    assert(f64_lt(tget(fcst, 1), f64_div(f64_from(1), f64_from(2))) == 1,
+      "bite-F: final CE < 0.5 (learns the corpus; baseline ln 8 ~ 2.08)");
 
     test_group("M3: matmul-free integer kernel reproduces the f64-latent forward (logit parity)");
     var m3M = 2; var m3K = 4; var m3N = 3; var m3MK = m3M * m3K; var m3KN = m3K * m3N; var m3MN = m3M * m3N;
@@ -667,7 +804,8 @@ fn main() {
         if (f64_gt(re, m3mr) == 1) { m3mr = re; }
         m3i = m3i + 1;
     }
-    assert(f64_lt(m3mr, f64_div(f64_from(1), f64_from(1000000000))) == 1, "M3: integer kernel logits == f64 forward (< 1e-9; integer accumulate is exact)");
+    assert(f64_lt(m3mr, f64_div(f64_from(1), f64_from(1000000000))) == 1,
+      "M3: integer kernel logits == f64 forward (< 1e-9; integer accumulate is exact)");
 
     test_group("M3: 2-bit packed ternary storage round-trips (the ~1.58-bit memory payoff)");
     var m3pk = alloc((m3KN + 3) / 4);
@@ -682,7 +820,8 @@ fn main() {
     ternary_matmul_free_bl(m3qx, m3si, m3Wq, m3g, 0, m3yb, m3M, m3K, m3N);
     var m3bok = 1; m3i = 0;
     while (m3i < m3MN) { if (tget(m3yb, m3i) != tget(m3yi, m3i)) { m3bok = 0; } m3i = m3i + 1; }
-    assert(m3bok == 1, "M3b: ternary_matmul_free_bl == ternary_matmul_free bit-for-bit (mask arithmetic, no value change)");
+    assert(m3bok == 1,
+      "M3b: ternary_matmul_free_bl == ternary_matmul_free bit-for-bit (mask arithmetic, no value change)");
 
     test_group("M3d: integer-SIMD kernel (iv_dp8) is bit-identical to the scalar kernel (0.4.1)");
     # The exactness argument (kernel.cyr): ternary weights bound each pmaddubsw
@@ -690,7 +829,8 @@ fn main() {
     # is exact integer algebra — so the SIMD accumulate is the SAME i64, and the
     # dequant expression is shared => identical f64 bits. Three K regimes:
     assert(m3s_simd_matches(2, 4, 3, 71) == 1, "M3d: K=4 (K16=0, pure branchless tail) bit-identical");
-    assert(m3s_simd_matches(3, 20, 5, 72) == 1, "M3d: K=20 (16-lane SIMD span + 4-wide tail, offset correction split) bit-identical");
+    assert(m3s_simd_matches(3, 20, 5, 72) == 1,
+      "M3d: K=20 (16-lane SIMD span + 4-wide tail, offset correction split) bit-identical");
     assert(m3s_simd_matches(2, 32, 7, 73) == 1, "M3d: K=32 (pure iv_dp8 span, two lane-groups) bit-identical");
 
     test_group("M3c: whole-model integer inference reproduces the f64 forward (parity + activation-quant delta)");
@@ -718,7 +858,8 @@ fn main() {
         if (f64_gt(ce, ci_mx) == 1) { ci_mx = ce; }
         cii = cii + 1;
     }
-    assert(f64_lt(ci_mx, f64_div(f64_from(1), f64_from(1000000000))) == 1, "M3c: whole-model integer logits match full-quant f64 (< 1e-9 relerr; integer accumulate adds no rounding, all 7 BitLinears)");
+    assert(f64_lt(ci_mx, f64_div(f64_from(1), f64_from(1000000000))) == 1,
+      "M3c: whole-model integer logits match full-quant f64 (< 1e-9 relerr; all 7 BitLinears)");
     # HONEST delta: integer vs the weight-only TRAINED model (int8-quantizing activations
     # the model never saw at train time) — a small nonzero gap (reported, not hidden).
     var ci_d = f64_from(0); cii = 0;
@@ -727,12 +868,14 @@ fn main() {
         if (f64_gt(cd, ci_d) == 1) { ci_d = cd; }
         cii = cii + 1;
     }
-    assert(f64_is_finite(ci_d) == 1, "M3c: integer-vs-trained activation-quant delta is finite (the honest small-scale gap)");
+    assert(f64_is_finite(ci_d) == 1,
+      "M3c: integer-vs-trained activation-quant delta is finite (the honest small-scale gap)");
     # argmax agreement: the int8-activation integer model predicts the same next token as
     # the trained f64 model at every position (the small logit delta doesn't flip the rank).
     var ci_ag = 0; var ci_t = 0;
     while (ci_t < ciT) {
-        if (logits_argmax(ki_logits + ci_t * ciV * 8, ciV) == logits_argmax(li_wo + ci_t * ciV * 8, ciV)) { ci_ag = ci_ag + 1; }
+        var ci_o = ci_t * ciV * 8;
+        if (logits_argmax(ki_logits + ci_o, ciV) == logits_argmax(li_wo + ci_o, ciV)) { ci_ag = ci_ag + 1; }
         ci_t = ci_t + 1;
     }
     assert(ci_ag == ciT, "M3c: integer inference argmax matches the trained f64 model at all T positions");
@@ -743,7 +886,8 @@ fn main() {
     tx_fwd_q(2, citok, ciV, ciT, ciC, ciF);
     var ci_sok = 1; cii = 0;
     while (cii < ciTV) { if (tget(ki_logits, cii) != tget(li_int, cii)) { ci_sok = 0; } cii = cii + 1; }
-    assert(ci_sok == 1, "M3d: whole-model SIMD inference (mode 2) bit-identical to the scalar integer kernel (incl. the biased head)");
+    assert(ci_sok == 1,
+      "M3d: whole-model SIMD inference (mode 2) bit-identical to the scalar integer kernel (incl. the biased head)");
 
     test_group("0.7.0 pack-once deployment inference (tx_pack_init / tx_pack / tx_fwd_packed)");
     # Quantize + pack the trained model ONCE, then serve — same quantize, same
@@ -755,11 +899,13 @@ fn main() {
     tx_fwd_packed(citok, ciV, ciT, ciC, ciF);
     var pk_ok = 1; cii = 0;
     while (cii < ciTV) { if (tget(ki_logits, cii) != tget(li_int, cii)) { pk_ok = 0; } cii = cii + 1; }
-    assert(pk_ok == 1, "0.7.0: packed serving logits bit-identical to the scalar integer kernel (pack hoisted, nothing else changed)");
+    assert(pk_ok == 1,
+      "0.7.0: packed serving logits bit-identical to the scalar integer kernel (pack hoisted, nothing else changed)");
     tx_fwd_packed(citok, ciV, ciT, ciC, ciF);
     var pk_ok2 = 1; cii = 0;
     while (cii < ciTV) { if (tget(ki_logits, cii) != tget(li_int, cii)) { pk_ok2 = 0; } cii = cii + 1; }
-    assert(pk_ok2 == 1, "0.7.0: a second serve from the same packed store reproduces the logits (store is serve-time read-only)");
+    assert(pk_ok2 == 1,
+      "0.7.0: a second serve from the same packed store reproduces the logits (store is serve-time read-only)");
 
     test_group("0.8.0 hardening gates (audit fixes)");
     # gamma == 0 (all-zero weights): ternary_one divided by zero -> Inf/NaN ->
@@ -768,11 +914,12 @@ fn main() {
     var hz_w = t_alloc(4);   # t_alloc zero-fills
     var hz_q = t_alloc(4);
     var hz_g = ternary_quantize(hz_w, 4, hz_q);
-    assert(hz_g == f64_from(0), "0.8.0: all-zero weights quantize with gamma == 0");
+    assert(f64_eq(hz_g, f64_from(0)) == 1, "0.8.0: all-zero weights quantize with gamma == 0");
     var hz_ok = 1; var hzi = 0;
     while (hzi < 4) { if (tload(hz_q, hzi) != 0) { hz_ok = 0; } hzi = hzi + 1; }
     assert(hz_ok == 1, "0.8.0: all-zero weights quantize to all-ZERO ternary codes (was all -1 pre-fix)");
-    assert(ternary_one(f64_from(3), f64_from(0)) == 0, "0.8.0: ternary_one(w, gamma=0) returns 0, not the INT_MIN-clip -1");
+    assert(ternary_one(f64_from(3), f64_from(0)) == 0,
+      "0.8.0: ternary_one(w, gamma=0) returns 0, not the INT_MIN-clip -1");
     # guard() itself: the pass path is a no-op (the fail path exits the process —
     # exercised by construction on every guarded entry throughout this suite).
     assert(guard(1, "never printed") == 0, "0.8.0: guard(cond=1) passes through");
@@ -782,7 +929,8 @@ fn main() {
     var rd_w = t_alloc(2); var rd_x = t_alloc(2);
     tstore(rd_w, 0, f64_from(2)); tstore(rd_w, 1, f64_from(3));
     tstore(rd_x, 0, f64_from(1)); tstore(rd_x, 1, f64_from(1));
-    assert(ref_dot(rd_w, rd_x, 2) == f64_from(5), "API: ref_dot exact on integer-valued f64s (2*1 + 3*1 = 5)");
+    assert(f64_eq(ref_dot(rd_w, rd_x, 2), f64_from(5)) == 1,
+      "API: ref_dot exact on integer-valued f64s (2*1 + 3*1 = 5)");
     # bl_forward_q — the per-layer mode dispatcher, called directly (drivers above
     # reach it only through tx_fwd_q). ki_* scratch is live from tx_int_init; the
     # M3 group's m3x/m3W (M=2, K=4, N=3) fit inside the ciC=4/ciF=8/ciV=6 sizing.
@@ -810,7 +958,104 @@ fn main() {
     }
     var mq_l1 = tx_loss(citok, citgt, ciV, ciT, ciC, ciF);
     assert(f64_is_finite(mq_l1) == 1, "API: manually-composed train step (zero/loss/bwd/sgd) keeps the loss finite");
-    assert(f64_lt(mq_l1, mq_l0) == 1, "API: 5 manually-composed SGD steps descend the loss (the quartet tx_train wraps)");
+    assert(f64_lt(mq_l1, mq_l0) == 1,
+      "API: 5 manually-composed SGD steps descend the loss (the quartet tx_train wraps)");
+
+    test_group("1.1.2 P(-1) sweep: repairs and hardening");
+    # (a) the activation STE mask. At the row max, a/(a/127) rounds to 127.00000000000001
+    # for absmax a = 1.1, and the old |x/s| > 127 test zeroed that element's gradient
+    # although the forward never clamped it. Saturated now means |x/s| >= 127.5.
+    var mx_x = t_alloc(3); var mx_xe = t_alloc(3); var mx_s = t_alloc(1); var mx_dx = t_alloc(3);
+    tstore(mx_x, 0, f64_div(f64_from(11), f64_from(10)));        # 1.1, the absmax
+    tstore(mx_x, 1, f64_div(f64_from(0 - 1), f64_from(2)));
+    tstore(mx_x, 2, f64_div(f64_from(1), f64_from(4)));
+    bl_act_quant(mx_x, 1, 3, mx_xe, mx_s);
+    assert(f64_gt(f64_div(tload(mx_x, 0), tload(mx_s, 0)), f64_from(127)) == 1,
+      "1.1.2 maskx: the case is live (1.1 / s rounds above 127)");
+    t_fill(mx_dx, 3, f64_from(1));
+    bl_ste_mask_x(mx_dx, mx_x, 1, 3, mx_s);
+    assert(f64_eq(tload(mx_dx, 0), f64_from(1)) == 1, "1.1.2 maskx: the row max keeps its gradient (it was zeroed)");
+    assert(f64_eq(tload(mx_dx, 1), f64_from(1)) == 1, "1.1.2 maskx: an interior element keeps its gradient");
+    # a caller scale small enough to saturate: x/s = 200 (masked), 127.4 (kept), 127.5 (masked)
+    tstore(mx_s, 0, f64_from(1));
+    tstore(mx_x, 0, f64_from(200));
+    tstore(mx_x, 1, f64_div(f64_from(1274), f64_from(10)));
+    tstore(mx_x, 2, f64_div(f64_from(255), f64_from(2)));
+    t_fill(mx_dx, 3, f64_from(1));
+    bl_ste_mask_x(mx_dx, mx_x, 1, 3, mx_s);
+    assert(f64_eq(tload(mx_dx, 0), f64_from(0)) == 1, "1.1.2 maskx: |x/s| = 200 is saturated and masked");
+    assert(f64_eq(tload(mx_dx, 1), f64_from(1)) == 1, "1.1.2 maskx: |x/s| = 127.4 rounds to 127, not masked");
+    assert(f64_eq(tload(mx_dx, 2), f64_from(0)) == 1, "1.1.2 maskx: |x/s| = 127.5 rounds past 127, masked");
+
+    # (b) a NaN activation propagates through the integer path instead of becoming a code
+    var nn_K = 5;
+    var nn_x = t_alloc(2 * nn_K); var nn_q = t_alloc(2 * nn_K); var nn_s = t_alloc(2);
+    var nn_W = t_alloc(nn_K * 3); var nn_Wq = t_alloc(nn_K * 3); var nn_We = t_alloc(nn_K * 3);
+    var nn_y = t_alloc(6); var nn_y1 = t_alloc(3); var nn_q1 = t_alloc(nn_K); var nn_s1 = t_alloc(1);
+    rng_seed(91); t_randn(nn_x, 2 * nn_K, f64_from(1)); t_randn(nn_W, nn_K * 3, f64_from(1));
+    tstore(nn_x, nn_K + 2, f64_div(f64_from(0), f64_from(0)));   # row 1 holds a NaN
+    var nn_g = bl_weight_effective(nn_W, nn_K * 3, nn_Wq, nn_We);
+    act_quant_int(nn_x, 2, nn_K, nn_q, nn_s);
+    assert(all_nan(nn_s + 8, 1) == 1, "1.1.2 NaN: act_quant_int gives the NaN row a NaN scale");
+    ternary_matmul_free(nn_q, nn_s, nn_Wq, nn_g, 0, nn_y, 2, nn_K, 3);
+    assert(all_nan(nn_y + 24, 3) == 1, "1.1.2 NaN: every output of the NaN row is NaN (was a finite logit)");
+    act_quant_int(nn_x, 1, nn_K, nn_q1, nn_s1);
+    ternary_matmul_free(nn_q1, nn_s1, nn_Wq, nn_g, 0, nn_y1, 1, nn_K, 3);
+    var nn_ok = 1; var nni = 0;
+    while (nni < 3) { if (tget(nn_y, nni) != tget(nn_y1, nni)) { nn_ok = 0; } nni = nni + 1; }
+    assert(nn_ok == 1, "1.1.2 NaN: the NaN-free row is bit-identical to running it alone");
+    var nn_xe = t_alloc(2 * nn_K); var nn_sf = t_alloc(2);
+    bl_act_quant(nn_x, 2, nn_K, nn_xe, nn_sf);
+    assert(all_nan(nn_sf + 8, 1) == 1, "1.1.2 NaN: bl_act_quant applies the same absmax rule");
+
+    # (c) absmean of an empty tensor is +0 (was 0/0 = NaN)
+    assert(f64_eq(absmean(nn_x, 0), f64_from(0)) == 1, "1.1.2: absmean(w, 0) = 0");
+
+    # (d) the GPU tile path's host fallback, never run by the suite before 1.1.2 (gpumm
+    # uses one 8x16x32 shape, all multiples of the tile): ragged M, K, N and a bias
+    assert(gpu_fallback_matches(8, 16, 32, 101, 0) == 1,
+      "1.1.2 gpu: 8x16x32 (gpumm's shape) bit-identical, 0 GPU tiles");
+    assert(gpu_fallback_matches(11, 9, 13, 102, 1) == 1,
+      "1.1.2 gpu: 11x9x13 + bias (ragged in every dim) bit-identical");
+    assert(gpu_fallback_matches(3, 20, 5, 103, 0) == 1,
+      "1.1.2 gpu: 3x20x5 (three k-tiles, partial last) bit-identical");
+    assert(gpu_fallback_matches(1, 1, 1, 104, 1) == 1, "1.1.2 gpu: 1x1x1 + bias bit-identical");
+
+    # (e) a shorter prompt is legal (T <= the init T) and serves the same logits as the
+    # prefix of the full sequence: attention is causal, everything else is per token.
+    var pf_T = 2; var pf_full = t_alloc(ciT * ciV);
+    tx_fwd_packed(citok, ciV, ciT, ciC, ciF); t_copy(pf_full, ki_logits, ciT * ciV);
+    tx_fwd_packed(citok, ciV, pf_T, ciC, ciF);
+    var pf_ok = 1; var pfi = 0;
+    while (pfi < pf_T * ciV) { if (tget(ki_logits, pfi) != tget(pf_full, pfi)) { pf_ok = 0; } pfi = pfi + 1; }
+    assert(pf_ok == 1, "1.1.2: serving a 2-token prefix gives the first 2 rows of the 4-token serve, bit for bit");
+
+    # (f) every guard's FAIL path, in a forked child (exit 1 = the guard fired)
+    g_V = ciV; g_T = ciT; g_C = ciC; g_F = ciF; g_tok = citok; g_tgt = citgt;
+    g_bad = t_alloc(ciT); t_copy(g_bad, citok, ciT); store64(g_bad + 8, ciV);   # id V is one past the vocabulary
+    g_buf = t_alloc(16); g_buf2 = t_alloc(32);
+    assert(child_exit(&sc_ok_noop) == 0, "guard harness: a child that returns exits 0");
+    assert(child_exit(&sc_ok_short_t) == 0, "guard: tx_fwd at T - 1 is legal");
+    assert(child_exit(&sc_tpack2_bad) == 1, "guard: tpack2 refuses a non-ternary weight");
+    assert(child_exit(&sc_pack_w_bad) == 1, "guard: tsimd_pack_w refuses a non-ternary weight");
+    assert(child_exit(&sc_simd_big_k) == 1, "guard: the SIMD kernel refuses K > 2^22");
+    assert(child_exit(&sc_tx_pack_noinit) == 1, "guard: tx_pack before tx_pack_init");
+    assert(child_exit(&sc_packed_not_ready) == 1, "guard: tx_fwd_packed before tx_pack");
+    assert(child_exit(&sc_fwd_tok_hi) == 1, "guard: tx_fwd refuses token id V");
+    assert(child_exit(&sc_fwd_tok_neg) == 1, "guard: tx_fwd refuses token id -1");
+    assert(child_exit(&sc_bwd_tok) == 1, "guard: tx_bwd refuses token id V (it used to write past tx_dtokemb)");
+    assert(child_exit(&sc_xent_fwd_tgt) == 1, "guard: softmax_xent_fwd refuses target id V");
+    assert(child_exit(&sc_xent_bwd_tgt) == 1, "guard: softmax_xent_bwd refuses target id -1");
+    assert(child_exit(&sc_fwd_c) == 1, "guard: tx_fwd refuses a C other than tx_init's");
+    assert(child_exit(&sc_fwd_t) == 1, "guard: tx_fwd refuses T past tx_init's");
+    assert(child_exit(&sc_fwd_t0) == 1, "guard: tx_fwd refuses T = 0");
+    assert(child_exit(&sc_fwd_noinit) == 1, "guard: tx_fwd before tx_init");
+    assert(child_exit(&sc_packed_tok) == 1, "guard: tx_fwd_packed refuses token id V");
+    assert(child_exit(&sc_fwdq_noint) == 1, "guard: tx_fwd_q before tx_int_init");
+    assert(child_exit(&sc_blq_cap) == 1, "guard: bl_forward_q refuses N past the tx_int_init sizing");
+    assert(child_exit(&sc_block_f) == 1, "guard: block_fwd refuses an F other than blk_init's");
+    assert(child_exit(&sc_sgd_v) == 1, "guard: tx_sgd refuses a V other than tx_init's");
+    assert(child_exit(&sc_pack_dims) == 1, "guard: tx_pack refuses dims other than the model's");
 
     return assert_summary();
 }

@@ -18,16 +18,23 @@ var blk_Wvq = 0; var blk_Wve = 0; var blk_Woq = 0; var blk_Woe = 0;
 var blk_rstd = 0; var blk_gam = 0;
 var blk_dctx = 0; var blk_dQ = 0; var blk_dK = 0; var blk_dV = 0; var blk_dprow = 0;
 var blk_da = 0; var blk_dnorm = 0; var blk_dxq = 0; var blk_dxk = 0; var blk_dxv = 0;
-var blk_dWeff = 0; var blk_db = 0;
+var blk_dWeff = 0;
 # MLP sublayer scratch/caches (Wup: C*F, Wdn: F*C; fc/gg: T*F pre/post-GELU)
 var mlp_b2 = 0; var mlp_fc = 0; var mlp_gg = 0; var mlp_branch = 0; var mlp_out = 0;
 var mlp_Wupq = 0; var mlp_Wupe = 0; var mlp_Wdnq = 0; var mlp_Wdne = 0;
 var mlp_rstd2 = 0; var mlp_gam = 0;
-var mlp_dgg = 0; var mlp_dfc = 0; var mlp_db2 = 0; var mlp_dnorm2 = 0; var mlp_dWeff = 0; var mlp_db = 0;
+var mlp_dgg = 0; var mlp_dfc = 0; var mlp_db2 = 0; var mlp_dnorm2 = 0; var mlp_dWeff = 0;
 # block-level (E3): the inter-sublayer residual stream
 var blk_xmid = 0; var blk_dxmid = 0;
+# the dims blk_init sized the scratch for (0 = not initialized) — 1.1.2
+var blk_T0 = 0; var blk_C0 = 0; var blk_F0 = 0;
 
+# Allocate the block scratch + forward caches for sequences of up to T tokens at
+# width C and MLP width F. Every later block call must use the same C and F and a
+# T in [1, T] (checked at entry since 1.1.2).
 fn blk_init(T, C, F): i64 {
+    guard((T >= 1) & (C >= 1) & (F >= 1), "blk_init: T, C, F must be >= 1");
+    blk_T0 = T; blk_C0 = C; blk_F0 = F;
     var TC = T * C; var CC = C * C; var TF = T * F; var CF = C * F;
     blk_a = t_alloc(TC); blk_Q = t_alloc(TC); blk_K = t_alloc(TC); blk_V = t_alloc(TC);
     blk_P = t_alloc(T * T); blk_ctx = t_alloc(TC); blk_attn_out = t_alloc(TC); blk_out = t_alloc(TC);
@@ -36,13 +43,23 @@ fn blk_init(T, C, F): i64 {
     blk_rstd = t_alloc(T); blk_gam = t_alloc(4);
     blk_dctx = t_alloc(TC); blk_dQ = t_alloc(TC); blk_dK = t_alloc(TC); blk_dV = t_alloc(TC); blk_dprow = t_alloc(T);
     blk_da = t_alloc(TC); blk_dnorm = t_alloc(TC); blk_dxq = t_alloc(TC); blk_dxk = t_alloc(TC); blk_dxv = t_alloc(TC);
-    blk_dWeff = t_alloc(CC); blk_db = t_alloc(C);
+    blk_dWeff = t_alloc(CC);
     mlp_b2 = t_alloc(TC); mlp_fc = t_alloc(TF); mlp_gg = t_alloc(TF); mlp_branch = t_alloc(TC); mlp_out = t_alloc(TC);
     mlp_Wupq = t_alloc(CF); mlp_Wupe = t_alloc(CF); mlp_Wdnq = t_alloc(CF); mlp_Wdne = t_alloc(CF);
     mlp_rstd2 = t_alloc(T); mlp_gam = t_alloc(2);
     mlp_dgg = t_alloc(TF); mlp_dfc = t_alloc(TF); mlp_db2 = t_alloc(TC); mlp_dnorm2 = t_alloc(TC);
-    mlp_dWeff = t_alloc(CF); mlp_db = t_alloc(F);
+    mlp_dWeff = t_alloc(CF);
     blk_xmid = t_alloc(TC); blk_dxmid = t_alloc(TC);
+    return 0;
+}
+
+# Entry check for the public block calls: the scratch exists, C and F are the
+# blk_init ones, and T fits. The scratch is sized by blk_init's dims, so a larger
+# T, C or F would read and write past it (1.1.2).
+fn _blk_dims(T, C, F): i64 {
+    guard(blk_T0 != 0, "block: call blk_init (or tx_init) first");
+    guard((C == blk_C0) & (F == blk_F0), "block: C, F differ from blk_init");
+    guard((T >= 1) & (T <= blk_T0), "block: T outside [1, blk_init T]");
     return 0;
 }
 
@@ -73,6 +90,9 @@ fn attn_sublayer_loss(x, g1, W, T, C): i64 {
     return f64_mul(f64_div(f64_from(1), f64_from(2)), acc);
 }
 
+# The six projections here and in the MLP backward carry no bias, so they pass
+# db = 0 and rosnet's linear_bwd skips the bias-gradient pass. Until 1.1.2 they
+# passed scratch accumulators (blk_db / mlp_db) that were summed into and never read.
 # Attention sublayer backward. dout = d(blk_out). dW is the 4*C*C grad arena (ACCUMULATES,
 # STE); dg1 ACCUMULATES; dx fresh = dout (skip) + d(RMSNorm-through-branch). Caller zeroes
 # dW + dg1 once per step. Uses the forward's module-global caches.
@@ -80,14 +100,18 @@ fn attn_sublayer_bwd(dout, x, g1, W, dx, dg1, dW, T, C): i64 {
     var TC = T * C; var CC = C * C;
     var Wq = W; var Wk = W + CC * 8; var Wv = W + 2 * CC * 8; var Wo = W + 3 * CC * 8;
     var dWq = dW; var dWk = dW + CC * 8; var dWv = dW + 2 * CC * 8; var dWo = dW + 3 * CC * 8;
-    bl_backward_wonly(blk_ctx, blk_Woe, dout, blk_dctx, dWo, blk_db, T, C, C, Wo, load64(blk_gam + 24), blk_dWeff);
+    bl_backward_wonly(blk_ctx, blk_Woe, dout, blk_dctx, dWo, 0, T, C, C, Wo, load64(blk_gam + 24), blk_dWeff);
     attn_bwd(blk_Q, blk_K, blk_V, blk_P, blk_dctx, blk_dQ, blk_dK, blk_dV, blk_dprow, T, C);
-    bl_backward_wonly(blk_a, blk_Wqe, blk_dQ, blk_dxq, dWq, blk_db, T, C, C, Wq, load64(blk_gam + 0), blk_dWeff);
-    bl_backward_wonly(blk_a, blk_Wke, blk_dK, blk_dxk, dWk, blk_db, T, C, C, Wk, load64(blk_gam + 8), blk_dWeff);
-    bl_backward_wonly(blk_a, blk_Wve, blk_dV, blk_dxv, dWv, blk_db, T, C, C, Wv, load64(blk_gam + 16), blk_dWeff);
+    bl_backward_wonly(blk_a, blk_Wqe, blk_dQ, blk_dxq, dWq, 0, T, C, C, Wq, load64(blk_gam + 0), blk_dWeff);
+    bl_backward_wonly(blk_a, blk_Wke, blk_dK, blk_dxk, dWk, 0, T, C, C, Wk, load64(blk_gam + 8), blk_dWeff);
+    bl_backward_wonly(blk_a, blk_Wve, blk_dV, blk_dxv, dWv, 0, T, C, C, Wv, load64(blk_gam + 16), blk_dWeff);
     t_copy(blk_da, blk_dxq, TC); t_add_into(blk_da, blk_dxk, TC); t_add_into(blk_da, blk_dxv, TC);
     var t = 0;
-    while (t < T) { rmsnorm_bwd(x + t * C * 8, g1, blk_da + t * C * 8, blk_dnorm + t * C * 8, dg1, C, load64(blk_rstd + t * 8)); t = t + 1; }
+    while (t < T) {
+        var o1 = t * C * 8;
+        rmsnorm_bwd(x + o1, g1, blk_da + o1, blk_dnorm + o1, dg1, C, load64(blk_rstd + t * 8));
+        t = t + 1;
+    }
     t_copy(dx, dout, TC); t_add_into(dx, blk_dnorm, TC);
     return 0;
 }
@@ -95,6 +119,7 @@ fn attn_sublayer_bwd(dout, x, g1, W, dx, dg1, dW, T, C): i64 {
 # ---- E2: MLP sublayer (RMSNorm -> BitLinear up -> GELU -> BitLinear down -> +res) --
 # mlp_out = x + down(GELU(up(RMSNorm(x,g2)))). W is the 2*C*F arena (Wup C*F | Wdn F*C).
 
+# MLP sublayer forward: mlp_out = x + down(GELU(up(RMSNorm(x, g2)))); caches for the bwd.
 fn mlp_sublayer_fwd(x, g2, W, T, C, F): i64 {
     var TC = T * C; var TF = T * F; var CF = C * F;
     var Wup = W; var Wdn = W + CF * 8;
@@ -107,6 +132,7 @@ fn mlp_sublayer_fwd(x, g2, W, T, C, F): i64 {
     return 0;
 }
 
+# 1/2 ||mlp_out||^2, the scalar the E2 dx gate differentiates.
 fn mlp_sublayer_loss(x, g2, W, T, C, F): i64 {
     mlp_sublayer_fwd(x, g2, W, T, C, F);
     var acc = f64_from(0); var i = 0; var TC = T * C;
@@ -114,15 +140,20 @@ fn mlp_sublayer_loss(x, g2, W, T, C, F): i64 {
     return f64_mul(f64_div(f64_from(1), f64_from(2)), acc);
 }
 
+# MLP sublayer backward: dx fresh; dW (the 2*C*F arena) and dg2 ACCUMULATE (STE).
 fn mlp_sublayer_bwd(dout, x, g2, W, dx, dg2, dW, T, C, F): i64 {
     var TC = T * C; var TF = T * F; var CF = C * F;
     var Wup = W; var Wdn = W + CF * 8;
     var dWup = dW; var dWdn = dW + CF * 8;
-    bl_backward_wonly(mlp_gg, mlp_Wdne, dout, mlp_dgg, dWdn, mlp_db, T, F, C, Wdn, load64(mlp_gam + 8), mlp_dWeff);
+    bl_backward_wonly(mlp_gg, mlp_Wdne, dout, mlp_dgg, dWdn, 0, T, F, C, Wdn, load64(mlp_gam + 8), mlp_dWeff);
     gelu_bwd(mlp_fc, mlp_dgg, mlp_dfc, TF);
-    bl_backward_wonly(mlp_b2, mlp_Wupe, mlp_dfc, mlp_db2, dWup, mlp_db, T, C, F, Wup, load64(mlp_gam + 0), mlp_dWeff);
+    bl_backward_wonly(mlp_b2, mlp_Wupe, mlp_dfc, mlp_db2, dWup, 0, T, C, F, Wup, load64(mlp_gam + 0), mlp_dWeff);
     var t = 0;
-    while (t < T) { rmsnorm_bwd(x + t * C * 8, g2, mlp_db2 + t * C * 8, mlp_dnorm2 + t * C * 8, dg2, C, load64(mlp_rstd2 + t * 8)); t = t + 1; }
+    while (t < T) {
+        var o2 = t * C * 8;
+        rmsnorm_bwd(x + o2, g2, mlp_db2 + o2, mlp_dnorm2 + o2, dg2, C, load64(mlp_rstd2 + t * 8));
+        t = t + 1;
+    }
     t_copy(dx, dout, TC); t_add_into(dx, mlp_dnorm2, TC);
     return 0;
 }
@@ -131,7 +162,9 @@ fn mlp_sublayer_bwd(dout, x, g2, W, dx, dg2, dW, T, C, F): i64 {
 # out (= mlp_out) = block(x). gns = [g1|g2] (2*C). Wa = 4*C*C attn arena, Wm = 2*C*F.
 # Each sublayer folds its own residual, so the block just threads x -> xmid -> out.
 
+# Full pre-norm block forward over T tokens; the output lands in mlp_out.
 fn block_fwd(x, gns, Wa, Wm, T, C, F): i64 {
+    _blk_dims(T, C, F);
     var TC = T * C;
     attn_sublayer_fwd(x, gns, Wa, T, C);            # blk_out = x + attn(RMSNorm(x,g1))
     t_copy(blk_xmid, blk_out, TC);                  # xmid persists as the MLP input (for bwd)
@@ -139,6 +172,7 @@ fn block_fwd(x, gns, Wa, Wm, T, C, F): i64 {
     return 0;
 }
 
+# 1/2 ||block(x)||^2, the scalar the E3 dx gate differentiates.
 fn block_loss(x, gns, Wa, Wm, T, C, F): i64 {
     block_fwd(x, gns, Wa, Wm, T, C, F);
     var acc = f64_from(0); var i = 0; var TC = T * C;
@@ -149,6 +183,7 @@ fn block_loss(x, gns, Wa, Wm, T, C, F): i64 {
 # Reversed order (MLP was last forward). Each sublayer_bwd folds the skip internally,
 # so the block just threads dout -> dxmid -> dx. dgns=[dg1|dg2], dWa/dWm ACCUMULATE.
 fn block_bwd(dout, x, gns, Wa, Wm, dx, dgns, dWa, dWm, T, C, F): i64 {
+    _blk_dims(T, C, F);
     mlp_sublayer_bwd(dout, blk_xmid, gns + C * 8, Wm, blk_dxmid, dgns + C * 8, dWm, T, C, F);
     attn_sublayer_bwd(blk_dxmid, x, gns, Wa, dx, dgns, dWa, T, C);
     return 0;
@@ -169,9 +204,17 @@ var tx_resid0 = 0; var tx_fnorm = 0; var tx_rstdf = 0;
 var tx_logits = 0; var tx_probs = 0; var tx_dlogits = 0;
 var tx_dfnorm = 0; var tx_dresid1 = 0; var tx_dresid0 = 0;
 var tx_Whq = 0; var tx_Whe = 0; var tx_hdWeff = 0; var tx_ghead = 0;
+# the dims tx_init sized the model for (0 = not initialized) — 1.1.2
+var tx_V0 = 0; var tx_T0 = 0; var tx_C0 = 0; var tx_F0 = 0;
 
+# Allocate the transformer's parameters, gradients and scratch (tx_*), plus the
+# block scratch (blk_init): vocabulary V, up to T positions, width C, MLP width F.
+# Every later tx_* call must pass the same V, C, F and a T in [1, T] (checked at
+# entry since 1.1.2).
 fn tx_init(V, T, C, F): i64 {
+    guard(V >= 1, "tx_init: V must be >= 1");
     blk_init(T, C, F);
+    tx_V0 = V; tx_T0 = T; tx_C0 = C; tx_F0 = F;
     var TC = T * C; var CC = C * C; var CF = C * F; var CV = C * V; var VC = V * C; var TV = T * V;
     tx_tokemb = t_alloc(VC); tx_posemb = t_alloc(TC); tx_gns = t_alloc(2 * C); tx_gf = t_alloc(C);
     tx_Wa = t_alloc(4 * CC); tx_Wm = t_alloc(2 * CF); tx_Whead = t_alloc(CV); tx_bhead = t_alloc(V);
@@ -184,7 +227,36 @@ fn tx_init(V, T, C, F): i64 {
     return 0;
 }
 
+# Entry check for the public tx_* calls: the model exists, V, C, F are the tx_init
+# ones, and T fits. Every tx_* buffer is sized by tx_init's dims, so a larger value
+# would read and write past it (1.1.2).
+fn _tx_dims(V, T, C, F): i64 {
+    guard(tx_T0 != 0, "tx: call tx_init first");
+    guard((V == tx_V0) & (C == tx_C0) & (F == tx_F0), "tx: V, C, F differ from tx_init");
+    guard((T >= 1) & (T <= tx_T0), "tx: T outside [1, tx_init T]");
+    return 0;
+}
+
+# The token + position embedding every whole-model forward starts with:
+# tx_resid0[t] = tokemb[tokens[t]] + posemb[t]. A token id is a row offset into
+# tokemb, so ids outside [0, V) are refused here, once per call (1.1.2).
+fn _tx_embed(tokens, V, T, C): i64 {
+    guard(_ids_in_range(tokens, T, V), "tx: token id outside [0, V)");
+    var C8 = C * 8;
+    var t = 0;
+    while (t < T) {
+        var tok = load64(tokens + t * 8);
+        t_copy(tx_resid0 + t * C8, tx_tokemb + tok * C8, C);
+        t_add_into(tx_resid0 + t * C8, tx_posemb + t * C8, C);
+        t = t + 1;
+    }
+    return 0;
+}
+
+# Random init: every latent weight and embedding ~ N(0, 0.1) from `seed`, the norm
+# gains 1, the head bias 0.
 fn tx_param_init(V, T, C, F, seed): i64 {
+    _tx_dims(V, T, C, F);
     rng_seed(seed);
     var std = f64_div(f64_from(1), f64_from(10));   # 0.1
     t_randn(tx_tokemb, V * C, std); t_randn(tx_posemb, T * C, std);
@@ -193,40 +265,50 @@ fn tx_param_init(V, T, C, F, seed): i64 {
     return 0;
 }
 
+# Whole-model f64 forward (weight-only-quant linears) over tokens[0..T): logits
+# land in tx_logits (T x V).
 fn tx_fwd(tokens, V, T, C, F): i64 {
+    _tx_dims(V, T, C, F);
     var C8 = C * 8;
-    var t = 0;
-    while (t < T) {                                   # embed: resid0[t] = tokemb[tok] + posemb[t]
-        var tok = load64(tokens + t * 8);
-        t_copy(tx_resid0 + t * C8, tx_tokemb + tok * C8, C);
-        t_add_into(tx_resid0 + t * C8, tx_posemb + t * C8, C);
-        t = t + 1;
-    }
+    _tx_embed(tokens, V, T, C);                       # resid0[t] = tokemb[tok] + posemb[t]
     block_fwd(tx_resid0, tx_gns, tx_Wa, tx_Wm, T, C, F);   # mlp_out = block(resid0)
-    t = 0;
+    var t = 0;
     while (t < T) { store64(tx_rstdf + t * 8, rmsnorm_fwd(mlp_out + t * C8, tx_gf, tx_fnorm + t * C8, C)); t = t + 1; }
     tx_ghead = bl_forward_wonly(tx_fnorm, tx_Whead, tx_bhead, tx_logits, T, C, V, tx_Whq, tx_Whe);
     return 0;
 }
 
+# tx_fwd, then the mean next-token cross-entropy against targets[0..T) (fills tx_probs).
 fn tx_loss(tokens, targets, V, T, C, F): i64 {
     tx_fwd(tokens, V, T, C, F);
     return softmax_xent_fwd(tx_logits, targets, tx_probs, T, V);
 }
 
+# Zero every gradient tx_bwd accumulates into (call once per step, before tx_bwd).
 fn tx_zero_grads(V, T, C, F): i64 {
+    _tx_dims(V, T, C, F);
     t_zero(tx_dtokemb, V * C); t_zero(tx_dposemb, T * C); t_zero(tx_dgns, 2 * C); t_zero(tx_dgf, C);
     t_zero(tx_dWa, 4 * C * C); t_zero(tx_dWm, 2 * C * F); t_zero(tx_dWhead, C * V); t_zero(tx_dbhead, V);
     return 0;
 }
 
 # Full LM backward (grads zeroed once by the caller). Consumes tx_probs from tx_loss.
+# The embedding scatter below WRITES row tokens[t] of tx_dtokemb, so the ids are
+# checked again here (tx_bwd may be handed other tokens than tx_loss saw): an id
+# outside [0, V) used to add C f64s into whatever followed tx_dtokemb on the heap.
 fn tx_bwd(tokens, targets, V, T, C, F): i64 {
+    _tx_dims(V, T, C, F);
+    guard(_ids_in_range(tokens, T, V), "tx_bwd: token id outside [0, V)");
     var C8 = C * 8;
     softmax_xent_bwd(tx_probs, targets, tx_dlogits, T, V);
-    bl_backward_wonly(tx_fnorm, tx_Whe, tx_dlogits, tx_dfnorm, tx_dWhead, tx_dbhead, T, C, V, tx_Whead, tx_ghead, tx_hdWeff);
+    bl_backward_wonly(tx_fnorm, tx_Whe, tx_dlogits, tx_dfnorm, tx_dWhead, tx_dbhead, T, C, V,
+      tx_Whead, tx_ghead, tx_hdWeff);
     var t = 0;
-    while (t < T) { rmsnorm_bwd(mlp_out + t * C8, tx_gf, tx_dfnorm + t * C8, tx_dresid1 + t * C8, tx_dgf, C, load64(tx_rstdf + t * 8)); t = t + 1; }
+    while (t < T) {
+        var o = t * C8;
+        rmsnorm_bwd(mlp_out + o, tx_gf, tx_dfnorm + o, tx_dresid1 + o, tx_dgf, C, load64(tx_rstdf + t * 8));
+        t = t + 1;
+    }
     block_bwd(tx_dresid1, tx_resid0, tx_gns, tx_Wa, tx_Wm, tx_dresid0, tx_dgns, tx_dWa, tx_dWm, T, C, F);
     t = 0;
     while (t < T) {                                   # embed scatter (accumulate): tok + pos
@@ -240,7 +322,10 @@ fn tx_bwd(tokens, targets, V, T, C, F): i64 {
 
 # SGD on the LATENT weights (re-quantized next fwd) + full-precision embeds/gains/bias.
 fn tx_sgd(V, T, C, F, nlr): i64 {
-    t_axpy(tx_Wa, tx_dWa, nlr, 4 * C * C); t_axpy(tx_Wm, tx_dWm, nlr, 2 * C * F); t_axpy(tx_Whead, tx_dWhead, nlr, C * V);
+    _tx_dims(V, T, C, F);
+    t_axpy(tx_Wa, tx_dWa, nlr, 4 * C * C);
+    t_axpy(tx_Wm, tx_dWm, nlr, 2 * C * F);
+    t_axpy(tx_Whead, tx_dWhead, nlr, C * V);
     t_axpy(tx_tokemb, tx_dtokemb, nlr, V * C); t_axpy(tx_posemb, tx_dposemb, nlr, T * C);
     t_axpy(tx_gns, tx_dgns, nlr, 2 * C); t_axpy(tx_gf, tx_dgf, nlr, C); t_axpy(tx_bhead, tx_dbhead, nlr, V);
     return 0;

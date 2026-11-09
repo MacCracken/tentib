@@ -1,16 +1,262 @@
-# tentib fuzz harness
+# tentib fuzz harness — seeded property fuzzing (1.1.2; was a no-op stub).
+#
+# Each round draws a random layer shape (K across every K % 16 split, M and N
+# ragged against the 8x8x8 GPU tile) and random activations: magnitudes from
+# 1e-3 to 1e3, whole zero rows, exact zeros, and in some rounds one NaN. It checks
+# properties that must hold on EVERY input, not just the suite's fixed cases:
+#
+#   P1  the four integer kernels agree bit for bit: scalar == branchless == SIMD
+#       == the GPU tile path's host fallback (with and without a bias)
+#   P2  act_quant_int codes lie in [-127, +127]; a zero row has scale 0 and codes 0
+#   P3  tpack2 / tunpack2 round-trip every ternary weight exactly
+#   P4  bl_weight_effective emits ternary codes and Weff = code * gamma, bit for bit
+#   P5  on finite input the integer kernel matches the full-quant f64 forward
+#       (relative error < 1e-9: the integer accumulate adds no rounding)
+#   P6  a NaN activation makes its row's outputs NaN in every kernel, and leaves
+#       every other row bit-identical to the NaN-free run
+#   P7  with the scale from bl_act_quant, the activation STE mask is the identity
+#   P8  (every 8th round) a small whole model: integer modes 0 / 2 and packed
+#       serving agree bit for bit, and serving a prefix reproduces the prefix rows
+#
+# Deterministic: the seed sequence is fixed, so a failure names a reproducible
+# round. Exit 0 = every property held; exit 1 = a property failed (message on
+# stderr). Build: CYRIUS_DCE=1 cyrius build tests/tentib.fcyr build/fuzz
 
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+include "lib/tyche.cyr"
+include "lib/rosnet.cyr"
+include "src/ternary.cyr"
+include "src/bitlinear.cyr"
+include "src/layers.cyr"
+include "src/model.cyr"
+include "lib/akshara.cyr"
+include "src/block.cyr"
+include "src/kernel.cyr"
+include "src/gpu.cyr"
+
+fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+# The harness's printer: a NUL-terminated string to stdout.
+fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } sys_write(1, s, n); return 0; }
+# akshara hook, not wired here: file loading is refused (-1).
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: stdin reading is refused (-1).
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: seeking is refused (-1).
+fn file_seek(fd, off): i64 { return 0 - 1; }
+
+var fz_round = 0;
+
+# Report a failed property with its round on stderr, then exit 1.
+fn fail(prop): i64 {
+    _tentib_err("FUZZ FAIL: "); _tentib_err(prop); _tentib_err(" at round ");
+    var buf[24]; var n = fz_round; var i = 22; store8(&buf + 23, 0);
+    if (n == 0) { store8(&buf + i, 48); i = i - 1; }
+    while (n > 0) { store8(&buf + i, 48 + n % 10); n = n / 10; i = i - 1; }
+    _tentib_err(&buf + i + 1); _tentib_err("\n");
+    sys_exit(1);
     return 0;
 }
 
-fn main() {
+# uniform integer in [lo, hi]
+fn rint(lo, hi): i64 { return lo + (rng_u64() & 0x7FFFFFFFFFFFFFFF) % (hi - lo + 1); }
+
+# 1 when v is NaN.
+fn is_nan(v): i64 { return 1 - f64_eq(v, v); }
+
+# 1 when a[0..n) and b[0..n) hold the same bits.
+fn same(a, b, n): i64 {
+    var i = 0;
+    while (i < n) { if (load64(a + i * 8) != load64(b + i * 8)) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# Random activations: each row gets its own magnitude 10^e, e in [-3, 3]; about one
+# row in nine is all zero and one element in twelve is an exact +0.
+fn fill_x(x, M, K): i64 {
+    var m = 0;
+    while (m < M) {
+        var zero_row = (rint(0, 8) == 0);
+        var mag = f64_from(1);
+        var e = rint(0, 6) - 3;
+        while (e > 0) { mag = f64_mul(mag, f64_from(10)); e = e - 1; }
+        while (e < 0) { mag = f64_div(mag, f64_from(10)); e = e + 1; }
+        var k = 0;
+        while (k < K) {
+            var v = f64_mul(rng_normal(), mag);
+            if (zero_row == 1) { v = f64_from(0); }
+            if (rint(0, 11) == 0) { v = f64_from(0); }
+            store64(x + (m * K + k) * 8, v);
+            k = k + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# All four integer kernels on (qx, sx); y0 is the scalar reference. Returns 1 when
+# the others match it bit for bit.
+fn kernels_agree(qx, sx, Wq, g, b, M, K, N, y0, y1, y2, y3, w8t, wsum, xu8): i64 {
+    ternary_matmul_free(qx, sx, Wq, g, b, y0, M, K, N);
+    ternary_matmul_free_bl(qx, sx, Wq, g, b, y1, M, K, N);
+    tsimd_pack_w(Wq, K, N, w8t, wsum);
+    ternary_matmul_free_simd(qx, sx, w8t, wsum, g, b, y2, M, K, N, xu8);
+    if (ternary_matmul_free_gpu(qx, sx, Wq, g, b, y3, M, K, N) != 0) { return 0; }
+    var MN = M * N;
+    if (same(y0, y1, MN) == 0) { return 0; }
+    if (same(y0, y2, MN) == 0) { return 0; }
+    if (same(y0, y3, MN) == 0) { return 0; }
+    return 1;
+}
+
+# One random layer: properties P1-P7.
+fn layer_round(): i64 {
+    var M = rint(1, 12); var K = rint(1, 80); var N = rint(1, 40);
+    var MK = M * K; var KN = K * N; var MN = M * N;
+    var x = t_alloc(MK); var W = t_alloc(KN); var Wq = t_alloc(KN); var We = t_alloc(KN);
+    var qx = t_alloc(MK); var sx = t_alloc(M); var xe = t_alloc(MK); var sf = t_alloc(M);
+    var y0 = t_alloc(MN); var y1 = t_alloc(MN); var y2 = t_alloc(MN); var y3 = t_alloc(MN); var yf = t_alloc(MN);
+    var w8t = alloc(KN + 16); var wsum = t_alloc(N); var xu8 = alloc(K + 16);
+    var pk = alloc(KN / 4 + 8); var dx = t_alloc(MK);
+    var b = 0;
+    if (rint(0, 1) == 1) { b = t_alloc(N); t_randn(b, N, f64_from(1)); }
+    fill_x(x, M, K);
+    t_randn(W, KN, f64_div(f64_from(rint(1, 20)), f64_from(10)));
+
+    # P4
+    var g = bl_weight_effective(W, KN, Wq, We);
+    var i = 0;
+    while (i < KN) {
+        var q = load64(Wq + i * 8);
+        if ((q < (0 - 1)) | (q > 1)) { fail("P4 code not ternary"); }
+        if (load64(We + i * 8) != f64_mul(f64_from(q), g)) { fail("P4 Weff != code * gamma"); }
+        i = i + 1;
+    }
+    # P3
+    tpack2(Wq, KN, pk);
+    i = 0;
+    while (i < KN) { if (tunpack2(pk, i) != load64(Wq + i * 8)) { fail("P3 tpack2 round-trip"); } i = i + 1; }
+    # P2
+    act_quant_int(x, M, K, qx, sx);
+    var m = 0;
+    while (m < M) {
+        var s = load64(sx + m * 8);
+        if (f64_lt(s, f64_from(0)) == 1) { fail("P2 negative scale"); }
+        var k = 0;
+        while (k < K) {
+            var c = load64(qx + (m * K + k) * 8);
+            if ((c < (0 - 127)) | (c > 127)) { fail("P2 code outside [-127, 127]"); }
+            if (f64_eq(s, f64_from(0)) == 1) { if (c != 0) { fail("P2 zero row with a nonzero code"); } }
+            k = k + 1;
+        }
+        m = m + 1;
+    }
+    # P1
+    if (kernels_agree(qx, sx, Wq, g, b, M, K, N, y0, y1, y2, y3, w8t, wsum, xu8) == 0) { fail("P1 kernels disagree"); }
+    # P5: the integer result is exact; the f64 reference rounds each product and each
+    # add. So the bound is the summation error bound, not a relative tolerance (which
+    # fails on any cancellation to an exact 0): |int - f64| <= 4*K*eps*(s*g*sum|q| + |b|)
+    bl_forward_full(x, W, b, yf, M, K, N, Wq, We, xe, sf);
+    var eps = f64_div(f64_from(1), f64_from(4503599627370496));   # 2^-52
+    var kfac = f64_mul(f64_from(4 * K), eps);
+    m = 0;
+    while (m < M) {
+        var l1 = 0; var k2 = 0;
+        while (k2 < K) {
+            var c2 = load64(qx + (m * K + k2) * 8);
+            if (c2 < 0) { c2 = 0 - c2; }
+            l1 = l1 + c2;
+            k2 = k2 + 1;
+        }
+        var mag = f64_mul(f64_mul(f64_from(l1), load64(sx + m * 8)), f64_abs(g));
+        var n2 = 0;
+        while (n2 < N) {
+            var bmag = f64_from(0);
+            if (b != 0) { bmag = f64_abs(load64(b + n2 * 8)); }
+            var bound = f64_mul(kfac, f64_add(mag, bmag));
+            var a = load64(y0 + (m * N + n2) * 8); var r = load64(yf + (m * N + n2) * 8);
+            if (f64_gt(f64_abs(f64_sub(a, r)), bound) == 1) { fail("P5 integer vs f64 beyond the rounding bound"); }
+            n2 = n2 + 1;
+        }
+        m = m + 1;
+    }
+    # P7
+    t_fill(dx, MK, f64_from(1));
+    bl_ste_mask_x(dx, x, M, K, sf);
+    i = 0;
+    while (i < MK) {
+        if (f64_eq(load64(dx + i * 8), f64_from(1)) == 0) { fail("P7 mask_x zeroed an unsaturated element"); }
+        i = i + 1;
+    }
+    # P6: one NaN in a random row, every kernel
+    if (rint(0, 2) == 0) {
+        var nr = rint(0, M - 1);
+        store64(x + (nr * K + rint(0, K - 1)) * 8, f64_div(f64_from(0), f64_from(0)));
+        var qn = t_alloc(MK); var sn = t_alloc(M);
+        var z0 = t_alloc(MN); var z1 = t_alloc(MN); var z2 = t_alloc(MN); var z3 = t_alloc(MN);
+        act_quant_int(x, M, K, qn, sn);
+        ternary_matmul_free(qn, sn, Wq, g, b, z0, M, K, N);
+        ternary_matmul_free_bl(qn, sn, Wq, g, b, z1, M, K, N);
+        ternary_matmul_free_simd(qn, sn, w8t, wsum, g, b, z2, M, K, N, xu8);
+        ternary_matmul_free_gpu(qn, sn, Wq, g, b, z3, M, K, N);
+        m = 0;
+        while (m < M) {
+            var n = 0;
+            while (n < N) {
+                var o = (m * N + n) * 8;
+                if (m == nr) {
+                    var nans = is_nan(load64(z0 + o)) & is_nan(load64(z1 + o));
+                    nans = nans & is_nan(load64(z2 + o)) & is_nan(load64(z3 + o));
+                    if (nans == 0) {
+                        fail("P6 NaN row has a non-NaN output");
+                    }
+                } else {
+                    var v = load64(y0 + o);
+                    if ((load64(z0 + o) != v) | (load64(z1 + o) != v) | (load64(z2 + o) != v) | (load64(z3 + o) != v)) {
+                        fail("P6 a NaN-free row changed");
+                    }
+                }
+                n = n + 1;
+            }
+            m = m + 1;
+        }
+    }
+    return 0;
+}
+
+# One random small model: property P8.
+fn model_round(): i64 {
+    var V = rint(2, 12); var T = rint(1, 8); var C = rint(1, 24); var F = rint(1, 40);
+    tx_init(V, T, C, F);
+    tx_param_init(V, T, C, F, rint(1, 1000000));
+    tx_int_init(V, T, C, F);
+    var tok = t_alloc(T); var t = 0;
+    while (t < T) { store64(tok + t * 8, rint(0, V - 1)); t = t + 1; }
+    var TV = T * V;
+    var l0 = t_alloc(TV); var l2 = t_alloc(TV);
+    tx_fwd_q(0, tok, V, T, C, F); t_copy(l0, ki_logits, TV);
+    tx_fwd_q(2, tok, V, T, C, F); t_copy(l2, ki_logits, TV);
+    if (same(l0, l2, TV) == 0) { fail("P8 mode 2 != mode 0"); }
+    tx_pack_init(V, T, C, F); tx_pack(V, T, C, F);
+    tx_fwd_packed(tok, V, T, C, F);
+    if (same(l0, ki_logits, TV) == 0) { fail("P8 packed serving != mode 0"); }
+    var Tp = rint(1, T);
+    tx_fwd_packed(tok, V, Tp, C, F);
+    if (same(l0, ki_logits, Tp * V) == 0) { fail("P8 prefix serve != prefix rows"); }
+    return 0;
+}
+
+# 5000 seeded rounds; exit 0 when every property held.
+fn main(): i64 {
     alloc_init();
-    fuzz_main("test", 4);
-    println("fuzz: ok");
+    rng_seed(20261109);
+    var rounds = 5000;
+    while (fz_round < rounds) {
+        layer_round();
+        if ((fz_round % 8) == 0) { model_round(); }
+        fz_round = fz_round + 1;
+    }
+    puts("fuzz: 5000 rounds, P1-P8 held\n");
     return 0;
 }
 
 var r = main();
-syscall(60, r);
+syscall(SYS_EXIT, r);

@@ -23,12 +23,16 @@ include "src/block.cyr"      # the transformer + tx_train (M2)
 include "src/kernel.cyr"     # integer kernels + pack-once serving (M3 / 0.4.1 / 0.7.0)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+# This program's printer: a NUL-terminated string to stdout.
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
 # akshara loader/streaming consumer symbols — unused (corpus_set/gd_ld only)
 fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: stdin reading is refused (-1).
 fn read_stdin(buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: seeking is refused (-1).
 fn file_seek(fd, off): i64 { return 0 - 1; }
 
+# Train, pack once, serve; exits 0 only if packed serving matches the scalar kernel.
 fn main(): i64 {
     alloc_init();
     puts("tentib quickstart — train -> pack once -> serve integer inference\n\n");

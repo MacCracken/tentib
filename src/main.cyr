@@ -14,10 +14,13 @@ include "src/block.cyr"      # the full transformer block + tx_train (M2 bite-E)
 include "src/kernel.cyr"     # the matmul-free integer inference kernel (M3)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
+# The demo's printer: a NUL-terminated string to stdout.
 fn puts(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } print(s, n); return 0; }
 # akshara loader/streaming consumer symbols — unused (we drive corpus_set/gd_ld only)
 fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: stdin reading is refused (-1).
 fn read_stdin(buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: seeking is refused (-1).
 fn file_seek(fd, off): i64 { return 0 - 1; }
 
 # print an f64 (i64 bits) with 2 decimals
@@ -38,6 +41,7 @@ fn print_f2(val): i64 {
     return 0;
 }
 
+# The demo: M0 quantizer, M1 BitLinear, M2 training, M3 kernels and whole-model inference.
 fn main() {
     alloc_init();
     puts("tentib - ternary (1.58-bit) quantization demo\n");
@@ -103,9 +107,11 @@ fn main() {
     puts("\nM2  ternary transformer (RMSNorm+attn+MLP, all-ternary linears) trains on akshara-tokenized text:\n");
     # corpus = "hello world" (raw ASCII bytes; akshara byte-tokenizes it)
     var ctext = alloc(16);
-    store8(ctext + 0, 104); store8(ctext + 1, 101); store8(ctext + 2, 108); store8(ctext + 3, 108); store8(ctext + 4, 111);
+    store8(ctext + 0, 104); store8(ctext + 1, 101); store8(ctext + 2, 108);
+    store8(ctext + 3, 108); store8(ctext + 4, 111);
     store8(ctext + 5, 32);
-    store8(ctext + 6, 119); store8(ctext + 7, 111); store8(ctext + 8, 114); store8(ctext + 9, 108); store8(ctext + 10, 100);
+    store8(ctext + 6, 119); store8(ctext + 7, 111); store8(ctext + 8, 114);
+    store8(ctext + 9, 108); store8(ctext + 10, 100);
     var cV = corpus_set(ctext, 11);          # returns vocab size (distinct bytes)
     var cT = 11 - 1;                          # next-token: T inputs predict tokens 1..T
     var ctok = t_alloc(cT); var ctgt = t_alloc(cT);
@@ -130,20 +136,28 @@ fn main() {
     act_quant_int(kx, 1, kK, kqx, ksi);
     ternary_matmul_free(kqx, ksi, kWq, kg, 0, kyi, 1, kK, kN);
     var kmx = f64_from(0); var ki = 0;
-    while (ki < kN) { var e = f64_abs(f64_sub(tget(kyi, ki), tget(kyf, ki))); if (f64_gt(e, kmx) == 1) { kmx = e; } ki = ki + 1; }
+    while (ki < kN) {
+        var e = f64_abs(f64_sub(tget(kyi, ki), tget(kyf, ki)));
+        if (f64_gt(e, kmx) == 1) { kmx = e; }
+        ki = ki + 1;
+    }
     puts("    parity vs f64 forward (128x128): max |int - f64| = ");
     fmt_int(f64_to(f64_mul(kmx, f64_from(1000000000000)))); puts(" e-12 (integer accumulate is exact)\n");
-    puts("    multiplies: f64 matmul = "); fmt_int(kKN); puts(" ; matmul-free inner loop = 0  (+ "); fmt_int(kN); puts(" dequant scalings)\n");
+    puts("    multiplies: f64 matmul = "); fmt_int(kKN);
+    puts(" ; matmul-free inner loop = 0  (+ "); fmt_int(kN); puts(" dequant scalings)\n");
     var kpk = alloc((kKN + 3) / 4);
     tpack2(kWq, kKN, kpk);
-    puts("    packed ternary weights = "); fmt_int((kKN + 3) / 4); puts(" bytes (2 bits/wt) vs "); fmt_int(kKN * 8); puts(" bytes f64 = 32x smaller\n");
+    puts("    packed ternary weights = "); fmt_int((kKN + 3) / 4);
+    puts(" bytes (2 bits/wt) vs "); fmt_int(kKN * 8); puts(" bytes f64 = 32x smaller\n");
     # M3b: the branchless variant — same accumulate, mask arithmetic instead of the
     # unpredictable per-weight branch. Bit-identical output; benchmarked below.
     var kyb = t_alloc(kN);
     ternary_matmul_free_bl(kqx, ksi, kWq, kg, 0, kyb, 1, kK, kN);
     var kbok = 1; ki = 0;
     while (ki < kN) { if (tget(kyb, ki) != tget(kyi, ki)) { kbok = 0; } ki = ki + 1; }
-    puts("    branchless kernel output bit-identical to branchy: "); if (kbok == 1) { puts("yes"); } else { puts("NO"); } _putc(10);
+    puts("    branchless kernel output bit-identical to branchy: ");
+    if (kbok == 1) { puts("yes"); } else { puts("NO"); }
+    _putc(10);
     # 0.4.1: the integer-SIMD kernel (iv_dp8, 16 int8 lanes/instr) — pack once
     # (the deployment "quantize + pack once" step, like kWq above), then run.
     var kw8t = alloc(kKN); var kwsum = t_alloc(kN); var kxu8 = alloc(kK);
@@ -152,7 +166,9 @@ fn main() {
     ternary_matmul_free_simd(kqx, ksi, kw8t, kwsum, kg, 0, kys, 1, kK, kN, kxu8);
     var ksok = 1; ki = 0;
     while (ki < kN) { if (tget(kys, ki) != tget(kyi, ki)) { ksok = 0; } ki = ki + 1; }
-    puts("    SIMD kernel (iv_dp8) output bit-identical to branchy: "); if (ksok == 1) { puts("yes"); } else { puts("NO"); } _putc(10);
+    puts("    SIMD kernel (iv_dp8) output bit-identical to branchy: ");
+    if (ksok == 1) { puts("yes"); } else { puts("NO"); }
+    _putc(10);
     var iters = 100; var it = 0;
     var t0 = now_ns();
     while (it < iters) { ternary_matmul_free(kqx, ksi, kWq, kg, 0, kyi, 1, kK, kN); it = it + 1; }
@@ -163,7 +179,8 @@ fn main() {
     var ts = now_ns(); it = 0;
     while (it < iters) { linear_fwd(kxe, kWe, 0, kyf, 1, kK, kN); it = it + 1; }
     var t2 = now_ns();
-    puts("    timing/call: branchy = "); fmt_int((t1 - t0) / iters); puts(" ns ; branchless (M3b) = "); fmt_int((tb - t1) / iters);
+    puts("    timing/call: branchy = "); fmt_int((t1 - t0) / iters);
+    puts(" ns ; branchless (M3b) = "); fmt_int((tb - t1) / iters);
     puts(" ns ; SIMD int8 (0.4.1) = "); fmt_int((ts - tb) / iters);
     puts(" ns ; rosnet SIMD-f64 = "); fmt_int((t2 - ts) / iters); puts(" ns\n");
     puts("    (the 0.4.1 payoff: multiply-free is now also FASTER — cyrius 6.4.x integer SIMD (iv_dp8,\n");
@@ -205,13 +222,15 @@ fn main() {
         if (logits_argmax(ki_logits + ct * cV * 8, cV) == logits_argmax(li_wo + ct * cV * 8, cV)) { cag = cag + 1; }
         ct = ct + 1;
     }
-    puts("    next-token argmax: integer model agrees with the trained f64 model at "); fmt_int(cag); puts(" / "); fmt_int(cT); puts(" positions\n");
+    puts("    next-token argmax: integer model agrees with the trained f64 model at ");
+    fmt_int(cag); puts(" / "); fmt_int(cT); puts(" positions\n");
     var nit = 200; var iti = 0; var tt0 = now_ns();
     while (iti < nit) { tx_fwd_q(0, ctok, cV, cT, 4, 8); iti = iti + 1; }
     var tt1 = now_ns(); iti = 0;
     while (iti < nit) { tx_fwd(ctok, cV, cT, 4, 8); iti = iti + 1; }
     var tt2 = now_ns();
-    puts("    forward latency: integer kernel = "); fmt_int((tt1 - tt0) / nit); puts(" ns ; weight-only f64 = "); fmt_int((tt2 - tt1) / nit); puts(" ns\n");
+    puts("    forward latency: integer kernel = "); fmt_int((tt1 - tt0) / nit);
+    puts(" ns ; weight-only f64 = "); fmt_int((tt2 - tt1) / nit); puts(" ns\n");
     return 0;
 }
 

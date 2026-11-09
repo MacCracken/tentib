@@ -9,7 +9,7 @@ The **stable public API** below was settled at v0.6.0 and is **frozen for the
 1.x series as of the 1.0.0 cut**: signatures and semantics will not change
 without a major version bump; minor versions may **add** symbols. Every public symbol is exercised
 **directly** by at least one committed driver — the demo (`src/main.cyr`), the suite
-(`tests/tentib.tcyr`, 95/95), or the bench harness (`tests/tentib.bcyr`) — noted per
+(`tests/tentib.tcyr`, 139 assertions at 1.1.2), or the bench harness (`tests/tentib.bcyr`) — noted per
 row. The 0.6.0 suite group "API-freeze gates" closes the last indirect-only cases
 (`ref_dot`, `bl_forward_q`, the manual `tx_sgd` quartet).
 
@@ -21,7 +21,10 @@ helpers (`_rms_eps`, `_tanh`, `_gelu_c`, `_gelu_a`), the head-LM internals
 sublayer chains (`attn_sublayer_fwd/loss/bwd`, `mlp_sublayer_fwd/loss/bwd`,
 `attn_sublayer_q`, `mlp_sublayer_q`, `block_q`), and every `blk_*`/`mlp_*`
 scratch global. These are the reference's *mechanism* — readable and FD-gated,
-but free to change between minor versions.
+but free to change between minor versions. (1.1.2: `bl_ste_mask_x` masks where
+the forward's clamp changed the code, `|x/s| ≥ 127.5`; with `bl_act_quant`'s
+scale that is never, so the mask is the identity. The `blk_db` / `mlp_db`
+scratch is gone: the bias-free projections pass `db = 0`.)
 
 ## Conventions & caller contract
 
@@ -39,6 +42,17 @@ but free to change between minor versions.
   (the i32 exactness bound), and packed-store misuse (`tx_pack` before its inits,
   `tx_fwd_packed` before `tx_pack`). Cold paths only; hot loops are unchecked.
   Audit record: [`audit/2026-07-06-audit.md`](audit/2026-07-06-audit.md).
+- **Ids and dims (1.1.2):** token ids (`tx_fwd`, `tx_fwd_q`, `tx_fwd_packed`,
+  `tx_bwd`) and target ids (`softmax_xent_fwd`/`_bwd`) must lie in [0, V); each
+  `*_init` records its dims, and later calls must pass the same V, C, F and a T
+  in [1, init T] (a shorter T serves the prefix's rows, bit for bit), after the
+  init ran. `bl_forward_q` checks M, K, N against the `tx_int_init` sizing.
+  Violations fail loud; these are checked once per call, O(T) at most.
+- **Failure channel:** `guard()` writes `tentib guard: <reason>` to stderr and
+  exits 1. tentib's library code calls no consumer printer (a consumer defines
+  only akshara's four hooks). Audit record:
+  [`audit/2026-11-09-audit.md`](audit/2026-11-09-audit.md); posture:
+  [ADR 0002](adr/0002-hardening-preserves-bits.md).
 
 ## Allocation & lifetime (the 0.6.0 alloc-clean audit)
 
@@ -63,8 +77,8 @@ path; the invariant is:
 | symbol | contract | tested by |
 |--------|----------|-----------|
 | `tload(p, i)` → f64 / `tstore(p, i, v)` | element access on a flat f64 tensor | suite (throughout) |
-| `guard(cond, msg)` | fail-loud precondition guard (prints + exits 1) — the 0.8.0 hardening primitive, tarka convention | suite (pass path; every guarded entry) |
-| `absmean(w, n)` → f64 | the b1.58 scale γ = mean(abs(w)) | demo, suite, bench |
+| `guard(cond, msg)` | fail-loud precondition guard (message on stderr, exit 1) — the 0.8.0 hardening primitive, tarka convention | suite (pass path; 20 fail paths in forked children) |
+| `absmean(w, n)` → f64 | the b1.58 scale γ = mean(abs(w)); 0 for n ≤ 0 | demo, suite, bench |
 | `ternary_one(w, gamma)` → i64 | one weight → {−1, 0, +1} = clip(round(w/γ)) | suite |
 | `ternary_quantize(w, n, Wq)` → f64 | quantize n weights into `Wq`; returns γ | demo, suite, bench |
 | `ternary_dot(Wq, x, n, gamma)` → f64 | matmul-free dot: signed-accumulate · γ | demo, suite |
@@ -75,7 +89,7 @@ path; the invariant is:
 | symbol | contract | tested by |
 |--------|----------|-----------|
 | `bl_weight_effective(W, n, Wq, Weff)` → f64 | latent → ternary `Wq` + dequant `Weff` = γ·Wq; returns γ | demo, suite, bench |
-| `bl_act_quant(x, M, K, xq, sx)` | per-row absmax int8 quant → **dequantized f64** `xq` + scales `sx` | suite |
+| `bl_act_quant(x, M, K, xq, sx)` | per-row absmax int8 quant → **dequantized f64** `xq` + scales `sx`; a NaN in a row makes that row's scale NaN | suite |
 | `bl_forward_wonly(x, W, b, y, M, K, N, Wq, Weff)` → f64 | BitLinear, weight-only quant (f64 matmul on `Weff`); returns γ | suite |
 | `bl_forward_full(x, W, b, y, M, K, N, Wq, Weff, xe, sx)` → f64 | BitLinear, weights + activations quantized (the integer kernel's f64 reference); `xe` = dequantized acts | demo, suite, bench |
 | `bl_backward_wonly(x, Weff, du, dx, dW, db, M, K, N, W, gamma, scr)` | STE backward: `dW` through the clip-mask surrogate, `dx` through `Weff` | suite (FD-gated) |
@@ -110,12 +124,12 @@ The manual loop `tx_zero_grads → tx_loss → tx_bwd → tx_sgd` is public and 
 
 | symbol | contract | tested by |
 |--------|----------|-----------|
-| `act_quant_int(x, M, K, qx, sx)` | per-row absmax int8 quant keeping **integer codes** `qx` ∈ [−127, +127] + scales `sx` | demo, suite, bench |
+| `act_quant_int(x, M, K, qx, sx)` | per-row absmax int8 quant keeping **integer codes** `qx` ∈ [−127, +127] + scales `sx`; a NaN in a row makes that row's scale NaN, so its outputs are NaN in every kernel | demo, suite, bench |
 | `ternary_matmul_free(qx, sx, Wq, gamma, b, y, M, K, N)` | the scalar kernel: i64 signed-accumulate (add/sub/skip, **no multiply**), one dequant (γ·sx) + bias per output | demo, suite, bench |
 | `ternary_matmul_free_bl(...)` (same signature) | branchless variant (mask arithmetic) — **bit-identical** to the branchy kernel | demo, suite, bench |
 | `tpack2(Wq, n, packed)` / `tunpack2(packed, i)` → i64 | 2-bit packed ternary storage (32× vs f64), exact round-trip | demo, suite |
 | `tsimd_pack_w(Wq, K, N, w8t, wsum)` | **pack-once** for the SIMD kernel: transpose to `w8t` [N,K] i8 bytes + per-output `wsum` over the 16-lane span (the u8-offset correction). `w8t` = K·N bytes, `wsum` = N i64 slots | demo, suite, bench |
-| `ternary_matmul_free_simd(qx, sx, w8t, wsum, gamma, b, y, M, K, N, xu8)` | the 0.4.1 `iv_dp8` kernel — **bit-identical** to the scalar kernel (never saturates for ternary weights: pair-sums ≤ 510; exact to K ~ 2²⁴). `xu8` = K bytes scratch. Any K (16-lane span + branchless tail) | demo, suite, bench |
+| `ternary_matmul_free_simd(qx, sx, w8t, wsum, gamma, b, y, M, K, N, xu8)` | the 0.4.1 `iv_dp8` kernel — **bit-identical** to the scalar kernel (never saturates for ternary weights: pair-sums ≤ 510; iv_dp8 sums in i32, so exact for K < ~8.4M, guarded at K ≤ 2²²). Codes `qx` must lie in [−128, +127] (unchecked; `act_quant_int` gives [−127, +127]). `xu8` = K bytes scratch. Any K (16-lane span + branchless tail) | demo, suite, bench |
 | `tx_int_init(V, T, C, F)` | allocate the whole-model integer scratch (`ki_*`) — call after `tx_init` | demo, suite, bench |
 | `bl_forward_q(mode, x, W, b, y, M, K, N)` → f64 | one BitLinear via mode **0** = scalar integer, **1** = full-quant f64 reference, **2** = integer SIMD; re-quantizes (mode 2: + re-packs) per call; returns γ | suite (direct gate) |
 | `tx_fwd_q(mode, tokens, V, T, C, F)` | whole-model inference through all 7 BitLinears in the chosen mode; logits → `ki_logits`. Modes 0 and 2 are bit-identical; mode 1 is the f64 rounding reference | demo, suite, bench |
@@ -155,4 +169,6 @@ See [`benchmarks.md`](benchmarks.md): the SIMD kernel is pack-once-then-hot —
 design (reference fairness); **the pack-once deployment entry point shipped in
 0.7.0 (additive)** — `tx_pack` + `tx_fwd_packed` serve the whole model at **5.7×
 the f64 path** (13,675 vs 2,378 tok/s at the bench config, 0.8.0-guarded run),
-the one-time pack amortizing after ~3 forwards.
+the one-time pack amortizing after ~3 forwards. (Those are the 2026-07-06 run of
+record's figures; the 1.1.1 and 1.1.2 changes are in [`benchmarks.md`](benchmarks.md)'s
+dated notes, the CHANGELOG and `bench-history.csv`.)

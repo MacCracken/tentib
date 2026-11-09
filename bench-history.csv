@@ -1,0 +1,49 @@
+date,version,commit,benchmark,time_ns
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 128x128 branchy",113472
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 128x128 branchless",89560
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 128x128 simd",1786
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 128x128 rosnet-f64",7277
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 256x256 branchy",582888
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 256x256 branchless",369548
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 256x256 simd",4702
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 256x256 rosnet-f64",25755
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 512x512 branchy",2512585
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 512x512 branchless",1615653
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 512x512 simd",13472
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 512x512 rosnet-f64",102527
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 768x768 branchy",5633430
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 768x768 branchless",3331818
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 768x768 simd",27564
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"layer 768x768 rosnet-f64",223799
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"prep 768x768 tsimd_pack_w",4815992
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"prep 768x768 act_quant_int",6810
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"model f64 weight-only",11159763
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"model integer scalar",71480874
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"model integer SIMD (0.4.1)",10835050
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"model PACKED serving (0.7.0)",2395729
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"model tx_pack (one-time)",8284433
+2026-11-09T22:19:53Z,1.1.1,fa88d3a+dirty,"model training step (f64)",27852312
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 128x128 branchy",108320
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 128x128 branchless",90518
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 128x128 simd",1760
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 128x128 rosnet-f64",7142
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 256x256 branchy",593575
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 256x256 branchless",358085
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 256x256 simd",4760
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 256x256 rosnet-f64",25479
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 512x512 branchy",2528871
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 512x512 branchless",1589316
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 512x512 simd",13769
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 512x512 rosnet-f64",92676
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 768x768 branchy",5680634
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 768x768 branchless",3442959
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 768x768 simd",26771
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"layer 768x768 rosnet-f64",205003
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"prep 768x768 tsimd_pack_w",3278318
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"prep 768x768 act_quant_int",4412
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"model f64 weight-only",7435540
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"model integer scalar",66049017
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"model integer SIMD (0.4.1)",6295517
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"model PACKED serving (0.7.0)",2250594
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"model tx_pack (one-time)",3933950
+2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"model training step (f64)",22434891

@@ -28,6 +28,8 @@ fn tmf_sx32(v): i64 {
     return c;
 }
 
+# y = gamma*sx[m]*SUM_k qx[m,k]*Wq[k,n] + b[n], bit-identical to ternary_matmul_free, tiled
+# 8x8x8 onto #82 on AGNOS (the CPU computes any tile #82 does not). Returns the GPU tile count.
 fn ternary_matmul_free_gpu(qx, sx, Wq, gamma, b, y, M, K, N): i64 {
     var gpu_tiles = 0;
     var mt = 0;

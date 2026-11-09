@@ -3,6 +3,18 @@
 
 include "lib/syscalls.cyr"
 
+# cyrius.cyml's [deps] are prepended to every build unit, akshara included, and
+# akshara leaves four I/O hooks to the consumer. This entry never reaches them;
+# defining them keeps its build free of "undefined function" warnings (1.1.2).
+fn _putc(ch): i64 { return 0; }
+# akshara hook, not wired here: file loading is refused (-1).
+fn secure_read_file(path, buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: stdin reading is refused (-1).
+fn read_stdin(buf, cap): i64 { return 0 - 1; }
+# akshara hook, not wired here: seeking is refused (-1).
+fn file_seek(fd, off): i64 { return 0 - 1; }
+
+# No-op entry; the suite lives in tests/tentib.tcyr.
 fn main() {
     return 0;
 }

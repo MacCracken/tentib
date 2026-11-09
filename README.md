@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — v1.0.0 STABLE (101/101 gated; API frozen for the 1.x series)
+## Status — 1.x STABLE (1.1.2: 139 assertions + a property fuzzer, x86_64 and aarch64; API frozen for the 1.x series)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -74,6 +74,13 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 - **v1.0.0 STABLE** — the clean cut: all six v1.0 criteria green, no code change
   from 0.8.0; the [`docs/api.md`](docs/api.md) freeze is in force for the 1.x
   series (signatures/semantics stable, minors add only).
+- **P(-1) sweep (v1.1.2)** — [`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md):
+  out-of-range token / target ids and mismatched dims now fail loud (an id ≥ V
+  used to write past a gradient buffer in `tx_bwd`); the activation STE mask no
+  longer zeroes a row's max-element gradient; NaN propagates through the integer
+  path; the quantizer, packer and activation quant are faster with the same bits
+  (golden-dump verified); every guard's fail path is tested, and a real property
+  fuzzer runs on both targets in CI.
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39

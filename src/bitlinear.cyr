@@ -33,11 +33,21 @@ fn bl_weight_effective(W, KN, Wq, Weff): i64 {
         while (i < KN) { tstore(Wq, i, 0); tstore(Weff, i, f64_from(0)); i = i + 1; }
         return f64_from(0);
     }
+    # The loop is ternary_one inlined (g != 0 here, so its per-weight gamma == 0 test
+    # is dead) plus a 3-entry table of the dequantized values: Weff = q*g for q in
+    # {-1, 0, +1} is the same f64_mul whether it runs per weight or once up front, so
+    # the bits are the same (1.1.2; golden-dump verified).
+    var tab[24];
+    store64(&tab, f64_mul(f64_from(0 - 1), g));
+    store64(&tab + 8, f64_mul(f64_from(0), g));
+    store64(&tab + 16, f64_mul(f64_from(1), g));
     var i = 0;
     while (i < KN) {
-        var q = ternary_one(tload(W, i), g);          # clip(round(W/g),-1,+1) in {-1,0,+1}
-        tstore(Wq, i, q);
-        tstore(Weff, i, f64_mul(f64_from(q), g));      # dequantized effective weight = gamma*Wq
+        var q = f64_to(f64_round(f64_div(load64(W + i * 8), g)));   # clip(round(W/g),-1,+1)
+        if (q > 1) { q = 1; }
+        if (q < (0 - 1)) { q = 0 - 1; }
+        store64(Wq + i * 8, q);
+        store64(Weff + i * 8, load64(&tab + (q + 1) * 8));        # gamma*Wq, dequantized
         i = i + 1;
     }
     return g;
@@ -60,10 +70,11 @@ fn bl_forward_wonly(x, W, b, y, M, K, N, Wq, Weff): i64 {
 # gamma==0 short-circuits (|W/gamma| is Inf/NaN, and dWeff is ~0 anyway): add nothing.
 fn bl_ste_mask_w(W, dWeff, dW, KN, gamma): i64 {
     if (f64_eq(gamma, f64_from(0)) == 1) { return 0; }
+    var one = f64_from(1);
     var i = 0;
     while (i < KN) {
-        if (f64_lt(f64_abs(f64_div(tload(W, i), gamma)), f64_from(1)) == 1) {
-            tstore(dW, i, f64_add(tload(dW, i), tload(dWeff, i)));
+        if (f64_lt(f64_abs(f64_div(load64(W + i * 8), gamma)), one) == 1) {
+            store64(dW + i * 8, f64_add(load64(dW + i * 8), load64(dWeff + i * 8)));
         }
         i = i + 1;
     }
@@ -130,11 +141,17 @@ fn bl_surr_lin_loss(x, W, dyf, M, K, N, yscr): i64 {
 # sx[m] = s (the per-row scale, kept for the backward activation STE mask). The clamp
 # is SYMMETRIC (+-127, NOT -128) so s is a symmetric reciprocal. absmax==0 (zero token
 # row) guard: s=0, xeff row=0 (skip 127/0 = Inf).
+#
+# The absmax compares f64_abs bit patterns as integers. For non-negative doubles the
+# i64 order of the bits IS the numeric order (+0 < subnormals < normals < +Inf), so
+# every NaN-free row gets the same absmax bits as an f64_gt compare. A NaN's bits sort
+# above +Inf, so a NaN in the row becomes the absmax and the row's scale is NaN, where
+# f64_gt skipped it. act_quant_int (kernel.cyr) uses the same rule (1.1.2).
 fn bl_act_quant(x, M, K, xeff, sx): i64 {
     var m = 0;
     while (m < M) {
         var a = f64_from(0); var k = 0;
-        while (k < K) { var v = f64_abs(tload(x, m * K + k)); if (f64_gt(v, a) == 1) { a = v; } k = k + 1; }
+        while (k < K) { var v = f64_abs(tload(x, m * K + k)); if (v > a) { a = v; } k = k + 1; }
         if (f64_eq(a, f64_from(0)) == 1) {
             tstore(sx, m, f64_from(0));
             k = 0;
@@ -157,17 +174,24 @@ fn bl_act_quant(x, M, K, xeff, sx): i64 {
     return 0;
 }
 
-# Activation STE clip-mask: zero dx where the int8 quant saturated (|x/s| > 127).
-# For per-row absmax only the single max element sits at the boundary (measure-zero),
-# so this is near-all-identity; it exists for correctness/symmetry. s==0 row -> skip.
+# Activation STE clip-mask: zero dx where the int8 quant saturated, i.e. where the
+# forward's clamp changed the code: |round(x/s)| > 127, which is |x/s| >= 127.5 under
+# either rounding rule (127.5 rounds to 128 half-away AND half-even). s==0 row -> skip.
+# With s from bl_act_quant's per-row absmax nothing saturates (|x| <= absmax puts
+# |x/s| at most 127 plus rounding), so the mask is the identity there and only bites
+# for a caller-supplied smaller scale. Until 1.1.2 the test was |x/s| > 127, and at
+# the row's max element a/(a/127) rounds to 127.00000000000001 for about 14% of
+# absmax values (a = 1.1, 2.2, 0.01, ...): that zeroed the max element's gradient
+# although the forward never clamped it.
 fn bl_ste_mask_x(dx, x, M, K, sx): i64 {
+    var lim = f64_div(f64_from(255), f64_from(2));    # 127.5, exact
     var m = 0;
     while (m < M) {
         var s = tload(sx, m);
         if (f64_eq(s, f64_from(0)) == 0) {
             var k = 0;
             while (k < K) {
-                if (f64_gt(f64_abs(f64_div(tload(x, m * K + k), s)), f64_from(127)) == 1) {
+                if (f64_ge(f64_abs(f64_div(tload(x, m * K + k), s)), lim) == 1) {
                     tstore(dx, m * K + k, f64_from(0));
                 }
                 k = k + 1;

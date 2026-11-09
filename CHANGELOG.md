@@ -4,6 +4,126 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-11-09
+
+The P(-1) hardening, optimization and repair sweep, recorded in
+[`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md), the second tentib audit. No
+public signature changed. On valid input every output is bit-identical to 1.1.1, except the
+activation STE mask's (fixed below). A golden dump of 333,281 raw output values over every public
+function differs from 1.1.1 in exactly that one place. Toolchain and deps are unchanged (cyrius
+6.7.18; tyche 1.2.2, rosnet 1.4.1, akshara 1.1.2).
+
+### Fixed
+
+- **An out-of-range token id corrupted the heap** (MEDIUM). `tx_bwd`'s embedding scatter wrote C
+  f64s past `tx_dtokemb` for a token ≥ V or < 0. `tx_fwd`, `tx_fwd_q` and `tx_fwd_packed` read past
+  the embedding table for the same ids. Ids are checked once per call now, in one shared embed
+  (`_tx_embed`), and again in `tx_bwd` before the scatter. A bad id fails loud.
+- **`bl_ste_mask_x` zeroed the max element's gradient in about 14% of token rows** (MEDIUM). It
+  masked where `|x/s| > 127`. At the row's max element, `a/(a/127)` rounds to `127.00000000000001`
+  for 13.65% of absmax values (a = 1.1, 2.2, 0.01, …), but the forward never clamps that element.
+  An element now counts as saturated only when the forward's clamp would change its code, which is
+  `|x/s| ≥ 127.5`. With `bl_act_quant`'s scale the mask is the identity, as documented. tentib's own
+  trainers use weight-only BitLinears, so the bug reached only a consumer training with activation
+  quant.
+- **Target ids are checked** in `softmax_xent_fwd` / `_bwd`. An out-of-range target used to read
+  past the probs row, giving a wrong loss, or drop the one-hot term, giving a wrong gradient.
+- **Dims are checked against what was allocated.** Each `*_init` records its dims. The `tx_*` calls,
+  `block_fwd`/`_bwd`, `bl_forward_q`, `tx_fwd_q`, `tx_pack` and `tx_fwd_packed` refuse a V, C or F
+  other than the init's, a T outside [1, init T], or a call before the init. Any of those used to
+  read and write past the buffers. A shorter T is legal: serving a prefix returns exactly the
+  prefix's rows of the full serve, bit for bit.
+- **The integer path no longer turns NaN into a number.** `act_quant_int`'s absmax skipped NaN, so
+  `f64_to(NaN)` became a valid-looking code (−127 on x86_64, 0 on aarch64) and the row gave a
+  plausible logit, while the f64 reference returned NaN. The absmax now compares `f64_abs` bit
+  patterns as integers. That gives the same bits on every NaN-free row, but a NaN sorts above
+  +Inf, so its row comes out NaN in every kernel. `bl_act_quant` uses the same rule.
+- `guard()` writes to **stderr** directly. A library consumer no longer has to define `puts` for
+  tentib. The exit status is still 1.
+- `absmean(w, 0)` returns 0, where it returned 0/0 = NaN.
+- `src/test.cyr` defines akshara's four hooks, so the `[build].test` unit builds without
+  "undefined function" warnings.
+
+### Changed — faster, same bits
+
+Measured on one binary per run, pinned to core 4, median of three runs (`bench-history.csv`):
+
+- **`bl_weight_effective`**: `ternary_one` is inlined, and `Weff` comes from a 3-entry table of
+  `{−γ, 0·γ, +γ}`. The f64 forward drops from 11.16 to 7.44 ms (−33%).
+- **`tsimd_pack_w`** walks `Wq` row by row, with one ternary check per row: 4.82 → 3.28 ms (−32%).
+  With the change above, the one-time `tx_pack` drops from 8.28 to 3.93 ms (−53%) and the
+  integer-SIMD whole-model mode from 10.84 to 6.30 ms (−42%).
+- **`act_quant_int`** (the integer absmax, plus per-row base pointers): 6.81 → 4.41 µs (−35%).
+  **Packed serving** drops from 2.40 to 2.25 ms (−6%), 13.3k → 14.2k tok/s.
+- **Training**: the six bias-free projections pass `db = 0` to `linear_bwd`, instead of
+  accumulating into scratch that nothing read, which removes `blk_db` / `mlp_db`. A training step
+  drops from 27.85 to 22.43 ms (−19%).
+- The kernels themselves were not changed, and the per-layer rows did not move (±3%). The f64
+  reference path got faster too, so the packed-vs-f64 ratio at the bench config falls from 4.2× to
+  3.3× even though serving itself is faster.
+- **Measured and not adopted:** a per-row code check inside `ternary_matmul_free_simd`. It cost
+  4–10% of the kernel at M = 1, and hot loops carry no checks. The kernel's contract (codes in
+  [−128, +127]) is now stated precisely instead. See
+  [ADR 0002](docs/adr/0002-hardening-preserves-bits.md).
+
+### Added
+
+- **Suite 101 → 139 assertions.** The new group covers:
+  - the mask fix, the NaN propagation and `absmean(·, 0)`;
+  - `ternary_matmul_free_gpu`'s host fallback at four shapes, ragged against the 8×8×8 tile
+    (the suite never ran it before, and `gpumm`'s one shape never reached those branches);
+  - prefix serving;
+  - **20 guard fail paths**, each run in a forked child with stderr silenced, plus 2 exit-0
+    controls.
+- **A real fuzz harness** (`tests/tentib.fcyr`; it was a no-op): 5,000 seeded rounds, ~3 s,
+  checking eight properties:
+  - the four kernels agree bit for bit;
+  - the activation codes stay in range;
+  - the 2-bit packing round-trips;
+  - `Weff` = code·γ;
+  - the integer output stays within the f64 summation error bound;
+  - NaN rows propagate;
+  - the activation mask is the identity;
+  - on small whole models, modes 0/2 and packed serving agree, and served prefixes match.
+- **Mutation testing**: the suite killed 9 of 9 injected defects, and the fuzz harness killed the 7
+  that change outputs.
+- **`scripts/bench-history.sh`** and `bench-history.csv`, with the before and after rows, plus a
+  training-step benchmark row.
+- `.gitattributes` (`lib/** -text`): `cyrius.lock` records `lib/`'s bytes, so a CRLF checkout
+  would fail `cyrius deps --verify`.
+- [ADR 0002](docs/adr/0002-hardening-preserves-bits.md): an optimization must preserve bits,
+  proven by a golden dump, and guards go at call entry, never inside kernel loops.
+- Every public function has a doc comment. `cyrius doc --check` reports 0 undocumented, down from
+  67, and `cyrius audit` passes (it exited 1 before).
+
+### Security / CI
+
+- Workflows use a read-only token by default. Only the release job gets `contents: write`, so the
+  CI gate it calls no longer inherits it.
+- Checkouts set `persist-credentials: false`.
+- Actions are pinned by SHA to checkout v7.0.1 and action-gh-release v3.0.3, verified against
+  their tags.
+- The release tag filter is `X.Y.Z*`.
+- CI gates on fmt, on lint (any warning fails; all 53 line-length warnings are fixed), vet and
+  doc. It also runs the demo, the suite, the example, `gpumm` (exit 96 on the host) plus an AGNOS
+  build, the fuzz harness and a bench smoke run. Further jobs cover aarch64 (the suite and fuzz
+  under qemu), a security scan and docs/version consistency.
+- The release ships a DCE build, a source archive and `SHA256SUMS`.
+
+### Documentation
+
+- The SIMD kernel's comment and `docs/api.md` overstated the i32 exactness bound ("~64·K, safe to
+  K ~ 2²⁴"). iv_dp8 sums its lanes in i32, so the limit is 255·K < 2³¹ (K < ~8.4M). The `K ≤ 2²²`
+  guard was always right. Also corrected: a stale "no integer SIMD" comment, and the mask
+  comment's "measure-zero".
+- `SECURITY.md` is rewritten for the library surface a consumer drives with token ids, and for
+  both audits. `docs/api.md` lists the 1.1.2 contracts.
+- `CONTRIBUTING.md` no longer calls the bench and fuzz harnesses stubs. It also no longer warns
+  about a missing call-arity check: every toolchain from 6.6.0 to 6.7.18 rejects an arity
+  mismatch, and the 2026-06-23 issue is marked resolved upstream.
+- `CLAUDE.md` gives the scope of `var buf[N]`: N bytes at function scope, N i64 slots at module
+  scope. The ADR index now lists 0001, which was missing.
+
 ## [1.1.1] — 2026-11-09
 
 This release moves tentib and its deps to their latest releases. Nothing in `src/` changed, the

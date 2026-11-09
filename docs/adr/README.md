@@ -19,4 +19,7 @@ Decisions about tentib — what we chose, the context, and the consequences we a
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+| # | Title | Status |
+|---|---|---|
+| [0001](0001-tentib-scope.md) | tentib scope, the integer-native thesis, and the name | Accepted |
+| [0002](0002-hardening-preserves-bits.md) | Hardening and optimization preserve bits; guards sit at call entry, never in kernel loops | Accepted |

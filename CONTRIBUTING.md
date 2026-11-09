@@ -10,12 +10,16 @@
 3. `cyrius build src/main.cyr build/tentib` — compile the demo driver
    (M0 quantizer · M1 BitLinear · M2 transformer-trains · M3 matmul-free kernel).
 4. `./build/tentib` — run the demo.
-5. `cyrius test` — run the gradient/FD-check suite (`tests/tentib.tcyr`) plus the
+5. `cyrius test` — run the suite (`tests/tentib.tcyr`: the FD gates, the
+   bit-identity gates, and every guard's fail path in a forked child) plus the
    `[build].test` entry (`src/test.cyr`).
-6. `cyrius build tests/tentib.bcyr build/bench && ./build/bench` — benchmark
-   harness (currently a stub; wire real numbers when a perf claim needs them).
-7. `cyrius build tests/tentib.fcyr build/fuzz && ./build/fuzz` — fuzz harness
-   (currently a stub).
+6. `cyrius build tests/tentib.bcyr build/bench && taskset -c 4 ./build/bench` —
+   the benchmark harness behind `docs/benchmarks.md`. For a before/after
+   comparison run `./scripts/bench-history.sh` before and after the change: it
+   appends the median of three pinned runs to `bench-history.csv`.
+7. `CYRIUS_DCE=1 cyrius build tests/tentib.fcyr build/fuzz && ./build/fuzz` —
+   seeded property fuzzing (5,000 rounds, a few seconds; exit 1 names the failed
+   property and round).
 
 See [`CLAUDE.md`](CLAUDE.md) for the full development loop and
 [`docs/development/roadmap.md`](docs/development/roadmap.md) for the M0→v1.0 plan.
@@ -52,9 +56,13 @@ the perturbation.
 - One change at a time. Never bundle unrelated changes in a single PR.
 - Test after every change; FD-check after every backward-touching change;
   benchmark after every perf-touching change.
-- Cyrius does not check call arity — a stale call site compiles clean and binds
-  garbage. Always run the suite after a signature change; a clean `build` is not
-  sufficient (see `docs/development/issues/2026-06-23-cyrius-call-arity-no-check.md`).
+- Run the suite after a signature change. cyrius rejects a call with the wrong
+  number of arguments (every toolchain from 6.6.0 on; it did not at 6.2.37, see
+  `docs/development/issues/2026-06-23-cyrius-call-arity-no-check.md`), but a
+  call with the right count and swapped arguments still compiles clean.
+- Optimizations must be bit-identical on valid input, and guards go at call
+  entry, never inside a kernel loop
+  ([ADR 0002](docs/adr/0002-hardening-preserves-bits.md)).
 - Performance claims must include numbers — `before → after` with the bench name.
 - Honest-scale rule: b1.58's "matches fp16" is a ≥3B *scale* result; at tiny
   from-scratch scale, **report the quality gap**, never hide it.
