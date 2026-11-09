@@ -262,6 +262,7 @@ fn block_q(mode, x, gns, Wa, Wm, T, C, F): i64 {
 # mode 2 = integer SIMD.
 fn tx_fwd_q(mode, tokens, V, T, C, F): i64 {
     _tx_dims(V, T, C, F);
+    _tx_latents();
     guard(ki_T0 != 0, "tx_fwd_q: call tx_int_init first");
     guard((T <= ki_T0) & (V <= ki_V0), "tx_fwd_q: T or V exceeds the tx_int_init sizing");
     var C8 = C * 8;
@@ -430,6 +431,7 @@ fn tx_pack(V, T, C, F): i64 {
     guard(pk_w8t != 0, "tx_pack: call tx_pack_init first");
     guard((tx_Wa != 0) & (ki_Wq != 0), "tx_pack: call tx_init + tx_int_init first");
     _tx_dims(V, T, C, F);
+    _tx_latents();
     guard((V == pk_V0) & (C == pk_C0) & (F == pk_F0), "tx_pack: V, C, F differ from tx_pack_init");
     var CC = C * C; var CF = C * F;
     # packing quantizes each layer through ki_Wq / ki_We (K*N slots)

@@ -13,6 +13,7 @@ include "src/model.cyr"     # softmax_xent / lm_* — minimal trainable ternary 
 include "lib/akshara.cyr"   # corpus_set / gd_ld — sovereign tokenizer (M2 bite-F)
 include "src/block.cyr"     # attn_sublayer_* / tx_* — transformer block + LM (M2 bite-E/F)
 include "src/kernel.cyr"    # ternary_matmul_free / act_quant_int / tpack2 — matmul-free kernel (M3)
+include "src/serial.cyr"  # tx_pack_serialize / tx_pack_deserialize — packed-model bytes (1.2.0)
 include "src/gpu.cyr"       # ternary_matmul_free_gpu — its host fallback is gated here (1.1.2)
 
 # akshara consumer symbols (unused — we drive the pure corpus_set/gd_ld path)
@@ -186,6 +187,62 @@ fn sc_block_f(): i64 { return block_fwd(tx_resid0, tx_gns, tx_Wa, tx_Wm, g_T, g_
 fn sc_sgd_v(): i64 { return tx_sgd(g_V + 1, g_T, g_C, g_F, f64_from(0)); }
 # tx_pack with dims other than the model's (must fail).
 fn sc_pack_dims(): i64 { return tx_pack(g_V, g_T, g_C, g_F * 2); }
+
+# --- 1.2.0: packed-model serialization helpers --------------------------------
+var g_art_n = 0; var g_ref = 0; var g_tok_s = 0;
+# A packed model of dims V, T, C, F from random parameters (seed), serialized into a
+# fresh buffer; returns the buffer, its length in g_art_n, the reference serve of
+# tokens g_tok_s[0..T) in g_ref (T x V logits).
+fn make_artifact(V, T, C, F, seed): i64 {
+    tx_init(V, T, C, F); tx_param_init(V, T, C, F, seed);
+    tx_int_init(V, T, C, F); tx_pack_init(V, T, C, F); tx_pack(V, T, C, F);
+    g_tok_s = t_alloc(T);
+    var t = 0;
+    while (t < T) { store64(g_tok_s + t * 8, (t * 5 + 3) % V); t = t + 1; }
+    tx_fwd_packed(g_tok_s, V, T, C, F);
+    g_ref = t_alloc(T * V); t_copy(g_ref, ki_logits, T * V);
+    g_art_n = tx_pack_serial_bytes();
+    var buf = alloc(g_art_n + 64);
+    tx_pack_serialize(buf, g_art_n);
+    return buf;
+}
+# 1 when a[0..n) and b[0..n) hold the same bytes.
+fn same_bytes(a, b, n): i64 {
+    var i = 0;
+    while (i < n) { if (load8(a + i) != load8(b + i)) { return 0; } i = i + 1; }
+    return 1;
+}
+# A private copy of an artifact (so a mutation never touches the original).
+fn art_copy(src, n): i64 {
+    var d = alloc(n + 64);
+    var i = 0;
+    while (i < n) { store8(d + i, load8(src + i)); i = i + 1; }
+    return d;
+}
+# Recompute the trailing checksum after a deliberate mutation, so the decoder reaches
+# its field checks instead of stopping at pk_err_checksum.
+fn art_fix(buf, n): i64 { store64(buf + n - 8, _pk_fnv(buf, n - 8)); return 0; }
+# 1 when serving tokens g_tok_s at T rows reproduces g_ref bit for bit.
+fn serves_ref(V, T, C, F): i64 {
+    tx_fwd_packed(g_tok_s, V, T, C, F);
+    var i = 0;
+    while (i < T * V) { if (tget(ki_logits, i) != tget(g_ref, i)) { return 0; } i = i + 1; }
+    return 1;
+}
+# A packed-only (deserialized) model refuses every path that reads latent weights.
+fn sc_po_fwd(): i64 { return tx_fwd(g_tok, g_V, g_T, g_C, g_F); }
+# tx_fwd_q on a deserialized model (must fail: no latent weights).
+fn sc_po_fwdq(): i64 { return tx_fwd_q(0, g_tok, g_V, g_T, g_C, g_F); }
+# tx_bwd on a deserialized model (must fail).
+fn sc_po_bwd(): i64 { return tx_bwd(g_tok, g_tgt, g_V, g_T, g_C, g_F); }
+# tx_sgd on a deserialized model (must fail).
+fn sc_po_sgd(): i64 { return tx_sgd(g_V, g_T, g_C, g_F, f64_from(0)); }
+# tx_pack on a deserialized model (must fail: it would re-pack from zero latents).
+fn sc_po_pack(): i64 { return tx_pack(g_V, g_T, g_C, g_F); }
+# Control: a deserialized model serves.
+fn sc_po_serve(): i64 { return tx_fwd_packed(g_tok, g_V, g_T, g_C, g_F); }
+# Control: tx_param_init makes an ordinary model again, so tx_fwd runs.
+fn sc_po_reinit(): i64 { tx_param_init(g_V, g_T, g_C, g_F, 3); return tx_fwd(g_tok, g_V, g_T, g_C, g_F); }
 
 # 1 when every element of p[0..n) is NaN (f64_eq(v, v) is 0 only for NaN)
 fn all_nan(p, n): i64 {
@@ -1056,6 +1113,124 @@ fn main() {
     assert(child_exit(&sc_block_f) == 1, "guard: block_fwd refuses an F other than blk_init's");
     assert(child_exit(&sc_sgd_v) == 1, "guard: tx_sgd refuses a V other than tx_init's");
     assert(child_exit(&sc_pack_dims) == 1, "guard: tx_pack refuses dims other than the model's");
+
+    test_group("1.2.0 packed-model serialization (tx_pack_serialize / tx_pack_deserialize)");
+    # (a) the load's memory bound: tx_model_alloc_bytes is exactly what the inits allocate
+    var am_cfg = 0;
+    while (am_cfg < 2) {
+        var zaV = 6; var zaT = 4; var zaC = 4; var zaF = 8;
+        if (am_cfg == 1) { zaV = 40; zaT = 6; zaC = 32; zaF = 48; }
+        var a0 = alloc_used();
+        tx_init(zaV, zaT, zaC, zaF); tx_int_init(zaV, zaT, zaC, zaF); tx_pack_init(zaV, zaT, zaC, zaF);
+        assert(tx_model_alloc_bytes(zaV, zaT, zaC, zaF) == alloc_used() - a0,
+          "1.2.0: tx_model_alloc_bytes == the bytes tx_init + tx_int_init + tx_pack_init allocate");
+        am_cfg = am_cfg + 1;
+    }
+    assert(tx_model_alloc_bytes(0, 4, 4, 8) == (0 - 1), "1.2.0: tx_model_alloc_bytes refuses a dim of 0");
+    assert(tx_model_alloc_bytes(6, 4, 1048577, 8) == (0 - 1), "1.2.0: tx_model_alloc_bytes refuses a dim past 2^20");
+
+    # (b) round trip: a TRAINED model, then a wide one (C = 20, F = 40: K = 20 and 40 put a
+    # 16-lane span AND a tail in every layer, so the recomputed wsum must stop at K16), each
+    # served after its in-memory state is overwritten
+    var rt_cfg = 0;
+    while (rt_cfg < 2) {
+        var rV = ciV; var rT = ciT; var rC = ciC; var rF = ciF;
+        if (rt_cfg == 1) { rV = 40; rT = 6; rC = 20; rF = 40; }
+        var rst = t_alloc(2); var rtok = t_alloc(rT); var rtgt = t_alloc(rT); var rti = 0;
+        while (rti < rT) {
+            store64(rtok + rti * 8, (rti * 7 + 1) % rV); store64(rtgt + rti * 8, (rti * 7 + 2) % rV);
+            rti = rti + 1;
+        }
+        tx_train(rtok, rtgt, rV, rT, rC, rF, 40, 11 + rt_cfg, rst);
+        tx_int_init(rV, rT, rC, rF); tx_pack_init(rV, rT, rC, rF); tx_pack(rV, rT, rC, rF);
+        g_tok_s = rtok;
+        tx_fwd_packed(rtok, rV, rT, rC, rF);
+        g_ref = t_alloc(rT * rV); t_copy(g_ref, ki_logits, rT * rV);
+        var rn = tx_pack_serial_bytes();
+        var rbuf = alloc(rn + 64); var rbuf2 = alloc(rn + 64);
+        assert(tx_pack_serialize(rbuf, rn) == rn, "1.2.0: tx_pack_serialize writes tx_pack_serial_bytes() bytes");
+        tx_pack_serialize(rbuf2, rn);
+        assert(same_bytes(rbuf, rbuf2, rn) == 1, "1.2.0: serializing twice gives the same bytes");
+        tx_init(rV + 3, rT + 1, rC + 4, rF + 4); tx_param_init(rV + 3, rT + 1, rC + 4, rF + 4, 99);   # overwrite
+        assert(tx_pack_deserialize(rbuf, rn, 1 << 40) == 0,
+          "1.2.0: tx_pack_deserialize loads what tx_pack_serialize wrote");
+        assert(serves_ref(rV, rT, rC, rF) == 1,
+          "1.2.0: the loaded model serves bit-identically to the live packed model");
+        tx_fwd_packed(rtok, rV, 2, rC, rF);
+        var rpf = 1; var rpi = 0;
+        while (rpi < 2 * rV) { if (tget(ki_logits, rpi) != tget(g_ref, rpi)) { rpf = 0; } rpi = rpi + 1; }
+        assert(rpf == 1, "1.2.0: the loaded model serves a prefix's rows bit for bit");
+        tx_pack_serialize(rbuf2, rn);
+        assert(same_bytes(rbuf, rbuf2, rn) == 1,
+          "1.2.0: re-serializing the loaded model gives the same bytes (canonical)");
+        rt_cfg = rt_cfg + 1;
+    }
+
+    # (c) every status code, on a valid artifact mutated one field at a time. C = 3 so the
+    # 9-weight attention layers end mid-byte: there are padding BITS as well as bytes.
+    var zeV = 5; var zeT = 3; var zeC = 3; var zeF = 5;
+    var art = make_artifact(zeV, zeT, zeC, zeF, 21); var an = g_art_n;
+    var need = tx_model_alloc_bytes(zeV, zeT, zeC, zeF);
+    var big = 1 << 40;
+    assert(tx_pack_deserialize(art, an, need) == 0, "1.2.0: max_bytes equal to the need loads");
+    var m = art_copy(art, an);
+    assert(tx_pack_deserialize(m, an - 1, big) == pk_err_length(), "1.2.0: a buffer one byte short -> pk_err_length");
+    assert(tx_pack_deserialize(m, an + 8, big) == pk_err_length(), "1.2.0: trailing bytes -> pk_err_length");
+    assert(tx_pack_deserialize(m, 10, big) == pk_err_length(), "1.2.0: shorter than a header -> pk_err_length");
+    store8(m, 0x55);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_magic(), "1.2.0: a wrong magic -> pk_err_magic");
+    m = art_copy(art, an); store64(m + 8, 2);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_version(), "1.2.0: format version 2 -> pk_err_version");
+    m = art_copy(art, an); store64(m + 56, 1);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_header(), "1.2.0: a nonzero flags word -> pk_err_header");
+    m = art_copy(art, an); store64(m + 24, 0);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_header(), "1.2.0: V = 0 -> pk_err_header");
+    m = art_copy(art, an); store64(m + 40, 1048577);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_header(), "1.2.0: C = 2^20 + 1 -> pk_err_header");
+    m = art_copy(art, an); store64(m + 16, an + 8);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_length(), "1.2.0: a length field that disagrees -> pk_err_length");
+    m = art_copy(art, an); store64(m + 32, zeT + 1);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_length(), "1.2.0: dims that imply another size -> pk_err_length");
+    assert(tx_pack_deserialize(art, an, need - 1) == pk_err_too_big(), "1.2.0: max_bytes one short -> pk_err_too_big");
+    m = art_copy(art, an); store8(m + 100, load8(m + 100) ^ 4);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_checksum(), "1.2.0: one flipped payload bit -> pk_err_checksum");
+    m = art_copy(art, an); store8(m + 72, load8(m + 72) | 3); art_fix(m, an);       # weight 0 of layer 0 := code 3
+    assert(tx_pack_deserialize(m, an, big) == pk_err_weights(), "1.2.0: a weight code of 3 -> pk_err_weights");
+    m = art_copy(art, an); store8(m + 74, load8(m + 74) | 0x80); art_fix(m, an);    # bits past the 9th code
+    assert(tx_pack_deserialize(m, an, big) == pk_err_weights(), "1.2.0: a nonzero padding bit -> pk_err_weights");
+    m = art_copy(art, an); store8(m + 79, 1); art_fix(m, an);                        # a padding byte
+    assert(tx_pack_deserialize(m, an, big) == pk_err_weights(), "1.2.0: a nonzero padding byte -> pk_err_weights");
+    m = art_copy(art, an); store64(m + 64, f64_neg(f64_from(1))); art_fix(m, an);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_gamma(), "1.2.0: a negative gamma -> pk_err_gamma");
+    m = art_copy(art, an); store64(m + 64, f64_div(f64_from(0), f64_from(0))); art_fix(m, an);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_gamma(), "1.2.0: a NaN gamma -> pk_err_gamma");
+    var pofs = an - 8 - 8 * (zeV * zeC + zeT * zeC + 3 * zeC + zeV);                      # first f64 parameter
+    m = art_copy(art, an); store64(m + pofs, f64_div(f64_from(1), f64_from(0))); art_fix(m, an);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_param(), "1.2.0: an infinite embedding -> pk_err_param");
+    m = art_copy(art, an); store64(m + an - 16, f64_div(f64_from(0), f64_from(0))); art_fix(m, an);
+    assert(tx_pack_deserialize(m, an, big) == pk_err_param(), "1.2.0: a NaN head bias -> pk_err_param");
+    assert(serves_ref(zeV, zeT, zeC, zeF) == 1,
+      "1.2.0: after 19 refused loads the loaded model still serves bit-identically");
+    # the encoder's own refusals
+    var small = alloc(an + 8); store8(small, 7);
+    assert(tx_pack_serialize(small, an - 1) == (0 - 1), "1.2.0: tx_pack_serialize with cap < size -> -1");
+    assert(load8(small) == 7, "1.2.0: ... and writes nothing");
+    var keep = tget(tx_bhead, 0);
+    tset(tx_bhead, 0, f64_div(f64_from(0), f64_from(0)));
+    assert(tx_pack_serialize(small, an) == (0 - 2), "1.2.0: tx_pack_serialize refuses a NaN parameter (-2)");
+    tset(tx_bhead, 0, keep);
+
+    # (d) a loaded model has no latent weights: the paths that read them refuse it
+    tx_pack_deserialize(art, an, big);
+    g_V = zeV; g_T = zeT; g_C = zeC; g_F = zeF; g_tok = g_tok_s;
+    g_tgt = t_alloc(zeT); t_copy(g_tgt, g_tok_s, zeT);
+    assert(child_exit(&sc_po_serve) == 0, "1.2.0: a loaded model serves (tx_fwd_packed)");
+    assert(child_exit(&sc_po_fwd) == 1, "1.2.0 guard: tx_fwd refuses a loaded model");
+    assert(child_exit(&sc_po_fwdq) == 1, "1.2.0 guard: tx_fwd_q refuses a loaded model");
+    assert(child_exit(&sc_po_bwd) == 1, "1.2.0 guard: tx_bwd refuses a loaded model");
+    assert(child_exit(&sc_po_sgd) == 1, "1.2.0 guard: tx_sgd refuses a loaded model");
+    assert(child_exit(&sc_po_pack) == 1, "1.2.0 guard: tx_pack refuses a loaded model (it would pack zero latents)");
+    assert(child_exit(&sc_po_reinit) == 0, "1.2.0: after tx_param_init the model is ordinary again");
 
     return assert_summary();
 }

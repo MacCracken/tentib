@@ -79,7 +79,7 @@ jobs:
         # entry points main.cyr / test.cyr hold only main and consumer hooks.)
         run: |
           fail=0
-          for f in src/ternary.cyr src/bitlinear.cyr src/layers.cyr src/model.cyr src/block.cyr src/kernel.cyr src/gpu.cyr; do
+          for f in src/ternary.cyr src/bitlinear.cyr src/layers.cyr src/model.cyr src/block.cyr src/kernel.cyr src/gpu.cyr src/serial.cyr; do
             out=$(cyrius doc --check "$f" 2>&1)
             echo "$f: $(echo "$out" | tail -1)"
             if echo "$out" | grep -q 'undocumented:'; then echo "$out"; fail=1; fi
@@ -104,7 +104,8 @@ jobs:
         run: cyrius test
 
       - name: Example + GPU program
-        # quickstart self-checks (exit 0 = packed serving == the scalar kernel);
+        # quickstart self-checks (exit 0 = packed serving == the scalar kernel, and the
+        # serialized model reloads and serves the same logits);
         # gpumm on a host without #82 exits 96 (byte-identical, 0 GPU tiles).
         run: |
           cyrius build examples/quickstart.cyr build/quickstart
@@ -196,7 +197,7 @@ jobs:
         run: |
           MISSING=0
           for doc in README.md CHANGELOG.md VERSION LICENSE SECURITY.md CONTRIBUTING.md CLAUDE.md cyrius.cyml \
-                     docs/api.md docs/benchmarks.md docs/development/state.md; do
+                     docs/api.md docs/benchmarks.md docs/development/state.md docs/architecture/001-packed-model-format.md; do
             if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
           done
           exit $MISSING

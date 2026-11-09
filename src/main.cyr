@@ -12,6 +12,7 @@ include "src/model.cyr"      # softmax_xent / lm_train — minimal trainable ter
 include "lib/akshara.cyr"    # corpus_set / gd_ld — sovereign tokenizer (M2 bite-F)
 include "src/block.cyr"      # the full transformer block + tx_train (M2 bite-E)
 include "src/kernel.cyr"     # the matmul-free integer inference kernel (M3)
+include "src/serial.cyr"    # tx_pack_serialize / tx_pack_deserialize — packed-model bytes (1.2.0)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 # The demo's printer: a NUL-terminated string to stdout.
@@ -231,6 +232,26 @@ fn main() {
     var tt2 = now_ns();
     puts("    forward latency: integer kernel = "); fmt_int((tt1 - tt0) / nit);
     puts(" ns ; weight-only f64 = "); fmt_int((tt2 - tt1) / nit); puts(" ns\n");
+
+    # ---- 1.2.0: the packed model as bytes — serialize, reload, serve ----
+    puts("\n1.2.0 the packed model as bytes (serialize -> deserialize -> tx_fwd_packed):\n");
+    tx_pack_init(cV, cT, 4, 8);
+    tx_pack(cV, cT, 4, 8);
+    tx_fwd_packed(ctok, cV, cT, 4, 8);
+    var sref = t_alloc(ciTV); t_copy(sref, ki_logits, ciTV);
+    var sn = tx_pack_serial_bytes();
+    var sbuf = alloc(sn);
+    tx_pack_serialize(sbuf, sn);
+    var src = tx_pack_deserialize(sbuf, sn, tx_model_alloc_bytes(cV, cT, 4, 8));
+    tx_fwd_packed(ctok, cV, cT, 4, 8);
+    var sok = 1; var si = 0;
+    while (si < ciTV) { if (tget(ki_logits, si) != tget(sref, si)) { sok = 0; } si = si + 1; }
+    puts("    artifact = "); fmt_int(sn);
+    puts(" bytes (the ternary weights at 2 bits each, plus the f64 embeddings,\n");
+    puts("    gains and head bias); load status = "); fmt_int(src);
+    puts("; the reloaded model serves bit-identically: ");
+    if (sok == 1) { puts("yes"); } else { puts("NO"); }
+    _putc(10);
     return 0;
 }
 

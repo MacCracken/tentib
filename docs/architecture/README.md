@@ -6,4 +6,4 @@ Not decisions (those live in [`../adr/`](../adr/)) and not guides (those live in
 
 ## Items
 
-_Empty. Add a numbered entry (`001-kebab-case-title.md`) the first time the code has a non-obvious invariant a reader can't derive. Do not write entries for decisions — those are ADRs._
+- [001 — The packed-model format (version 1)](001-packed-model-format.md): the bytes `tx_pack_serialize` writes and `tx_pack_deserialize` reads, the decoder's checks and status codes, and the invariants (canonical, bit-identical serving, bounded memory).

@@ -59,9 +59,11 @@ scratch is gone: the bias-free projections pass `db = 0`.)
 `t_alloc` is rosnet's bump allocator — **it never frees**. The audit walked every
 path; the invariant is:
 
-- **Allocation happens ONLY in** `blk_init` / `tx_init` / `tx_int_init` (the
-  `*_init` pattern) **and at the top of the one-shot trainers** (`lm_train`,
-  `tx_train` — which begins with `tx_init`). Each such call allocates fresh
+- **Allocation happens ONLY in** `blk_init` / `tx_init` / `tx_int_init` /
+  `tx_pack_init` (the `*_init` pattern), **at the top of the one-shot trainers**
+  (`lm_train`, `tx_train` — which begins with `tx_init`), and **in a successful
+  `tx_pack_deserialize`** (1.2.0: it runs `tx_init` + `tx_int_init` + `tx_pack_init`,
+  exactly `tx_model_alloc_bytes(V, T, C, F)` bytes). Each such call allocates fresh
   buffers; call them a **bounded number of times per process**.
 - **Every forward, backward, and kernel path is allocation-free** and reuses the
   init-owned (or caller-passed) scratch: `tx_fwd`, `tx_fwd_q` (all modes),
@@ -153,12 +155,35 @@ self-checking — running it is a test).
 Internal (not frozen): `bl_forward_pk`, `attn_sublayer_pk`, `mlp_sublayer_pk`,
 `pk_*` store globals.
 
+## 1.2.0 — packed-model serialization (`src/serial.cyr`, additive)
+
+A packed model as bytes: write the live packed store with `tx_pack_serialize`, and
+later (another process) load it with `tx_pack_deserialize` and serve it through
+`tx_fwd_packed`, bit-identically. tentib does no file I/O; the consumer owns the
+bytes. The format, every check the decoder makes, and its invariants are specified
+in [`architecture/001-packed-model-format.md`](architecture/001-packed-model-format.md).
+Worked example: [`examples/quickstart.cyr`](../examples/quickstart.cyr) step 5.
+
+| symbol | contract | tested by |
+|--------|----------|-----------|
+| `tx_pack_serial_bytes()` → i64 | bytes `tx_pack_serialize` writes for the live packed model (fails loud before `tx_pack` / a load) | suite, bench, example, demo |
+| `tx_pack_serialize(buf, cap)` → i64 | write it to `buf`; returns the bytes written, **−1** if `cap` is too small, **−2** if the model holds a non-finite parameter or an invalid γ (nothing written in either case) | suite, fuzz, bench, example, demo |
+| `tx_pack_deserialize(buf, n, max_bytes)` → i64 | load a model from `buf[0..n)`, allocating at most `max_bytes`; returns **0**, or a negative status below, in which case nothing was allocated or changed | suite, fuzz, bench, example, demo |
+| `tx_model_alloc_bytes(V, T, C, F)` → i64 | the bytes a model of these dims allocates (the four `*_init` calls; what a load allocates); −1 for a dim outside [1, 2²⁰] | suite (against `alloc_used()`) |
+| `pk_err_length()` … `pk_err_param()` → i64 | the status codes: `length` −1, `magic` −2, `version` −3, `header` −4, `checksum` −5, `too_big` −6, `weights` −7, `gamma` −8, `param` −9 | suite (each one), fuzz |
+
+**Decoding is an untrusted-input surface.** Bad *data* is a status code, never a
+`guard()` exit; the memory a load may take is the caller's `max_bytes`. A loaded
+model is **packed-only**: it has no latent weights, so `tx_fwd`, `tx_fwd_q`,
+`tx_bwd`, `tx_sgd` and `tx_pack` fail loud on it, while `tx_fwd_packed` serves any
+T up to the stored T. `tx_init` or `tx_param_init` makes an ordinary model again.
+
 ## Documented output cells (module globals, read-only for consumers)
 
 | global | written by | contents |
 |--------|-----------|----------|
 | `tx_logits` | `tx_fwd` / `tx_loss` | T×V f64 logits (f64 path) |
-| `ki_logits` | `tx_fwd_q` | T×V f64 logits (integer paths) |
+| `ki_logits` | `tx_fwd_q` / `tx_fwd_packed` | T×V f64 logits (integer paths) |
 | `mlp_out` | `block_fwd` | T×C block output (feeds the final norm) |
 
 ## Performance contract

@@ -40,24 +40,11 @@ report the small-scale quality gap, never hide it).
 - The ordering below is proposed. Each version is an independently cuttable bite; adjust
   granularity with the maintainer.
 
-## 1.2.x — a model you can ship
+## 1.2.x — maintenance on the shipped serialization
 
-### 1.2.0 — packed-model serialization
-
-**Goal.** A trained model a consumer can serve without retraining in-process. Today a
-model lives only in module globals; nothing persists it.
-
-**Scope.** Additive: `tx_pack_serialize(buf, cap)` → bytes written and
-`tx_pack_deserialize(buf, n)` → status, over a versioned format (magic, format version,
-V / T / C / F, per-layer γ + `wsum` + i8 weights, the f64 embeddings / gains / bias, and a
-checksum). tentib still does no file I/O: the consumer owns the bytes (the akshara
-hook pattern). **Decoding is the first untrusted-input surface**, so it validates every
-field (dims in range, sizes against `n`, ternary bytes, finite γ, checksum) and returns a
-status code. Bad *data* is a return code; `guard()` stays for programmer errors.
-
-**Gate.** Serialize → deserialize → serve is bit-identical to the live packed serve;
-truncated, corrupted and oversized inputs are refused with codes (a decoder fuzz target);
-`SECURITY.md` and `api.md` updated.
+1.2.0 shipped packed-model serialization (`tx_pack_serialize` / `tx_pack_deserialize`,
+[`../architecture/001-packed-model-format.md`](../architecture/001-packed-model-format.md));
+see the CHANGELOG. What remains in the 1.2.x line is maintenance.
 
 ### Maintenance — 1.2.x patches and onward
 
@@ -80,8 +67,9 @@ a distlib bundle today; tentib has none.
 
 **Scope.** A `[lib]` module list in `cyrius.cyml` and `cyrius distlib` →
 `dist/tentib.cyr` (+ the `.deps` sidecar), the rosnet / akshara shape; a CI drift check and
-a release asset. A consumer-shaped example that loads a 1.2.0 model and serves it through
-`tx_fwd_packed`. The hoosh / murti integration itself lands in their repos.
+a release asset. A consumer-shaped example that loads a serialized model (1.2.0) from a
+file the consumer reads and serves it through `tx_fwd_packed`. The hoosh / murti
+integration itself lands in their repos.
 
 **Gate.** The bundle compiles standalone under the consumers' toolchain pin; the drift
 check passes; the example self-checks.
@@ -95,7 +83,11 @@ only.
 **Scope.** Additive: a kernel that serves from 2-bit codes, or from 5 trits per byte
 (≈1.6 bits, a `tpack3` / `tunpack3` codec), unpacking in-register or through lookup
 tables in the bitnet.cpp TL1 / TL2 / I2_S shape (ported, never copied); a packed-store
-variant of `tx_pack` / `tx_fwd_packed` that uses it.
+variant of `tx_pack` / `tx_fwd_packed` that uses it. With it, a **serving-only
+allocation for loaded models**: `tx_pack_deserialize` runs the full `tx_init` today, so a
+load also allocates the latent weights, their gradients and the training scratch
+(12,192,728 bytes for the 357,504-byte bench artifact). The artifact format can stay at
+version 1; only what a load allocates changes.
 
 **Gate.** Bit-identical to the scalar kernel (suite + fuzz property P1 extended to the
 new kernel); benchmarked against the i8 path at the four layer sizes and whole-model,

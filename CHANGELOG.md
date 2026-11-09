@@ -4,6 +4,105 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-11-09
+
+**Packed-model serialization.** A trained, packed model can now be written to bytes and
+loaded back, in another process, to serve bit-identically, with no latent weights and no
+retraining. The release is additive: no frozen signature changed. On valid input every
+existing output is bit-identical to 1.1.2; the 333,281-value golden dump is byte-identical.
+Toolchain and deps are unchanged (cyrius 6.7.18; tyche 1.2.2, rosnet 1.4.1, akshara 1.1.2).
+
+### Added
+
+- **`src/serial.cyr`** adds the following functions:
+  - `tx_pack_serial_bytes()` and `tx_pack_serialize(buf, cap)` write the live packed model;
+  - `tx_pack_deserialize(buf, n, max_bytes)` loads one;
+  - `tx_model_alloc_bytes(V, T, C, F)` gives the memory a model of those dims allocates;
+  - `pk_err_*()` return the nine status codes.
+
+  tentib still does no file I/O; the consumer owns the bytes. The format is specified in
+  [`docs/architecture/001-packed-model-format.md`](docs/architecture/001-packed-model-format.md).
+  - **What it holds:** the 7 BitLinears' γ and their ternary weights at **2 bits each**, in
+    the serving layout, plus the f64 token / position embeddings, the three RMSNorm gains and
+    the head bias. The SIMD kernel's `wsum` offsets are recomputed at load, not stored. At
+    the bench config the artifact is 357,504 bytes: 57,344 of weights and 300,032 of f64
+    parameters.
+  - **Decoding is an untrusted-input surface.** Every field is checked before anything is
+    allocated or changed:
+    - the length, magic, version and flags;
+    - each dim, in [1, 2²⁰];
+    - the exact length the dims imply;
+    - the memory the load needs, against the caller's `max_bytes`;
+    - the FNV-1a checksum;
+    - every γ (finite, non-negative), every weight code (no 3, zero padding), and every
+      f64 parameter (finite).
+
+    Bad data returns a status code (−1 … −9), never a `guard()` exit, and a refused load
+    leaves the current model serving. The memory cap exists because rosnet's `t_alloc`
+    exits the process when an allocation fails, so a header must not be able to ask for
+    more than the consumer allowed. The checksum detects corruption; it does not
+    authenticate.
+  - **Canonical:** any accepted buffer re-serializes to the same bytes, and the encoder
+    writes only buffers the decoder accepts. It refuses (−2) a model holding a non-finite
+    parameter.
+  - **A loaded model is packed-only.** It has no latent weights, so `tx_fwd`, `tx_fwd_q`,
+    `tx_bwd`, `tx_sgd` and `tx_pack` fail loud on it rather than compute with zeros.
+    `tx_fwd_packed` serves it at any T up to the stored T, and `tx_init` or
+    `tx_param_init` makes it an ordinary model again.
+- **Suite 139 → 186 assertions**:
+  - the allocation formula equals `alloc_used()` at two configs;
+  - round trips of a trained model and of a wide one (C = 20, F = 40, so every layer has a
+    16-lane span and a tail), each served bit-identically after the in-memory model is
+    overwritten, served at a prefix, and re-serialized to the same bytes;
+  - **every status code** from a real mutation, with the checksum recomputed to reach the
+    deeper checks, and C = 3 so padding bits exist;
+  - 19 refused loads that leave the model serving;
+  - the encoder's −1 and −2;
+  - the five packed-only guards in forked children.
+- **Fuzz P1–P8 → P1–P10:**
+  - **P9** round-trips random small models through the bytes.
+  - **P10** sends mutated artifacts to the decoder: bit flips, truncation and extension,
+    header words, body bytes, γ and parameter values (NaN and Inf among them), and memory
+    budgets below the need. The decoder must return a documented code, never exit, leave
+    a refused load without effect, and re-serialize an accepted buffer canonically; an
+    independent oracle checks the loaded values. All ten outcomes (0 and −1 … −9) occur in
+    a run.
+- **Mutation testing** of `src/serial.cyr`:
+
+  | injected defect | caught by |
+  |---|---|
+  | a code of 3 accepted | suite and fuzz |
+  | `wsum` recomputed over all K | suite and fuzz |
+  | padding bits unchecked | suite and fuzz |
+  | a negative γ accepted | suite and fuzz |
+  | the memory budget off by 8 bytes | suite |
+  | the encoder writing −1 as +1 | suite and fuzz |
+
+- `examples/quickstart.cyr` step 5 serializes, reloads under a memory budget, and requires
+  the same logits bit for bit. The demo prints the artifact size and the reload check.
+  The bench gains `serialize` (3.6 ms) and `deserialize` (6.4 ms, which allocates
+  12.2 MB) rows at the bench config, and `scripts/bench-history.sh` parses them.
+
+### Fixed
+
+- **The fuzz harness's random stream repeated.** `tx_param_init` reseeds tyche's global
+  stream, and the harness drew its own random choices from that same stream. So each
+  model init restarted the draws: with P9's constant seed the decoder mutations repeated
+  every 16 rounds, and P8's model rounds cut the entropy to about 20 bits. Model inits in
+  the harness now save and restore `_rng_state`.
+
+### Changed
+
+- `docs/api.md` adds the 1.2.0 section (symbols, status codes, the packed-only rule).
+  `SECURITY.md` covers artifacts as untrusted input. CI checks `src/serial.cyr`'s docs and
+  that the format doc exists. The roadmap's 1.2.0 item is shipped, and its 1.4.x item adds
+  a serving-only allocation for loaded models, since today a load also allocates training
+  buffers.
+
+Measured on one binary per run, pinned to core 4, median of three runs. Alternating A/B
+runs against 1.1.2's bench show no change in the forward, serving, packing or training
+rows.
+
 ## [1.1.2] — 2026-11-09
 
 The P(-1) hardening, optimization and repair sweep, recorded in

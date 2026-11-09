@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — 1.x STABLE (1.1.2: 139 assertions + a property fuzzer, x86_64 and aarch64; API frozen for the 1.x series)
+## Status — 1.x STABLE (1.2.0: 186 assertions + a property fuzzer, x86_64 and aarch64; API frozen for the 1.x series)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -81,6 +81,12 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   path; the quantizer, packer and activation quant are faster with the same bits
   (golden-dump verified); every guard's fail path is tested, and a real property
   fuzzer runs on both targets in CI.
+- **Packed-model serialization (v1.2.0)** — `tx_pack_serialize` writes a trained,
+  packed model as bytes (2-bit ternary weights + the f64 embeddings, gains and bias);
+  `tx_pack_deserialize` loads them in another process and `tx_fwd_packed` serves the
+  same logits bit for bit. The decoder treats the bytes as hostile: every field is
+  checked before anything is allocated, bad data is a status code, the caller caps the
+  memory. Format: [`docs/architecture/001-packed-model-format.md`](docs/architecture/001-packed-model-format.md).
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39

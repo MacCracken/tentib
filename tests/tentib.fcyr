@@ -17,6 +17,14 @@
 #   P7  with the scale from bl_act_quant, the activation STE mask is the identity
 #   P8  (every 8th round) a small whole model: integer modes 0 / 2 and packed
 #       serving agree bit for bit, and serving a prefix reproduces the prefix rows
+#   P9  (every 16th round, 1.2.0) that model survives the bytes round trip: overwrite the
+#       in-memory model, deserialize, serve bit for bit; re-serializing gives the same bytes
+#   P10 (every 2nd round, 1.2.0) the decoder on a mutated artifact — bit flips,
+#       truncation / extension, header words, body bytes, gammas, parameters (the last
+#       four with the checksum recomputed, to reach the field checks; NaN / Inf among
+#       the values), and one round in four a memory budget below the need: it returns 0
+#       or a documented code and never exits; a refused load leaves the current model
+#       serving bit-identically; an accepted buffer re-serializes to the same bytes
 #
 # Deterministic: the seed sequence is fixed, so a failure names a reproducible
 # round. Exit 0 = every property held; exit 1 = a property failed (message on
@@ -31,6 +39,7 @@ include "src/model.cyr"
 include "lib/akshara.cyr"
 include "src/block.cyr"
 include "src/kernel.cyr"
+include "src/serial.cyr"  # tx_pack_serialize / tx_pack_deserialize — packed-model bytes (1.2.0)
 include "src/gpu.cyr"
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
@@ -61,6 +70,16 @@ fn rint(lo, hi): i64 { return lo + (rng_u64() & 0x7FFFFFFFFFFFFFFF) % (hi - lo +
 
 # 1 when v is NaN.
 fn is_nan(v): i64 { return 1 - f64_eq(v, v); }
+
+# tx_param_init reseeds tyche's global stream (rng_seed), which the fuzz driver also
+# draws from. Run it with the driver's state saved and restored (_rng_state is tyche's
+# documented checkpoint hook), so a model init never makes later rounds repeat.
+fn fz_param_init(V, T, C, F, seed): i64 {
+    var keep = _rng_state;
+    tx_param_init(V, T, C, F, seed);
+    _rng_state = keep;
+    return 0;
+}
 
 # 1 when a[0..n) and b[0..n) hold the same bits.
 fn same(a, b, n): i64 {
@@ -222,11 +241,144 @@ fn layer_round(): i64 {
     return 0;
 }
 
-# One random small model: property P8.
+# 1 when a[0..n) and b[0..n) hold the same bytes.
+fn same_b(a, b, n): i64 {
+    var i = 0;
+    while (i < n) { if (load8(a + i) != load8(b + i)) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# P9: the live packed model (whose mode-0 logits over tok are l0) through the bytes.
+fn serial_round(tok, l0, V, T, C, F): i64 {
+    var n = tx_pack_serial_bytes();
+    var a = alloc(n + 8); var b = alloc(n + 8);
+    if (tx_pack_serialize(a, n) != n) { fail("P9 tx_pack_serialize size"); }
+    tx_init(V + 1, T, C, F); fz_param_init(V + 1, T, C, F, 1);     # overwrite
+    if (tx_pack_deserialize(a, n, 1 << 30) != 0) { fail("P9 a serialized model did not load"); }
+    tx_fwd_packed(tok, V, T, C, F);
+    if (same(l0, ki_logits, T * V) == 0) { fail("P9 the loaded model serves differently"); }
+    tx_pack_serialize(b, n);
+    if (same_b(a, b, n) == 0) { fail("P9 re-serialized bytes differ"); }
+    return 0;
+}
+
+# P10 state: one valid artifact of fixed small dims, and zero-id tokens to serve with.
+var fz_art = 0; var fz_art_n = 0; var fz_tok0 = 0;
+var fz_V = 7; var fz_T = 4; var fz_C = 5; var fz_F = 9;
+
+# Build P10's base artifact.
+fn decoder_setup(): i64 {
+    tx_init(fz_V, fz_T, fz_C, fz_F); fz_param_init(fz_V, fz_T, fz_C, fz_F, 4242);
+    tx_int_init(fz_V, fz_T, fz_C, fz_F); tx_pack_init(fz_V, fz_T, fz_C, fz_F); tx_pack(fz_V, fz_T, fz_C, fz_F);
+    fz_art_n = tx_pack_serial_bytes();
+    fz_art = alloc(fz_art_n + 8);
+    tx_pack_serialize(fz_art, fz_art_n);
+    fz_tok0 = t_alloc(64);                                 # id 0 is valid for any V
+    return 0;
+}
+
+# Byte offset of layer i's gamma in an artifact of P10's dims.
+fn fz_gamma_off(i): i64 {
+    var o = 64; var j = 0;
+    while (j < i) {
+        o = o + 8 + _pk_code_bytes(_pk_layer_k(j, fz_C, fz_F) * _pk_layer_n(j, fz_C, fz_F, fz_V));
+        j = j + 1;
+    }
+    return o;
+}
+
+# Serve the current model (whatever it is) over zero-id tokens; logits into out.
+fn fz_serve(out): i64 {
+    tx_fwd_packed(fz_tok0, tx_V0, tx_T0, tx_C0, tx_F0);
+    t_copy(out, ki_logits, tx_T0 * tx_V0);
+    return 0;
+}
+
+# A random 64-bit pattern, or (one time in two) an exact NaN, +Inf or -Inf.
+fn fz_bits(): i64 {
+    var pick = rint(0, 5);
+    if (pick == 0) { return 0x7FF8000000000000; }
+    if (pick == 1) { return 0x7FF0000000000000; }
+    if (pick == 2) { return f64_neg(f64_div(f64_from(1), f64_from(0))); }
+    return rng_u64();
+}
+
+# P10: one mutation of the base artifact through the decoder.
+fn decoder_round(): i64 {
+    var n = fz_art_n;
+    var m = alloc(n + 64);
+    var i = 0;
+    while (i < n) { store8(m + i, load8(fz_art + i)); i = i + 1; }
+    while (i < n + 64) { store8(m + i, rint(0, 255)); i = i + 1; }
+    var len = n;
+    var kind = rint(0, 5);
+    if (kind == 0) {
+        var f = rint(1, 4);
+        while (f > 0) { var pos = rint(0, n - 1); store8(m + pos, load8(m + pos) ^ (1 << rint(0, 7))); f = f - 1; }
+    }
+    if (kind == 1) { len = rint(0, n + 40); }
+    if (kind == 2) {
+        var w = rint(0, 7); var orig = load64(m + w * 8); var v = rng_u64();
+        var pick = rint(0, 6);
+        if (pick == 0) { v = 0; }
+        if (pick == 1) { v = 1; }
+        if (pick == 2) { v = 0 - 1; }
+        if (pick == 3) { v = 1048576; }
+        if (pick == 4) { v = 1048577; }
+        if (pick == 5) { v = orig + 1; }
+        store64(m + w * 8, v);
+        store64(m + n - 8, _pk_fnv(m, n - 8));
+    }
+    if (kind == 3) {
+        store8(m + rint(64, n - 9), rint(0, 255));
+        store64(m + n - 8, _pk_fnv(m, n - 8));
+    }
+    if (kind == 4) {
+        store64(m + fz_gamma_off(rint(0, 6)), fz_bits());
+        store64(m + n - 8, _pk_fnv(m, n - 8));
+    }
+    if (kind == 5) {
+        var np = fz_V * fz_C + fz_T * fz_C + 3 * fz_C + fz_V;
+        store64(m + n - 8 - 8 * rint(1, np), fz_bits());
+        store64(m + n - 8, _pk_fnv(m, n - 8));
+    }
+    var before = t_alloc(tx_T0 * tx_V0);
+    fz_serve(before);
+    var cap = 1 << 26;                                     # one round in four: a budget below the need
+    if (rint(0, 3) == 0) { cap = rint(0, tx_model_alloc_bytes(fz_V, fz_T, fz_C, fz_F) - 1); }
+    var rc = tx_pack_deserialize(m, len, cap);
+    if ((rc > 0) | (rc < (0 - 9))) { fail("P10 a status outside the documented codes"); }
+    if (rc == 0) {
+        if (tx_pack_serial_bytes() != len) { fail("P10 an accepted buffer has a different length"); }
+        var re = alloc(len + 8);
+        tx_pack_serialize(re, len);
+        if (same_b(m, re, len) == 0) { fail("P10 an accepted buffer is not canonical"); }
+        # an independent oracle (not the decoder's own helpers): every loaded gamma is a
+        # finite non-negative f64, every loaded parameter finite
+        var gi = 0;
+        while (gi < 7) {
+            var gv = load64(pk_gamma + gi * 8);
+            if ((gv < 0) | (((gv >> 52) & 0x7FF) == 0x7FF)) { fail("P10 an accepted gamma is not a valid scale"); }
+            gi = gi + 1;
+        }
+        if ((f64_is_finite(tget(tx_tokemb, 0)) & f64_is_finite(tget(tx_bhead, fz_V - 1))) == 0) {
+            fail("P10 an accepted parameter is not finite");
+        }
+        var after_ok = t_alloc(tx_T0 * tx_V0);
+        fz_serve(after_ok);
+    } else {
+        var after = t_alloc(tx_T0 * tx_V0);
+        fz_serve(after);
+        if (same(before, after, tx_T0 * tx_V0) == 0) { fail("P10 a refused load changed the model"); }
+    }
+    return 0;
+}
+
+# One random small model: properties P8 and (every 16th round) P9.
 fn model_round(): i64 {
     var V = rint(2, 12); var T = rint(1, 8); var C = rint(1, 24); var F = rint(1, 40);
     tx_init(V, T, C, F);
-    tx_param_init(V, T, C, F, rint(1, 1000000));
+    fz_param_init(V, T, C, F, rint(1, 1000000));
     tx_int_init(V, T, C, F);
     var tok = t_alloc(T); var t = 0;
     while (t < T) { store64(tok + t * 8, rint(0, V - 1)); t = t + 1; }
@@ -241,6 +393,7 @@ fn model_round(): i64 {
     var Tp = rint(1, T);
     tx_fwd_packed(tok, V, Tp, C, F);
     if (same(l0, ki_logits, Tp * V) == 0) { fail("P8 prefix serve != prefix rows"); }
+    if ((fz_round % 16) == 0) { serial_round(tok, l0, V, T, C, F); }
     return 0;
 }
 
@@ -248,13 +401,15 @@ fn model_round(): i64 {
 fn main(): i64 {
     alloc_init();
     rng_seed(20261109);
+    decoder_setup();
     var rounds = 5000;
     while (fz_round < rounds) {
         layer_round();
         if ((fz_round % 8) == 0) { model_round(); }
+        if ((fz_round % 2) == 0) { decoder_round(); }
         fz_round = fz_round + 1;
     }
-    puts("fuzz: 5000 rounds, P1-P8 held\n");
+    puts("fuzz: 5000 rounds, P1-P10 held\n");
     return 0;
 }
 

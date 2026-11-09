@@ -47,3 +47,29 @@ date,version,commit,benchmark,time_ns
 2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"model PACKED serving (0.7.0)",2250594
 2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"model tx_pack (one-time)",3933950
 2026-11-09T22:40:29Z,1.1.2,fa88d3a+dirty,"model training step (f64)",22434891
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 128x128 branchy",101839
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 128x128 branchless",86275
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 128x128 simd",1687
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 128x128 rosnet-f64",7122
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 256x256 branchy",555770
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 256x256 branchless",354805
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 256x256 simd",4392
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 256x256 rosnet-f64",27292
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 512x512 branchy",2431264
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 512x512 branchless",1597920
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 512x512 simd",13482
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 512x512 rosnet-f64",95623
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 768x768 branchy",5449425
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 768x768 branchless",3337391
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 768x768 simd",25521
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"layer 768x768 rosnet-f64",218269
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"prep 768x768 tsimd_pack_w",3269738
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"prep 768x768 act_quant_int",4433
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model f64 weight-only",7234233
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model integer scalar",64078294
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model integer SIMD (0.4.1)",6190180
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model PACKED serving (0.7.0)",2246816
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model tx_pack (one-time)",3993664
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model training step (f64)",22135112
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model serialize",3622736
+2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model deserialize",6364100

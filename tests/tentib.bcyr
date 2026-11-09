@@ -20,6 +20,7 @@ include "src/model.cyr"      # softmax_xent (M2)
 include "lib/akshara.cyr"    # corpus_set / gd_ld (link dep for block.cyr)
 include "src/block.cyr"      # tx_init / tx_param_init / tx_fwd (M2)
 include "src/kernel.cyr"     # the matmul-free kernels incl. 0.4.1 SIMD (M3)
+include "src/serial.cyr"     # tx_pack_serialize / tx_pack_deserialize (1.2.0)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 # The harness's printer: a NUL-terminated string to stdout.
@@ -121,6 +122,9 @@ fn wm_simd(): i64 { return tx_fwd_q(2, wmtok, wmV, wmT, wmC, wmF); }
 fn wm_packed(): i64 { return tx_fwd_packed(wmtok, wmV, wmT, wmC, wmF); }
 var wmtgt = 0;
 var wmnlr = 0;
+var wmbuf = 0; var wmn = 0;
+# One timed call: write the live packed model to bytes (1.2.0).
+fn wm_ser(): i64 { return tx_pack_serialize(wmbuf, wmn); }
 # One SGD training step on the f64 path: zero grads, forward + loss, backward, update.
 fn wm_step(): i64 {
     tx_zero_grads(wmV, wmT, wmC, wmF);
@@ -173,6 +177,16 @@ fn wm_bench(V, T, C, F, seed, iters): i64 {
     wmnlr = f64_div(f64_from(0 - 1), f64_from(100));
     var tst = timed(&wm_step, 2, iters);
     puts("  training step (f64)    = "); fmt_int(tst); puts(" ns/step\n");
+    # The packed model as bytes (1.2.0). Each load allocates a whole model (the bump
+    # allocator never frees), so the load is timed over 3 calls, not `iters`.
+    wmn = tx_pack_serial_bytes(); wmbuf = alloc(wmn);
+    var tse = timed(&wm_ser, 2, iters);
+    var d0 = now_ns(); var di = 0;
+    while (di < 3) { tx_pack_deserialize(wmbuf, wmn, 1 << 40); di = di + 1; }
+    var tde = (now_ns() - d0) / 3;
+    puts("  serialize              = "); fmt_int(tse); puts(" ns/op  ("); fmt_int(wmn); puts(" bytes)\n");
+    puts("  deserialize            = "); fmt_int(tde); puts(" ns/op  (allocates ");
+    fmt_int(tx_model_alloc_bytes(V, T, C, F)); puts(" bytes)\n");
     return 0;
 }
 

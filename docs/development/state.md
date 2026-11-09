@@ -5,6 +5,17 @@
 
 ## Version
 
+**1.2.0** (2026-11-09): **packed-model serialization** (`src/serial.cyr`). A trained,
+packed model becomes bytes (`tx_pack_serialize`) that another process loads
+(`tx_pack_deserialize`) and serves bit-identically through `tx_fwd_packed`, with 2-bit
+weights in the artifact and no latent weights. Decoding is the first untrusted-input
+surface: every field is checked before anything is allocated, bad data is a status code
+(9 of them), the caller caps the memory, and the format is canonical (spec:
+[`../architecture/001-packed-model-format.md`](../architecture/001-packed-model-format.md)).
+Additive; the golden dump of every existing output is byte-identical to 1.1.2. Suite
+**186**; fuzz P1–P10 (P9 the round trip, P10 a decoder mutation fuzzer that reaches all
+ten outcomes).
+
 **1.1.2** (2026-11-09): the P(-1) hardening, optimization and repair sweep
 ([`docs/audit/2026-11-09-audit.md`](../audit/2026-11-09-audit.md)). 2 MEDIUM fixed: an
 out-of-range token id made `tx_bwd` write past `tx_dtokemb`, and `bl_ste_mask_x` zeroed the
@@ -24,7 +35,8 @@ carry the 1.1.1 and 1.1.2 numbers, and a full re-baseline is still open.
 
 Releases since 1.0.0: 1.0.1 (AGNOS GPU integer offload, `ternary_matmul_free_gpu`) ·
 1.0.2 (pin 6.5.27, deps to their 1.x freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20) ·
-1.1.0 (pin 6.7.9) · 1.1.1 (pin 6.7.18, latest deps) · 1.1.2 (P(-1) sweep).
+1.1.0 (pin 6.7.9) · 1.1.1 (pin 6.7.18, latest deps) · 1.1.2 (P(-1) sweep) ·
+1.2.0 (packed-model serialization).
 
 **1.0.0 — STABLE**, cut 2026-07-06 (user-named; user tags). The clean cut
 (tarka/prajna/anukūlana precedent): **no code change from 0.8.0** — all six v1.0
@@ -102,13 +114,18 @@ STE), **0.1.0** (M0 — ternary quantizer).
   the suite at ragged shapes since 1.1.2). Built by `programs/gpumm.cyr`.
 - `src/main.cyr` — demo driver (M0 quantizer · M1 BitLinear · M2 transformer-trains ·
   M3 matmul-free kernel · M3b branchless bench · M3c whole-model integer inference).
+- `src/serial.cyr` — **1.2.0 packed-model serialization**: `tx_pack_serial_bytes` /
+  `tx_pack_serialize` (the live packed store + the f64 embeddings, gains and bias → bytes,
+  2-bit weights), `tx_pack_deserialize(buf, n, max_bytes)` (validate everything, then
+  load; status codes `pk_err_*`), `tx_model_alloc_bytes` (what a load allocates). A
+  loaded model is packed-only (`tx_packed_only`, guarded in the latent-weight paths).
 - `src/test.cyr` — the `[build].test` stub (defines akshara's hooks).
 - `scripts/bench-history.sh` — builds the bench harness once, runs it pinned (core 4)
   RUNS times, appends the medians to `bench-history.csv` (1.1.2).
 
 ## Tests
 
-- `tests/tentib.tcyr` — **139/139** green (x86_64 and aarch64): rosnet smoke, M0 quantization, BitLinear
+- `tests/tentib.tcyr` — **186/186** green (x86_64 and aarch64): rosnet smoke, M0 quantization, BitLinear
   forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
@@ -130,16 +147,19 @@ STE), **0.1.0** (M0 — ternary quantizer).
   manual zero/loss/bwd/sgd quartet descends), and the **1.1.2 sweep group** (the
   activation-mask fix, NaN propagation, `absmean(·, 0)`, the GPU fallback at four
   ragged shapes, prefix serving, and 20 guard fail paths in forked children with two
-  exit-0 controls).
+  exit-0 controls), and the **1.2.0 serialization group** (the allocation formula vs
+  `alloc_used()`, round trips of a trained and a wide model, every status code, refused
+  loads keep the model, the encoder's refusals, the five packed-only guards).
 - `tests/tentib.bcyr` — **the 0.5.0 benchmark harness** (drives `docs/benchmarks.md`):
   per-layer kernel sweep (branchy/branchless/SIMD-pack-once/rosnet-f64 at 128²–768²),
   prep-amortization costs, whole-model forward → tok/s (f64 / scalar-int / SIMD-int
   at a b1.58-shaped 267k-param config) + packed serving + (1.1.2) a training step.
   B-series fairness; ratios reproduce, absolute ns vary with boost.
-- `tests/tentib.fcyr` — **seeded property fuzzer** (1.1.2): 5,000 rounds, ~3 s,
-  properties P1–P8 (kernel agreement, code range, pack round-trip, Weff = code·γ,
+- `tests/tentib.fcyr` — **seeded property fuzzer** (1.1.2): 5,000 rounds, ~4 s,
+  properties P1–P10 (kernel agreement, code range, pack round-trip, Weff = code·γ,
   integer vs f64 within the summation bound, NaN rows, mask identity, whole-model
-  modes + prefix serving).
+  modes + prefix serving, and from 1.2.0 the bytes round trip (P9) and the decoder on
+  mutated artifacts (P10)).
 
 ## Dependencies
 
@@ -161,9 +181,9 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 ## Next
 
 tentib is stable (1.x, API frozen); the open work is in [`roadmap.md`](roadmap.md),
-proposed in order: **1.2.0** packed-model serialization (the first untrusted-input
-surface) · **1.3.x** a distlib bundle + the first consumer (hoosh / murti) · **1.4.x**
-serving from 2-bit / trit packed storage · **1.5.x** the Pi 5 edge measurement (NEON
+proposed in order (1.2.0 shipped): **1.3.x** a distlib bundle + the first consumer (hoosh / murti) · **1.4.x**
+serving from 2-bit / trit packed storage, with a serving-only allocation for loaded
+models · **1.5.x** the Pi 5 edge measurement (NEON
 `iv_dp8` already runs on aarch64) · **1.6.x** GPU kernels via mabda · later 1.x minors
 (a matched-recipe quality ablation, the token-mixer research watch) · a **2.0.0
 backlog** (model handles instead of module globals, among others). Maintenance rides

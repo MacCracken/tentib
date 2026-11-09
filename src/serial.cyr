@@ -1,0 +1,293 @@
+# tentib — packed-model serialization (1.2.0).
+#
+# A trained, packed model as bytes a consumer can store and serve later without the
+# latent weights or retraining: tx_pack_serialize writes the live packed store (the 7
+# BitLinears' ternary weights + gammas) and the f64 parameters serving reads (token +
+# position embeddings, the RMSNorm gains, the head bias); tx_pack_deserialize rebuilds a
+# model that tx_fwd_packed serves bit-identically. tentib does no file I/O: the consumer
+# owns the bytes. The format is specified in docs/architecture/001-packed-model-format.md.
+#
+# DECODING IS AN UNTRUSTED-INPUT SURFACE. tx_pack_deserialize validates every field before
+# it allocates or changes anything, so a refused buffer leaves the current model as it
+# was, and it reports bad data with a status code rather than guard() (guard is for
+# programmer errors). Derived data is recomputed, not trusted (the SIMD wsum offsets).
+# The caller caps the memory a load may allocate (max_bytes): rosnet's t_alloc exits the
+# process when an allocation fails, so a header must not be able to ask for more than the
+# consumer agreed to.
+#
+# The format is canonical: any buffer the decoder accepts re-serializes to the same bytes,
+# and every buffer tx_pack_serialize writes, the decoder accepts.
+#
+# Depends (includer order): ternary + bitlinear + layers + model + block + kernel.
+
+# ---- format constants ----------------------------------------------------------
+
+# "TENTIBPK" read as a little-endian u64 (the first 8 bytes of every artifact).
+fn _pk_magic(): i64 { return load64("TENTIBPK"); }
+# The format version this decoder reads and this encoder writes.
+fn _pk_version(): i64 { return 1; }
+# Each of V, T, C, F must lie in [1, 2^20]: products of two dims then fit easily in i64.
+fn _pk_maxdim(): i64 { return 1048576; }
+
+# Status codes of tx_pack_deserialize (0 = loaded; each code is negative).
+# Buffer too short, or its length is not the artifact's.
+fn pk_err_length(): i64 { return 0 - 1; }
+# Not a tentib packed model.
+fn pk_err_magic(): i64 { return 0 - 2; }
+# A format version this decoder does not read.
+fn pk_err_version(): i64 { return 0 - 3; }
+# A dim outside [1, 2^20], or a nonzero flags word.
+fn pk_err_header(): i64 { return 0 - 4; }
+# The bytes do not match their FNV-1a checksum.
+fn pk_err_checksum(): i64 { return 0 - 5; }
+# Loading would allocate more than max_bytes.
+fn pk_err_too_big(): i64 { return 0 - 6; }
+# A weight code of 3, or nonzero padding.
+fn pk_err_weights(): i64 { return 0 - 7; }
+# A layer scale that is negative, NaN or infinite.
+fn pk_err_gamma(): i64 { return 0 - 8; }
+# An f64 parameter that is NaN or infinite.
+fn pk_err_param(): i64 { return 0 - 9; }
+
+# K (inputs) of BitLinear layer i: 0..3 = attn Q/K/V/O, 4 = up, 5 = down, 6 = head.
+fn _pk_layer_k(i, C, F): i64 {
+    if (i == 5) { return F; }
+    return C;
+}
+# N (outputs) of BitLinear layer i.
+fn _pk_layer_n(i, C, F, V): i64 {
+    if (i == 4) { return F; }
+    if (i == 6) { return V; }
+    return C;
+}
+# Bytes of a layer's 2-bit code block: K*N codes, 4 per byte, padded to 8 bytes.
+fn _pk_code_bytes(KN): i64 { return ((KN + 3) / 4 + 7) / 8 * 8; }
+
+# The artifact's exact length for dims V, T, C, F (dims already range-checked).
+fn _pk_size(V, T, C, F): i64 {
+    var s = 64;                                           # header: 8 u64 words
+    var i = 0;
+    while (i < 7) {
+        s = s + 8 + _pk_code_bytes(_pk_layer_k(i, C, F) * _pk_layer_n(i, C, F, V));
+        i = i + 1;
+    }
+    s = s + 8 * (V * C + T * C + 3 * C + V);              # tokemb, posemb, gns (2C), gf (C), bhead
+    return s + 8;                                         # FNV-1a checksum
+}
+
+# FNV-1a 64-bit over p[0..n). An integrity check against accidental corruption, not an
+# authentication tag: anyone can recompute it, which is why every field is validated too.
+fn _pk_fnv(p, n): i64 {
+    var h = 0xCBF29CE484222325;
+    var i = 0;
+    while (i < n) {
+        h = (h ^ load8(p + i)) * 0x100000001B3;
+        i = i + 1;
+    }
+    return h;
+}
+
+# 1 when the f64 bit pattern v is finite (exponent not all ones).
+fn _pk_finite(v): i64 {
+    if (((v >> 52) & 0x7FF) == 0x7FF) { return 0; }
+    return 1;
+}
+
+# 1 when every f64 at p[0..n) is finite.
+fn _pk_all_finite(p, n): i64 {
+    var i = 0;
+    while (i < n) { if (_pk_finite(load64(p + i * 8)) == 0) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# 1 when gamma bits g are a valid layer scale: finite and not negative (absmean >= +0).
+fn _pk_gamma_ok(g): i64 {
+    if (g < 0) { return 0; }                              # sign bit set
+    return _pk_finite(g);
+}
+
+# Bytes blk_init + tx_init + tx_int_init + tx_pack_init allocate for a model of dims
+# V, T, C, F — exactly what tx_pack_deserialize allocates to load one. -1 for a dim
+# outside [1, 2^20]. (It mirrors those four functions; the suite checks it against
+# alloc_used().)
+fn tx_model_alloc_bytes(V, T, C, F): i64 {
+    if ((V < 1) | (T < 1) | (C < 1) | (F < 1)) { return 0 - 1; }
+    var M = _pk_maxdim();
+    if ((V > M) | (T > M) | (C > M) | (F > M)) { return 0 - 1; }
+    var TC = T * C; var CC = C * C; var TF = T * F; var CF = C * F; var CV = C * V; var TV = T * V;
+    var s = 23 * TC + 9 * CC + 5 * CF + 4 * TF + T * T + 3 * T + 6;           # blk_init
+    s = s + 8 * CC + 4 * CF + 7 * CV + 7 * TC + 3 * TV + 6 * C + 2 * V + T;   # tx_init
+    var mkn = CC;
+    if (CF > mkn) { mkn = CF; }
+    if (CV > mkn) { mkn = CV; }
+    var kf = C; if (F > kf) { kf = F; }
+    var nmax = C; if (F > nmax) { nmax = F; } if (V > nmax) { nmax = V; }
+    s = s + 2 * mkn + (mkn + 7) / 8 + 2 * T * kf + (kf + 7) / 8 + TV + T + nmax;   # tx_int_init
+    s = s + 21;                                                                # tx_pack_init tables
+    var i = 0;
+    while (i < 7) {
+        var KN = _pk_layer_k(i, C, F) * _pk_layer_n(i, C, F, V);
+        s = s + (KN + 7) / 8 + _pk_layer_n(i, C, F, V);
+        i = i + 1;
+    }
+    return s * 8;
+}
+
+# ---- encode ----------------------------------------------------------------------
+
+# Bytes tx_pack_serialize needs for the live packed model.
+fn tx_pack_serial_bytes(): i64 {
+    guard(pk_ready == 1, "tx_pack_serial_bytes: call tx_pack (or tx_pack_deserialize) first");
+    _tx_dims(pk_V0, tx_T0, pk_C0, pk_F0);
+    return _pk_size(pk_V0, tx_T0, pk_C0, pk_F0);
+}
+
+# Write the live packed model to buf[0..cap). Returns the bytes written; -1 if cap is
+# smaller than tx_pack_serial_bytes() (nothing written); -2 if the model holds a NaN /
+# infinite parameter or an invalid gamma, which the decoder would refuse (nothing written).
+fn tx_pack_serialize(buf, cap): i64 {
+    var size = tx_pack_serial_bytes();
+    if (cap < size) { return 0 - 1; }
+    var V = pk_V0; var T = tx_T0; var C = pk_C0; var F = pk_F0;
+    var i = 0;
+    while (i < 7) { if (_pk_gamma_ok(load64(pk_gamma + i * 8)) == 0) { return 0 - 2; } i = i + 1; }
+    if ((_pk_all_finite(tx_tokemb, V * C) & _pk_all_finite(tx_posemb, T * C)) == 0) { return 0 - 2; }
+    if ((_pk_all_finite(tx_gns, 2 * C) & _pk_all_finite(tx_gf, C) & _pk_all_finite(tx_bhead, V)) == 0) {
+        return 0 - 2;
+    }
+    store64(buf, _pk_magic()); store64(buf + 8, _pk_version()); store64(buf + 16, size);
+    store64(buf + 24, V); store64(buf + 32, T); store64(buf + 40, C); store64(buf + 48, F);
+    store64(buf + 56, 0);                                 # flags: none defined in version 1
+    var p = buf + 64;
+    i = 0;
+    while (i < 7) {
+        var KN = _pk_layer_k(i, C, F) * _pk_layer_n(i, C, F, V);
+        store64(p, load64(pk_gamma + i * 8));
+        p = p + 8;
+        var cb = _pk_code_bytes(KN);
+        var z = 0;
+        while (z < cb) { store8(p + z, 0); z = z + 1; }
+        var w8t = load64(pk_w8t + i * 8);             # [N,K] i8: 0, 1, or 0xFF for -1
+        var j = 0;
+        while (j < KN) {
+            var b = load8(w8t + j);
+            guard((b == 0) | (b == 1) | (b == 255), "tx_pack_serialize: packed store is not ternary");
+            var code = 0;
+            if (b == 1) { code = 1; }
+            if (b == 255) { code = 2; }
+            store8(p + j / 4, load8(p + j / 4) | (code << ((j % 4) * 2)));
+            j = j + 1;
+        }
+        p = p + cb;
+        i = i + 1;
+    }
+    t_copy(p, tx_tokemb, V * C); p = p + V * C * 8;
+    t_copy(p, tx_posemb, T * C); p = p + T * C * 8;
+    t_copy(p, tx_gns, 2 * C); p = p + 2 * C * 8;
+    t_copy(p, tx_gf, C); p = p + C * 8;
+    t_copy(p, tx_bhead, V); p = p + V * 8;
+    store64(p, _pk_fnv(buf, size - 8));
+    return size;
+}
+
+# ---- decode ----------------------------------------------------------------------
+
+# 1 when a layer's code block at p holds KN valid 2-bit codes (none is 3) and every
+# padding bit and byte is zero.
+fn _pk_codes_ok(p, KN): i64 {
+    var full = KN / 4; var rem = KN % 4;
+    var j = 0;
+    while (j < full) {
+        var b = load8(p + j);
+        if ((b & (b >> 1) & 0x55) != 0) { return 0; }  # a code of 3 sets both bits of a pair
+        j = j + 1;
+    }
+    if (rem > 0) {
+        var t = load8(p + full);
+        if ((t >> (rem * 2)) != 0) { return 0; }        # bits past the last code
+        if ((t & (t >> 1) & 0x55) != 0) { return 0; }
+        j = full + 1;
+    }
+    var cb = _pk_code_bytes(KN);
+    while (j < cb) { if (load8(p + j) != 0) { return 0; } j = j + 1; }
+    return 1;
+}
+
+# Load a packed model from buf[0..n), allocating at most max_bytes (see
+# tx_model_alloc_bytes). Returns 0 when loaded, or one of the pk_err_* codes (negative),
+# in which case nothing was allocated or changed and the current model, if any, still
+# serves. A loaded model serves through tx_fwd_packed for any T up to the stored T; it has
+# no latent weights, so tx_fwd / tx_fwd_q / tx_bwd / tx_sgd / tx_pack refuse it until
+# tx_init or tx_param_init makes an ordinary model again.
+fn tx_pack_deserialize(buf, n, max_bytes): i64 {
+    if (n < 72) { return pk_err_length(); }
+    if (load64(buf) != _pk_magic()) { return pk_err_magic(); }
+    if (load64(buf + 8) != _pk_version()) { return pk_err_version(); }
+    var total = load64(buf + 16);
+    var V = load64(buf + 24); var T = load64(buf + 32); var C = load64(buf + 40); var F = load64(buf + 48);
+    if (load64(buf + 56) != 0) { return pk_err_header(); }
+    var M = _pk_maxdim();
+    if ((V < 1) | (T < 1) | (C < 1) | (F < 1)) { return pk_err_header(); }
+    if ((V > M) | (T > M) | (C > M) | (F > M)) { return pk_err_header(); }
+    var size = _pk_size(V, T, C, F);
+    if ((total != size) | (n != size)) { return pk_err_length(); }
+    if (tx_model_alloc_bytes(V, T, C, F) > max_bytes) { return pk_err_too_big(); }
+    if (_pk_fnv(buf, size - 8) != load64(buf + size - 8)) { return pk_err_checksum(); }
+    # validate every field before anything is allocated or changed
+    var p = buf + 64;
+    var i = 0;
+    while (i < 7) {
+        var KN = _pk_layer_k(i, C, F) * _pk_layer_n(i, C, F, V);
+        if (_pk_gamma_ok(load64(p)) == 0) { return pk_err_gamma(); }
+        if (_pk_codes_ok(p + 8, KN) == 0) { return pk_err_weights(); }
+        p = p + 8 + _pk_code_bytes(KN);
+        i = i + 1;
+    }
+    if (_pk_all_finite(p, V * C + T * C + 3 * C + V) == 0) { return pk_err_param(); }
+    # commit: every check passed, and the allocation fits max_bytes
+    tx_init(V, T, C, F);
+    tx_int_init(V, T, C, F);
+    tx_pack_init(V, T, C, F);
+    p = buf + 64;
+    i = 0;
+    while (i < 7) {
+        var K = _pk_layer_k(i, C, F); var N = _pk_layer_n(i, C, F, V);
+        var KN2 = K * N;
+        store64(pk_gamma + i * 8, load64(p));
+        var codes = p + 8;
+        var w8t = load64(pk_w8t + i * 8);
+        var j = 0;
+        while (j < KN2) {
+            var code = (load8(codes + j / 4) >> ((j % 4) * 2)) & 3;
+            var b = 0;
+            if (code == 1) { b = 1; }
+            if (code == 2) { b = 255; }
+            store8(w8t + j, b);
+            j = j + 1;
+        }
+        # wsum[n] = the weight sum over the 16-lane span, as tsimd_pack_w computes it
+        var K16 = (K / 16) * 16;
+        var wsum = load64(pk_wsum + i * 8);
+        var nn = 0;
+        while (nn < N) {
+            var s = 0; var k = 0;
+            while (k < K16) {
+                var wb = load8(w8t + nn * K + k);
+                s = s + (wb == 1) - (wb == 255);
+                k = k + 1;
+            }
+            store64(wsum + nn * 8, s);
+            nn = nn + 1;
+        }
+        p = codes + _pk_code_bytes(KN2);
+        i = i + 1;
+    }
+    t_copy(tx_tokemb, p, V * C); p = p + V * C * 8;
+    t_copy(tx_posemb, p, T * C); p = p + T * C * 8;
+    t_copy(tx_gns, p, 2 * C); p = p + 2 * C * 8;
+    t_copy(tx_gf, p, C); p = p + C * 8;
+    t_copy(tx_bhead, p, V);
+    pk_ready = 1;
+    tx_packed_only = 1;
+    return 0;
+}

@@ -206,6 +206,9 @@ var tx_dfnorm = 0; var tx_dresid1 = 0; var tx_dresid0 = 0;
 var tx_Whq = 0; var tx_Whe = 0; var tx_hdWeff = 0; var tx_ghead = 0;
 # the dims tx_init sized the model for (0 = not initialized) — 1.1.2
 var tx_V0 = 0; var tx_T0 = 0; var tx_C0 = 0; var tx_F0 = 0;
+# 1 while the model came from tx_pack_deserialize (src/serial.cyr): it holds the packed
+# store and the f64 embeddings / gains / bias, but no latent weights (1.2.0).
+var tx_packed_only = 0;
 
 # Allocate the transformer's parameters, gradients and scratch (tx_*), plus the
 # block scratch (blk_init): vocabulary V, up to T positions, width C, MLP width F.
@@ -215,6 +218,7 @@ fn tx_init(V, T, C, F): i64 {
     guard(V >= 1, "tx_init: V must be >= 1");
     blk_init(T, C, F);
     tx_V0 = V; tx_T0 = T; tx_C0 = C; tx_F0 = F;
+    tx_packed_only = 0;
     var TC = T * C; var CC = C * C; var CF = C * F; var CV = C * V; var VC = V * C; var TV = T * V;
     tx_tokemb = t_alloc(VC); tx_posemb = t_alloc(TC); tx_gns = t_alloc(2 * C); tx_gf = t_alloc(C);
     tx_Wa = t_alloc(4 * CC); tx_Wm = t_alloc(2 * CF); tx_Whead = t_alloc(CV); tx_bhead = t_alloc(V);
@@ -234,6 +238,14 @@ fn _tx_dims(V, T, C, F): i64 {
     guard(tx_T0 != 0, "tx: call tx_init first");
     guard((V == tx_V0) & (C == tx_C0) & (F == tx_F0), "tx: V, C, F differ from tx_init");
     guard((T >= 1) & (T <= tx_T0), "tx: T outside [1, tx_init T]");
+    return 0;
+}
+
+# Entry check for the calls that read the latent weights (tx_fwd, tx_bwd, tx_sgd,
+# tx_fwd_q, tx_pack). A deserialized model has none — its latent buffers are the zeros
+# tx_init allocated — so those calls would compute with zero weights (1.2.0).
+fn _tx_latents(): i64 {
+    guard(tx_packed_only == 0, "tx: a deserialized model has no latent weights; serve it with tx_fwd_packed");
     return 0;
 }
 
@@ -257,6 +269,7 @@ fn _tx_embed(tokens, V, T, C): i64 {
 # gains 1, the head bias 0.
 fn tx_param_init(V, T, C, F, seed): i64 {
     _tx_dims(V, T, C, F);
+    tx_packed_only = 0;              # every parameter is re-drawn: an ordinary in-process model again
     rng_seed(seed);
     var std = f64_div(f64_from(1), f64_from(10));   # 0.1
     t_randn(tx_tokemb, V * C, std); t_randn(tx_posemb, T * C, std);
@@ -269,6 +282,7 @@ fn tx_param_init(V, T, C, F, seed): i64 {
 # land in tx_logits (T x V).
 fn tx_fwd(tokens, V, T, C, F): i64 {
     _tx_dims(V, T, C, F);
+    _tx_latents();
     var C8 = C * 8;
     _tx_embed(tokens, V, T, C);                       # resid0[t] = tokemb[tok] + posemb[t]
     block_fwd(tx_resid0, tx_gns, tx_Wa, tx_Wm, T, C, F);   # mlp_out = block(resid0)
@@ -298,6 +312,7 @@ fn tx_zero_grads(V, T, C, F): i64 {
 # outside [0, V) used to add C f64s into whatever followed tx_dtokemb on the heap.
 fn tx_bwd(tokens, targets, V, T, C, F): i64 {
     _tx_dims(V, T, C, F);
+    _tx_latents();
     guard(_ids_in_range(tokens, T, V), "tx_bwd: token id outside [0, V)");
     var C8 = C * 8;
     softmax_xent_bwd(tx_probs, targets, tx_dlogits, T, V);
@@ -323,6 +338,7 @@ fn tx_bwd(tokens, targets, V, T, C, F): i64 {
 # SGD on the LATENT weights (re-quantized next fwd) + full-precision embeds/gains/bias.
 fn tx_sgd(V, T, C, F, nlr): i64 {
     _tx_dims(V, T, C, F);
+    _tx_latents();
     t_axpy(tx_Wa, tx_dWa, nlr, 4 * C * C);
     t_axpy(tx_Wm, tx_dWm, nlr, 2 * C * F);
     t_axpy(tx_Whead, tx_dWhead, nlr, C * V);
