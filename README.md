@@ -102,10 +102,11 @@ M3-SIMD  the 0.4.1 kernel (iv_dp8, 16 int8 lanes/instr), 128x128 layer:
     PACKED serving 13675 tok/s  vs  f64 2378 tok/s  (5.7x, bit-identical)
 ```
 
-Deps: rosnet 0.2.0 + tyche 0.1.1 + akshara 0.1.0 (the shared sovereign tokenizer).
+Deps: rosnet 1.4.1 + tyche 1.2.2 + akshara 1.1.2 (the shared sovereign tokenizer); the
+current pins live in `cyrius.cyml` and [`docs/development/state.md`](docs/development/state.md).
 
-See [`docs/development/roadmap.md`](docs/development/roadmap.md) for the M0→v1.0
-plan (M3 the packed int8 matmul-free inference kernel) and
+See [`docs/development/roadmap.md`](docs/development/roadmap.md) for the open work
+(1.2.x – 1.x.x, and the 2.0.0 backlog), [`CHANGELOG.md`](CHANGELOG.md) for what shipped, and
 [`docs/adr/0001-tentib-scope.md`](docs/adr/0001-tentib-scope.md) for the scope +
 naming rationale.
 

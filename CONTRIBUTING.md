@@ -22,7 +22,8 @@
    property and round).
 
 See [`CLAUDE.md`](CLAUDE.md) for the full development loop and
-[`docs/development/roadmap.md`](docs/development/roadmap.md) for the M0→v1.0 plan.
+[`docs/development/roadmap.md`](docs/development/roadmap.md) for the open work (1.2.x – 1.x.x and
+the 2.0.0 backlog).
 
 ## Finite-difference checks are the contract
 

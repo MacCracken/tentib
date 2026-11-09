@@ -160,11 +160,13 @@ _None yet._ (Eventual: hoosh / murti serving the ternary model.)
 
 ## Next
 
-**v1.0.0 is cut — tentib is stable and in maintenance.** No scheduled work.
-Post-1.0 levers (user-driven, roadmap § out-of-scope): GPU ternary kernels via
-mabda · hoosh/murti serving consumption of `tx_fwd_packed` · rotation-PTQ
-(QuaRot/SpinQuant-class) pairing with the Type-3 import lane · aarch64 NEON when
-cyrius SIMD Phase 5 lands. Toolchain/dep realigns ride each ecosystem pin
-sweep (latest: 6.7.18 at 1.1.1); the latest P(-1) sweep is 1.1.2. Open: re-baseline
-`docs/benchmarks.md`'s tables, the README and `docs/api.md` (dated 1.1.1 and 1.1.2
-notes in place; maintainer's call).
+tentib is stable (1.x, API frozen); the open work is in [`roadmap.md`](roadmap.md),
+proposed in order: **1.2.0** packed-model serialization (the first untrusted-input
+surface) · **1.3.x** a distlib bundle + the first consumer (hoosh / murti) · **1.4.x**
+serving from 2-bit / trit packed storage · **1.5.x** the Pi 5 edge measurement (NEON
+`iv_dp8` already runs on aarch64) · **1.6.x** GPU kernels via mabda · later 1.x minors
+(a matched-recipe quality ablation, the token-mixer research watch) · a **2.0.0
+backlog** (model handles instead of module globals, among others). Maintenance rides
+any patch: the benchmark re-baseline (maintainer's call), the akshara → rosnet
+realign, re-proving `/bin/gputern` on iron, pin sweeps (latest: 6.7.18 at 1.1.1).
+The latest P(-1) sweep is 1.1.2.

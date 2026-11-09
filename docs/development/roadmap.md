@@ -1,138 +1,172 @@
 # tentib — Roadmap
 
 > **Self-contained SemVer plan.** An agent can pick up the next version from this repo
-> alone — the design rationale is inlined below + lives in-repo under `docs/`. (The
-> ecosystem map at agnosticos `docs/development/planning/integer-native-ml.md` is
-> background, not required.) Volatile state — current version, test count, deps — is in
-> [`state.md`](state.md); the per-version detail is in [`../../CHANGELOG.md`](../../CHANGELOG.md).
+> alone. Volatile state (current version, test count, deps) is in [`state.md`](state.md).
+> What already shipped (M0 → 1.0.0, all six v1.0 criteria met at 1.0.0, then 1.0.1–1.1.2)
+> is in [`../../CHANGELOG.md`](../../CHANGELOG.md); this file lists **only open work**.
+> The ecosystem map at agnosticos `docs/development/planning/integer-native-ml.md` is
+> background, not required.
 
 ## What tentib is
 
-**tentib** = `bitnet` reversed — the sovereign **integer-native / ternary (1.58-bit)**
-ML reference. BitNet b1.58 weights collapse to **{−1, 0, +1}**, so `weight · activation`
-becomes **add / subtract / skip — no multiply**. The thesis: attn11 proved learning is
-expressible in an everything-is-i64 sovereign language; tentib takes the i64 claim to
-the **weights themselves**.
+**tentib** = `bitnet` reversed: the sovereign **integer-native / ternary (1.58-bit)** ML
+reference. BitNet b1.58 weights collapse to **{−1, 0, +1}**, so `weight · activation`
+becomes **add / subtract / skip, no multiply**. attn11 proved learning is expressible in
+an everything-is-i64 language; tentib takes the i64 claim to the **weights themselves**.
 
-Discipline (inherited from attn11, non-negotiable): **Cyrius-native, no BLAS / libc /
-autodiff; finite-difference-gated** (prove the *surrogate*, not the discontinuity — the
-STE is the canonical case); **benchmarked vs a named real-world reference**;
-**honest-scale** — b1.58's "matches fp16" is a ≥3B *scale* result, so at tiny
-from-scratch scale **report the quality gap** (like attn11's MTP honest-negative), never
-hide it.
+Discipline (non-negotiable): **Cyrius-native, no BLAS / libc / autodiff;
+finite-difference-gated** (prove the *surrogate*, not the discontinuity); **benchmarked
+vs a named reference**; **honest-scale** (b1.58's "matches fp16" is a ≥3B result, so
+report the small-scale quality gap, never hide it).
 
 ## What it stands on
 
-- **rosnet** (f64 latent tensors + `linear_fwd` / `linear_bwd` — the matmul BitLinear wraps)
-- **tyche** (PRNG; rosnet's `t_randn` → `rng_normal`)
-- **akshara** (the byte-vocab tokenizer the proof-of-life trains over)
-- **Latent weights stay full-precision f64**; quantization happens only inside the
-  forward pass (the BitNet shadow-weight loop). The optimizer updates the latent weights;
-  the forward re-quantizes ternary each step. b1.58 ternarizes **only the linear layers**
-  — embeddings, RMSNorm, GELU, and the attention core stay f64.
+- **rosnet** (f64 latent tensors + `linear_fwd` / `linear_bwd`), **tyche** (PRNG),
+  **akshara** (the byte-vocab tokenizer).
+- Latent weights stay f64; only the linear layers are ternary, quantized inside the
+  forward. Embeddings, RMSNorm, GELU and the attention core stay f64.
 
-## Shipped
+## How a version is cut
 
-| Version | Milestone | Result |
-|---------|-----------|--------|
-| **0.1.0** | M0 — ternary quantizer | absmean γ, `clip(round(w/γ),−1,+1)`, matmul-free dot. **6/6**. |
-| **0.2.0** | M1 — BitLinear + STE | ternary W + int8 acts on rosnet; STE backward FD-gated (the surrogate, γ-cancellation @ γ=3, falsifiers). **34/34**. |
-| **0.3.0** | M2 — ternary transformer trains | RMSNorm + causal attn + GELU-MLP, all 6 linears ternary; trains on akshara text (CE → 0.11); every level end-to-end FD-gated. **80/80**. |
-| **0.4.0** | M3 — matmul-free integer inference | the kernel through all 7 BitLinears of the trained transformer; exact parity < 1e-9 vs full-quant f64, argmax 10/10; 2-bit packed weights (32×); branchless scalar kernel (~25% over branchy). **86/86**. |
-| **0.4.1** | integer-SIMD ternary kernel | the gate lifted (cyrius 6.4.6/6.4.7 int SIMD, `iv_dp8`): `ternary_matmul_free_simd` (pack-once i8 transpose + u8-offset codes + 16-lane `iv_dp8` + branchless tail) **bit-identical** to scalar and **~7.5× faster than rosnet f64-SIMD** on 128×128 (1,946 vs 14,670 ns; ~45× over branchless) — *multiply-free is also faster* met. Whole-model = mode 2. Pin 6.2.37 → 6.4.10. **90/90**. |
-| **0.5.0** | benchmarks (`docs/benchmarks.md`) | the real `tests/tentib.bcyr` harness, B-series fairness: layer-sweep SIMD advantage **grows 5.0×→18.4×** over f64-SIMD (128²→768²; lane width + i8 cache residency); whole-model **3,549 vs 2,307 tok/s** (per-call re-pack included — pack-once deployment bounded by the sweep, → 0.7.0); memory 32× measured; **honest quality delta** vs matched-size f64 attn11 (CE 0.006 vs 0.11 toy-scale; b1.58 ≥3B parity cited). **90/90**. |
-| **0.6.0** | alloc-clean + API freeze (`docs/api.md`) | the public surface settled + documented (freeze policy, not-frozen internals, conventions, output cells); allocation audit: **allocation only in `*_init` + one-shot trainers, every fwd/bwd/kernel path allocation-free**; last indirect-only coverage closed (`ref_dot`, direct `bl_forward_q` 0-vs-2, the manual `tx_sgd` quartet). No behavior change. **95/95**. |
-| **0.7.0** | consumer readiness — pack-once serving | additive: `tx_pack_init`/`tx_pack` (quantize + pack the 7 BitLinears once) + `tx_fwd_packed` (serving forward, bit-identical to modes 0/2, gated twice) → **~13.5k tok/s vs ~2.3k f64 (5.7×)**, ~4× over mode 2; self-checking public-API-only `examples/quickstart.cyr` (train → pack → serve, PASS). **97/97**. |
-| **0.8.0** | security/hardening audit + CHANGELOG completeness | audit re-derived from source (`docs/audit/2026-07-06-audit.md`): **6 fixed/guarded** (γ=0 quantizer sign bug FIXED; fail-loud `guard()` on non-ternary pack input, SIMD K ≤ 2²² exactness bound, packed-store misuse) + **5 verified sound** (incl. `_tanh` — ganita-overflow-class immune by construction); cold paths only, serving throughput unchanged; CHANGELOG verified gap-free 0.1.0→now + cross-links resolve; SECURITY.md rewritten to the audited posture. **101/101**. |
-| **1.0.0** | **STABLE — the clean cut** | no code change from 0.8.0; all six v1.0 criteria green; the `docs/api.md` freeze in force for the 1.x series (minors add only). **101/101**. |
+- **SemVer under the 1.x freeze** ([`../api.md`](../api.md)): a minor **adds** symbols and
+  never changes a frozen signature or semantics; a patch is fixes, docs and pin sweeps.
+  Anything that breaks the freeze waits for **2.0.0** (backlog below).
+- **Every change** follows [ADR 0002](../adr/0002-hardening-preserves-bits.md): an
+  optimization is bit-identical on valid input (golden-dump proven), and guards sit at
+  call entry, never inside a kernel loop. New backward code is FD-gated; new kernels are
+  bit-identity-gated in the suite and the fuzz harness.
+- Bump `VERSION` + the CHANGELOG section, all gates green (`cyrius audit` clean, suite
+  and fuzz on both targets), then **the user commits and tags**.
+- The ordering below is proposed. Each version is an independently cuttable bite; adjust
+  granularity with the maintainer.
 
-Full detail per version in [`../../CHANGELOG.md`](../../CHANGELOG.md).
+## 1.2.x — a model you can ship
 
-## Remaining → v1.0 (SemVer plan)
+### 1.2.0 — packed-model serialization
 
-Each version is an **independently-cuttable bite** with its own acceptance gate. Cut
-process: substantive work at the version → bump `VERSION` + the `[x.y.z]` CHANGELOG
-section → suite green → **the user tags** (never `git commit`/`tag` yourself).
+**Goal.** A trained model a consumer can serve without retraining in-process. Today a
+model lives only in module globals; nothing persists it.
 
-> **Version numbers below are the proposed decomposition** — adjust granularity with the
-> maintainer. The *ordering* (0.4.1 gated first, audit last) is the load-bearing part.
+**Scope.** Additive: `tx_pack_serialize(buf, cap)` → bytes written and
+`tx_pack_deserialize(buf, n)` → status, over a versioned format (magic, format version,
+V / T / C / F, per-layer γ + `wsum` + i8 weights, the f64 embeddings / gains / bias, and a
+checksum). tentib still does no file I/O: the consumer owns the bytes (the akshara
+hook pattern). **Decoding is the first untrusted-input surface**, so it validates every
+field (dims in range, sizes against `n`, ternary bytes, finite γ, checksum) and returns a
+status code. Bad *data* is a return code; `guard()` stays for programmer errors.
 
-### 0.4.1 — integer-SIMD ternary kernel  ✅ **SHIPPED 2026-07-06** (see the table above)
+**Gate.** Serialize → deserialize → serve is bit-identical to the live packed serve;
+truncated, corrupted and oversized inputs are refused with codes (a decoder fuzz target);
+`SECURITY.md` and `api.md` updated.
 
-The gate held exactly as designed: cyrius 6.4.6/6.4.7 (SIMD arc Phase 3) answered the
-filed proposal with integer vector types + `iv_dp8` (the widening u8·i8 → i32 dot),
-and the kernel landed the same release-window with the acceptance met — bit-identical
-to scalar AND ~7.5× faster than rosnet's `linear_fwd` on the same layer.
+### Maintenance — 1.2.x patches and onward
 
-### 0.5.0 — benchmarks (`docs/benchmarks.md`)  ✅ **SHIPPED 2026-07-06** (see the table above)
+- **Re-baseline the benchmarks** (maintainer's call): `docs/benchmarks.md`'s tables, the
+  README figures and `api.md`'s performance contract are the 2026-07-06 run of record.
+  The dated 1.1.1 note (rosnet's faster f64 path) and 1.1.2 note (tentib's faster
+  quantizer / packer) carry the current numbers.
+- **Close the akshara → rosnet mismatch**: akshara 1.1.2 pins rosnet 1.2.2 while tentib
+  pins 1.4.1 (safe today: akshara calls only `t_alloc` / `t_zero`). Realign when akshara
+  cuts a release on rosnet 1.4.x.
+- **Re-prove the GPU tile path on hardware** at the current pin: `/bin/gputern` last
+  returned exit 95 (all tiles on the gfx90c, bit-exact) on 2026-07-23. CI covers the host
+  fallback and the `--agnos` build, not the device.
+- Toolchain / dep pin sweeps, per the established procedure in `state.md`.
 
-All three planned pieces landed with the honest caveats stated: tok/s under B-series
-fairness (whole-model + the per-layer sweep the whole-model number is bounded by),
-the measured 32× memory story, and the quality delta vs a matched-size f64 attn11
-with the b1.58/bitnet.cpp references cited. The per-call-re-pack honesty note feeds
-directly into 0.7.0's pack-once deployment entry point.
+## 1.3.x — library packaging and the first consumer
 
-### 0.6.0 — allocation-clean + API freeze + `docs/api.md`  ✅ **SHIPPED 2026-07-06** (see the table above)
+**Goal.** hoosh / murti serve a tentib model. Consumers include the sibling libs through
+a distlib bundle today; tentib has none.
 
-Both halves met as specified: the allocation audit walked every `t_alloc`/`alloc`
-site (all in `*_init` + the one-shot trainers; every inference path allocation-free
-— the lifetime contract is documented in api.md), and `docs/api.md` freezes the
-surface with every public symbol documented + directly suite-gated (the 0.6.0
-API-freeze test group closed `ref_dot` / `bl_forward_q` / `tx_sgd`, the three
-symbols previously exercised only indirectly).
+**Scope.** A `[lib]` module list in `cyrius.cyml` and `cyrius distlib` →
+`dist/tentib.cyr` (+ the `.deps` sidecar), the rosnet / akshara shape; a CI drift check and
+a release asset. A consumer-shaped example that loads a 1.2.0 model and serves it through
+`tx_fwd_packed`. The hoosh / murti integration itself lands in their repos.
 
-### 0.7.0 — downstream-consumer readiness  ✅ **SHIPPED 2026-07-06** (see the table above)
+**Gate.** The bundle compiles standalone under the consumers' toolchain pin; the drift
+check passes; the example self-checks.
 
-The clean serving entry point landed additive to the frozen surface
-(`tx_pack_init`/`tx_pack`/`tx_fwd_packed` — quantize + pack once, then serve,
-bit-identical to the reference kernels at 5.8× the f64 path) with the worked
-example at `examples/quickstart.cyr` (repo-root `examples/` per the
-tarka/anukūlana house convention; self-checking, public API only, non-zero exit
-on mismatch — running it is the test). The eventual real consumer is
-**hoosh / murti** serving the ternary model; the surface is now theirs to call.
+## 1.4.x — serve from packed ternary storage
 
-### 0.8.0 — security/hardening audit + CHANGELOG completeness  ✅ **SHIPPED 2026-07-06** (see the table above)
+**Goal.** Make the memory story true at serve time. Serving now reads an i8 working
+copy (1 byte per weight, 8× smaller than f64); the 2-bit form (`tpack2`, 32×) is storage
+only.
 
-Every named review target landed: packed-codec bounds (non-ternary input now
-fails loud at pack time), the int8-quant clamps verified, the accumulate
-overflow bounded and guarded (i64 scalar = safe at any K; SIMD i32 = guarded
-K ≤ 2²²), `tx_int_init`/`tx_pack_init` sizing verified against all 7 layer
-shapes — plus one real bug the review list didn't predict (the γ=0 quantizer
-sign bug, fixed + regression-gated). No open finding; CHANGELOG + cross-links
-verified. Record: `docs/audit/2026-07-06-audit.md`.
+**Scope.** Additive: a kernel that serves from 2-bit codes, or from 5 trits per byte
+(≈1.6 bits, a `tpack3` / `tunpack3` codec), unpacking in-register or through lookup
+tables in the bitnet.cpp TL1 / TL2 / I2_S shape (ported, never copied); a packed-store
+variant of `tx_pack` / `tx_fwd_packed` that uses it.
 
-### 1.0.0 — clean cut  ✅ **SHIPPED 2026-07-06** (see the table above)
+**Gate.** Bit-identical to the scalar kernel (suite + fuzz property P1 extended to the
+new kernel); benchmarked against the i8 path at the four layer sizes and whole-model,
+reporting the memory/speed trade honestly if it is slower; resident weight memory
+measured.
 
-All v1.0 criteria green (below); public API frozen; no code change from 0.8.0.
-tentib is stable — post-1.0 work is user-driven (the out-of-scope levers below).
+## 1.5.x — the edge target (Pi 5, for seema)
 
-## v1.0 criteria → version
+**Goal.** The Pi-class tok/s result the integer-native plan is aimed at. The SIMD kernel
+already runs NEON on aarch64 (cyrius SIMD Phase 5, 6.4.32, lowers `iv_dp8` natively), and
+the suite and fuzz harness pass under qemu in CI. Nothing has been measured on real ARM
+hardware.
 
-- [x] BitLinear forward + STE backward, finite-difference-gated (the surrogate) — **0.2.0**
-- [x] A ternary transformer that trains from scratch (loss descends) via akshara — **0.3.0**
-- [x] Packed-ternary + int8 matmul-free inference kernel reproduces the model's logits — **0.4.0**
-- [x] Benchmarks in `docs/benchmarks.md` (tok/s; quality delta vs same-size f64 attn11) — **0.5.0** (the speed half landed via **0.4.1**)
-- [x] Public API frozen — every exported symbol documented and tested — **0.6.0**
-- [x] CHANGELOG complete from v0.1.0; security/hardening audit pass — **0.8.0**
+**Scope.** Benchmark on a Pi 5 (an aarch64 path for `scripts/bench-history.sh`), and size
+a b1.58-shaped model the Pi can serve (with 1.2.0's format to ship it and 1.4.x's storage
+to fit it).
 
-## Out of scope (for v1.0)
+**Gate.** `docs/benchmarks.md` gains an aarch64 section: host, pin, model size, tok/s, and
+the f64 path on the same board for comparison.
 
-- **GPU ternary kernels** — mabda-backed; an accelerator, not a prerequisite (CPU f64
-  train + integer inference kernel is the v1.0 surface).
-- **Rotation-PTQ of imported checkpoints** (QuaRot / SpinQuant) — the *separate*
-  quantize-the-import technique, paired with the Type-3 weight-import reference.
-- **Scale claims** — b1.58's "matches fp16 at 3B+" is cited, not re-demonstrated.
-- **The matmul-free token mixer** (Scalable MatMul-free LM) — a research-watch sibling.
+## 1.6.x — GPU ternary kernels via mabda
 
-## References (for the remaining work)
+**Goal.** A portable GPU path. Today `ternary_matmul_free_gpu` tiles the integer
+accumulate onto the AGNOS `#82` dispatch (8×8 i32 tiles), which is AGNOS-only.
 
-- **b1.58** — Ma et al., *The Era of 1-bit LLMs* (2024), arXiv:2402.17764 (the absmean
-  ternary + int8 recipe; the scaling claims to cite).
-- **bitnet.cpp** — Microsoft's CPU inference kernels (TL1/TL2/I2_S) — the integer-SIMD
-  packing/lookup shape for 0.4.1.
-- **STE** — Bengio, Léonard, Courville (2013), arXiv:1308.3432 — the surrogate the
-  FD-gate validates.
-- In-repo: [`proposals/2026-06-23-cyrius-integer-simd.md`](proposals/2026-06-23-cyrius-integer-simd.md)
-  (the 0.4.1 design) · [`issues/2026-06-23-cyrius-call-arity-no-check.md`](issues/2026-06-23-cyrius-call-arity-no-check.md)
-  (a toolchain footgun — always run the suite after a signature change; a clean `build`
-  is not sufficient).
+**Scope.** The ternary kernel through mabda (rosnet's GPU bundle is the precedent; also
+ai-hwaccel), then whole-model offload of the seven BitLinears. Integer accumulation is
+associative, so the result must be bit-identical to the CPU kernel on every device.
+
+**Gate.** Device-verified bit-identity at ragged shapes; the no-device fallback contract
+tested on a host (rosnet's `gpu_host` pattern).
+
+## 1.x.x — later, unscheduled
+
+- **A matched-recipe quality ablation.** `docs/benchmarks.md` §5 bounds a *bundled* gap:
+  attn11 trains with Adam, an LR schedule and a 4C MLP; tentib with plain SGD and a 2C
+  MLP. An optimizer (Adam) and schedule as additive `tx_*` entry points, then a re-run,
+  would make the ternary-vs-f64 delta single-variable.
+- **Research watch: the matmul-free token mixer** (Zhu et al., *Scalable MatMul-free
+  Language Modeling*, 2024): a ternary recurrence in place of attention. A sibling
+  experiment, not committed.
+
+## 2.0.0 backlog — breaking changes (collected, not scheduled)
+
+- **Model handles instead of module-global state.** Every family (`tx_*`, `blk_*`,
+  `ki_*`, `pk_*`) is module-global, so a process holds one model. Every call re-passes
+  V, T, C, F, which the 1.1.2 dims guards have to police. Re-calling an `*_init` leaks the
+  previous buffers (the bump allocator never frees). Outputs land in globals
+  (`tx_logits`, `ki_logits`). An arena-owned, freeable handle fixes all four and changes
+  every `tx_*` signature.
+- **Compute the STE weight mask in the forward.** `bl_backward_wonly` divides `W/γ` again
+  for every weight, and the forward already computed it. Keeping it changes the frozen
+  signature (a new entry point in a 1.x minor is the non-breaking alternative).
+- **Full-precision numeric constants.** The GELU constant is `0.7978845608`, 10 digits of
+  √(2/π) = 0.79788456080286…; every output's bits depend on it, so the exact double
+  changes every output.
+
+## Not on this roadmap (scope boundaries, [ADR 0001](../adr/0001-tentib-scope.md))
+
+- **Rotation-PTQ of imported checkpoints** (QuaRot / SpinQuant): quantize-the-import is a
+  different technique; it belongs with the Type-3 weight-import reference.
+- **Scale claims**: b1.58's parity with fp16 at ≥3B params is cited, not re-demonstrated.
+
+## References (for the open work)
+
+- **b1.58**: Ma et al., *The Era of 1-bit LLMs* (2024), arXiv:2402.17764 (the recipe and the
+  scaling claims to cite).
+- **bitnet.cpp**: Microsoft's CPU inference kernels (TL1 / TL2 / I2_S), the packing and
+  lookup shape for 1.4.x.
+- **STE**: Bengio, Léonard, Courville (2013), arXiv:1308.3432, the surrogate the FD gates
+  validate.
+- **Scalable MatMul-free LM**: Zhu et al. (2024), arXiv:2406.02528 (the research watch).
+- In-repo history: [`proposals/2026-06-23-cyrius-integer-simd.md`](proposals/2026-06-23-cyrius-integer-simd.md)
+  (the 0.4.1 design, shipped).
