@@ -4,6 +4,83 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-11-09
+
+This release moves tentib and its deps to their latest releases. Nothing in `src/` changed, the
+frozen 1.x public API is untouched, and every value tentib computes is the same as in 1.1.0.
+**tentib's f64 comparison baseline is faster, though,** so the headline speedup ratios are smaller
+(see *Performance*).
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`** (through 6.7.10–6.7.17). `cyrius lib sync --full` re-vendored
+  the stdlib. `lib/` byte-matches the 6.7.18 snapshot: the same 113 files as 6.7.9, 66 of them with
+  new content, and nothing was added or removed. `cyrius fmt --check` passes on every source. Lint
+  gives the same 53 warnings it gave at 6.7.9, all of them line length; the lint rules that 6.7.11
+  and 6.7.12 added (array overruns, write lengths) fire on nothing. 6.7.17 refuses an include line
+  with code after the file name, and tentib's include lines carry only a trailing `#` comment, which
+  is allowed. 6.7.17 also refuses a statement that is only a value builtin, and every target still
+  compiles. **From 6.7.18, the pin, `lib/` and `cyrius.lock` must land in one commit.** With a
+  fully vendored `lib/`, cyrius refuses a moved pin until `lib sync --full` has run, so CI's
+  `cyrius deps` step fails on a commit that moves the pin alone.
+
+- **Deps moved to their latest releases, all built against 6.7.18: `tyche` 1.2.0 → 1.2.2, `rosnet`
+  1.2.0 → 1.4.1, `akshara` 1.1.0 → 1.1.2.** No public signature changed in any of them. Vendored
+  `lib/tyche.cyr`, `lib/rosnet.cyr` and `lib/akshara.cyr` byte-match the tagged `dist/` bundles.
+  These changes reach tentib:
+  - **rosnet** 1.2.2–1.4.1 speeds up `linear_fwd` and `linear_bwd`, and 1.4.1 adds an AVX2 path
+    for them. rosnet reports that the CPU results are bit-identical to 1.2.0, and tentib confirms it
+    for its own outputs: the demo prints exactly what it printed at 6.7.9 (39 lines compared, timing
+    lines excluded). `t_alloc(0)` now returns an empty tensor instead of exiting, and rosnet's errors
+    go to stderr. The 1.4.1 bundle begins with `include "lib/simd.cyr"`, which resolves because
+    tentib vendors the whole snapshot.
+  - **tyche** 1.2.2 gives the same bits for every state its API can reach. Its one behavior change
+    is that writing 0 to `_rng_state` no longer hangs `rng_normal`. tentib never writes `_rng_state`.
+  - **akshara** 1.1.2 is a hardening sweep. It validates widths and adds error codes, sends fatal
+    messages to stderr, and no longer needs the consumer to define `puts`. Its outputs on valid input
+    are bit-identical to 1.1.1. tentib calls `corpus_set(text, 11)` at the default width. tentib
+    keeps its own `puts`, since it prints through it, and the name does not collide with anything.
+  - **akshara 1.1.2 still pins rosnet 1.2.2.** tentib's own pin, 1.4.1, wins, and the resolver says
+    so ("rosnet 1.2.2 (wanted by akshara) not used"). This is safe: akshara calls only `t_alloc` and
+    `t_zero`, and rosnet's API did not change. akshara's next release is expected to close the gap.
+
+- **`cyrius.lock` regenerated from scratch**, as in 1.0.4 and 1.1.0. It has one commit pin per dep
+  (`cdb74e2` tyche, `af2bb1a` rosnet, `b8b3f68` akshara), 116 file hashes, and the trailer
+  `cyrius 6.7.18`. `cyrius deps --verify` and `cyrius deps --locked` both pass.
+
+### Performance — the f64 baseline moved
+
+tentib's kernels did not get faster or slower, but rosnet's f64 `linear_fwd`, which every "vs f64"
+figure divides by, is now 2.4–2.9× faster per layer. These are the same harness and host as before,
+run with `taskset -c 4`:
+
+| | run of record (2026-07-06) | 1.1.1 |
+|---|---:|---:|
+| rosnet f64 `linear_fwd`, 768×768 | 541,591 ns | 189,228 ns |
+| per-layer SIMD vs f64, 128² → 768² | 5.0× → 18.4× | **3.7× → 7.3×** |
+| whole-model f64 | 2,378 tok/s | 3,166 tok/s |
+| integer SIMD, mode 2 (re-packs per call) vs f64 | 1.3× | **0.9×** |
+| packed serving | 13,675 tok/s | 13,382 tok/s |
+| packed serving vs f64 | 5.7× | **4.2×** |
+
+Pack-once serving is still 4.2× faster than f64 at the bench config. The per-layer integer-SIMD
+kernel still beats f64 at every size, and its lead still grows with the layer. Mode 2, which re-packs
+the weights on every call, is now slightly slower than f64; it is the reference-fairness path, not
+the deployment one. `docs/benchmarks.md` gains a dated note with these figures. Its tables, the
+README and `docs/api.md` still quote the 2026-07-06 run of record, which measured against the older
+rosnet.
+
+Re-verified at the new pin:
+- The build passes, and the suite passes **101/101** (unchanged).
+- The demo prints the same values as at 6.7.9.
+- The `examples/quickstart.cyr` self-check passes.
+- `programs/gpumm.cyr` exits **96** on the host, the expected result without a GPU, and still builds
+  with `--agnos`.
+- Fuzz passes 1/1.
+
+The binary grows from 252,592 to 290,232 B, all of it unreachable stdlib code that DCE would drop
+(532 → 682 unreachable fns).
+
 ## [1.1.0] — 2026-11-09
 
 This release moves tentib onto the cyrius 6.7 series, as tyche 1.2.0, rosnet 1.2.0 and akshara 1.1.0

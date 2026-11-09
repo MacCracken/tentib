@@ -16,6 +16,25 @@ is reproduced by the committed harness — no hand-curated numbers.
   run-to-run; absolute ns vary with boost state** — reproduce ratios, not nanoseconds.
 - **Quality run:** attn11 **1.13.0** (`build/attn11`, same host + core), command below.
 
+> **1.1.1 (2026-11-09): the f64 baseline moved; tentib's kernels did not.** rosnet 1.2.2 made
+> `linear_fwd` run one packed `f64v_axpy` per row step, and 1.4.1 runs that step 4 lanes wide on an
+> AVX2 CPU. The results are the same bits, and tentib's suite and demo output are unchanged. This is
+> the same harness and host, `taskset -c 4`, at cyrius 6.7.18 / rosnet 1.4.1:
+>
+> | | run of record | 1.1.1 |
+> |---|---:|---:|
+> | rosnet f64 `linear_fwd`, 128×128 / 768×768 | 15,786 / 541,591 ns | 6,581 / 189,228 ns |
+> | SIMD `iv_dp8`, 128×128 / 768×768 | 3,124 / 29,361 ns | 1,733 / 25,876 ns |
+> | per-layer SIMD vs f64, 128² → 768² | 5.0× → 18.4× | **3.7× → 7.3×** |
+> | whole-model f64 | 2,378 tok/s | 3,166 tok/s |
+> | integer SIMD, mode 2, vs f64 | 1.3× | **0.9×** |
+> | packed serving | 13,675 tok/s (5.7×) | 13,382 tok/s (**4.2×**) |
+>
+> The tables below are the 2026-07-06 run of record, left as measured. Wherever they compare against
+> f64, they measured the older rosnet, and §1's lane-width reasoning ("2-wide SSE2") no longer
+> describes rosnet on an AVX2 CPU. The tables, the README and `docs/api.md` have not been
+> re-baselined yet.
+
 ## 1. Per-layer kernel sweep (M=1 row, K×N; ns/call)
 
 The same quantized BitLinear, four compute paths. The SIMD row is **pack-once**

@@ -5,11 +5,16 @@
 
 ## Version
 
-**1.1.0** (2026-11-09) — onto the cyrius 6.7 series: toolchain 6.6.20 → 6.7.9 +
-substrate deps moved to their 6.7.9-pinned tags. No source change; suite 101/101;
-demo values byte-identical to 6.6.20. Releases since 1.0.0: 1.0.1 (AGNOS GPU
-integer offload, `ternary_matmul_free_gpu`) · 1.0.2 (pin 6.5.27, deps to their 1.x
-freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20) · 1.1.0 (pin 6.7.9).
+**1.1.1** (2026-11-09): toolchain 6.7.9 → 6.7.18, and the substrate deps moved to their
+latest releases. No source change; suite 101/101; demo values byte-identical to 6.7.9.
+**The f64 comparison baseline moved:** rosnet 1.2.2–1.4.1 made `linear_fwd` 2.4–2.9× faster,
+with the same bits. Per-layer SIMD vs f64 is now **3.7×→7.3×** (it was 5.0×→18.4×), and packed
+serving is **13,382 vs 3,166 tok/s = 4.2×** (it was 5.7×). The figures below and in
+`docs/benchmarks.md`'s tables are the 2026-07-06 run of record. `docs/benchmarks.md` carries a
+dated note, and a full re-baseline is still open.
+Releases since 1.0.0: 1.0.1 (AGNOS GPU integer offload, `ternary_matmul_free_gpu`) ·
+1.0.2 (pin 6.5.27, deps to their 1.x freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20) ·
+1.1.0 (pin 6.7.9) · 1.1.1 (pin 6.7.18, latest deps).
 
 **1.0.0 — STABLE**, cut 2026-07-06 (user-named; user tags). The clean cut
 (tarka/prajna/anukūlana precedent): **no code change from 0.8.0** — all six v1.0
@@ -35,14 +40,16 @@ STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`; bumped from 6.6.20
-  at 1.1.0, 2026-11-09). `cyrius lib sync --full` re-vendored the whole 6.7.9 stdlib
+- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`; bumped from 6.7.9
+  at 1.1.1, 2026-11-09). `cyrius lib sync --full` re-vendored the whole 6.7.18 stdlib
   snapshot (113 files, byte-matching); `cyrius.lock` regenerated (3 commit pins, 116
   hashes, `--verify` and `--locked` clean); suite re-verified 101/101 at the new pin.
   tentib's source contains none of the constructs the 6.7.x language changes touch
   (newly reserved words, `!`, unary `-` / `~` on constants, typed `*T` pointers, `f32`).
+  From 6.7.18, the pin, `lib/` and `cyrius.lock` must land in one commit: with a fully
+  vendored `lib/`, cyrius refuses a moved pin until `lib sync --full` has run.
 - Pin history (1.x): 6.4.72 → 6.5.27 (1.0.2) → 6.6.2 (1.0.3) → 6.6.20 (1.0.4) →
-  6.7.9 (1.1.0).
+  6.7.9 (1.1.0) → 6.7.18 (1.1.1).
 
 ## Source
 
@@ -116,12 +123,13 @@ STE), **0.1.0** (M0 — ternary quantizer).
 Direct (declared in `cyrius.cyml`):
 
 - stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math, fnptr
-- **rosnet** 1.2.0 (latent f64 weights + `linear_fwd`/`linear_bwd`) — M1, active
-- **tyche** 1.2.0 (PRNG; rosnet's `t_randn` → `rng_normal`) — M1, active
-- **akshara** 1.1.0 (tokenizer; `corpus_set`/`gd_ld` byte-vocab path) — M2, active
+- **rosnet** 1.4.1 (latent f64 weights + `linear_fwd`/`linear_bwd`) — M1, active
+- **tyche** 1.2.2 (PRNG; rosnet's `t_randn` → `rng_normal`) — M1, active
+- **akshara** 1.1.2 (tokenizer; `corpus_set`/`gd_ld` byte-vocab path) — M2, active
 
-All three are the tags cut at cyrius 6.7.9 (rosnet 1.2.0 → tyche 1.2.0;
-akshara 1.1.0 → rosnet 1.2.0), so the chain is self-consistent.
+All three are the latest releases, built at cyrius 6.7.18. rosnet 1.4.1 pins tyche 1.2.2.
+akshara 1.1.2 still pins rosnet 1.2.2, and tentib's root pin of 1.4.1 wins (the resolver
+notes it). That is safe: akshara calls only `t_alloc` / `t_zero`, and rosnet's API is unchanged.
 
 ## Consumers
 
@@ -134,4 +142,5 @@ Post-1.0 levers (user-driven, roadmap § out-of-scope): GPU ternary kernels via
 mabda · hoosh/murti serving consumption of `tx_fwd_packed` · rotation-PTQ
 (QuaRot/SpinQuant-class) pairing with the Type-3 import lane · aarch64 NEON when
 cyrius SIMD Phase 5 lands. Toolchain/dep realigns ride each ecosystem pin
-sweep (latest: 6.7.9 at 1.1.0).
+sweep (latest: 6.7.18 at 1.1.1). Open: re-baseline `docs/benchmarks.md`'s tables, the
+README and `docs/api.md` against the faster rosnet f64 path (dated note in place, 1.1.1).
