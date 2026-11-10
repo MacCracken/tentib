@@ -10,11 +10,14 @@ issue with exploit details.
 ## Threat model
 
 tentib ships two things: a single-process, CPU-only **demo binary** and the
-**library modules** in `src/` (the frozen 1.x API in `docs/api.md`) that a
-consumer includes — a trainer, the matmul-free integer kernels, and the
-pack-once serving path (`examples/quickstart.cyr`; hoosh / murti are the
-intended serving consumers). Neither has networking, privileged operations or
-persistence, and neither reads or writes files on its own.
+**library** — the modules in `src/` (the frozen 1.x API in `docs/api.md`), shipped
+since 1.3.0 as the distlib bundle `dist/tentib.cyr` — that a consumer includes: a
+trainer, the matmul-free integer kernels, the pack-once serving path, and
+packed-model serialization (hoosh / murti are the intended serving consumers).
+Neither has networking, privileged operations or persistence, and neither reads or
+writes files on its own. The consumer-shaped example `examples/serve.cyr` does file
+I/O, as a consumer would: a bounded read (64 MiB) and a bounded load (1 GiB), with
+the path taken from its command line (1 to 4095 bytes).
 
 - **The binary's only input** is the embedded, compile-time corpus (a literal
   string byte-tokenized through akshara) plus the hyperparameters compiled into
@@ -59,7 +62,7 @@ tentib *does not* defend against:
 | **Integer accumulate** | The scalar kernels accumulate in i64 (\|acc\| ≤ 127·K). The SIMD kernel's iv_dp8 sums in i32 (255·K < 2³¹, K < ~8.4M) and is **guarded** at K ≤ 2²². Its activation codes must lie in [−128, +127] — a documented caller contract (`act_quant_int` produces [−127, +127]); a check inside the kernel loop was measured at 4–10% and not adopted (ADR 0002). |
 | **Reporting** | A failed guard writes `tentib guard: <reason>` to **stderr** and exits 1 (since 1.1.2; it used to print through the consumer's `puts` on stdout). |
 | **PRNG** | Weight init goes through tyche (xorshift) via rosnet — for reproducibility only, **never** for any security purpose. |
-| **Supply chain** | The cyrius toolchain is pinned in `cyrius.cyml` (single source of truth); tyche / rosnet / akshara are pinned by exact git tag and commit (`cyrius.lock`, verified in CI with `--verify` and `--locked`). CI installs the toolchain via the upstream `scripts/install.sh`. Workflow actions are pinned by commit SHA, the token is read-only except on the release job, and checkouts do not persist credentials. |
+| **Supply chain** | The cyrius toolchain is pinned in `cyrius.cyml` (single source of truth); tyche / rosnet / akshara are pinned by exact git tag and commit (`cyrius.lock`, verified in CI with `--verify` and `--locked`). akshara is a test-scope dependency (1.3.0), so a consumer of `dist/tentib.cyr` inherits only rosnet and tyche. The bundles are regenerated and diffed in CI (drift check), and ship as release assets listed in `SHA256SUMS`. CI installs the toolchain via the upstream `scripts/install.sh`. Workflow actions are pinned by commit SHA, the token is read-only except on the release job, and checkouts do not persist credentials. |
 
 ## Hardening posture (0.8.0 and 1.1.2 audits)
 

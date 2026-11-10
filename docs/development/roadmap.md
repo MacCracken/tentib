@@ -52,27 +52,22 @@ see the CHANGELOG. What remains in the 1.2.x line is maintenance.
   README figures and `api.md`'s performance contract are the 2026-07-06 run of record.
   The dated 1.1.1 note (rosnet's faster f64 path) and 1.1.2 note (tentib's faster
   quantizer / packer) carry the current numbers.
-- **Close the akshara → rosnet mismatch**: akshara 1.1.2 pins rosnet 1.2.2 while tentib
-  pins 1.4.1 (safe today: akshara calls only `t_alloc` / `t_zero`). Realign when akshara
-  cuts a release on rosnet 1.4.x.
 - **Re-prove the GPU tile path on hardware** at the current pin: `/bin/gputern` last
   returned exit 95 (all tiles on the gfx90c, bit-exact) on 2026-07-23. CI covers the host
   fallback and the `--agnos` build, not the device.
 - Toolchain / dep pin sweeps, per the established procedure in `state.md`.
 
-## 1.3.x — library packaging and the first consumer
+## 1.3.x — the first consumer (hoosh / murti)
 
-**Goal.** hoosh / murti serve a tentib model. Consumers include the sibling libs through
-a distlib bundle today; tentib has none.
+1.3.0 shipped the library bundle (`dist/tentib.cyr`, release assets, a CI drift check),
+`tx_pack_dims`, and the CI-gated consumer example `examples/serve.cyr`; see the
+CHANGELOG and [`../guides/consuming-tentib.md`](../guides/consuming-tentib.md).
 
-**Scope.** A `[lib]` module list in `cyrius.cyml` and `cyrius distlib` →
-`dist/tentib.cyr` (+ the `.deps` sidecar), the rosnet / akshara shape; a CI drift check and
-a release asset. A consumer-shaped example that loads a serialized model (1.2.0) from a
-file the consumer reads and serves it through `tx_fwd_packed`. The hoosh / murti
-integration itself lands in their repos.
-
-**Gate.** The bundle compiles standalone under the consumers' toolchain pin; the drift
-check passes; the example self-checks.
+**Open.** hoosh / murti declare `[deps.tentib]` and serve a model file through
+`tx_fwd_packed`. That work lands in their repos. tentib's part is to answer what the
+integration finds: a missing accessor, a contract that needs a sentence, or a bundle
+that does not build under their pin (hoosh pins 6.7.18, as tentib does). Any additive
+API it needs is a 1.3.x minor here.
 
 ## 1.4.x — serve from packed ternary storage
 

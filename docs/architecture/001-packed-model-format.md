@@ -13,8 +13,9 @@ re-packed.
 
 ## Layout
 
-All words are 8 bytes, little-endian (the native order of both cyrius targets).
-Offsets are in bytes from the start of the artifact.
+All words are 8 bytes, little-endian (the native order of both cyrius targets), so an
+artifact written on x86_64 loads on aarch64 and the reverse. Offsets are in bytes from
+the start of the artifact.
 
 | Offset | Size | Field |
 |---|---|---|
@@ -78,7 +79,10 @@ derived data and are recomputed from the codes, never read from the artifact.
   every artifact `tx_pack_serialize` writes, the decoder accepts. (The encoder
   refuses, with −2, a model holding a non-finite parameter or an invalid γ.)
 - **Bit-identical serving.** A loaded model serves the same logits, bit for bit, as
-  the live packed model it was written from, at every T up to the stored T.
+  the live packed model it was written from, at every T up to the stored T, on the
+  same target. Across targets the integer kernels agree exactly, but the f64 parts of
+  the forward (`f64_exp` in attention and GELU) are promised to within 1 ulp per target,
+  not to the same bits.
 - **Bounded memory.** A load allocates exactly `tx_model_alloc_bytes(V, T, C, F)`
   bytes, the four `*_init` calls' total, and refuses before allocating if that
   exceeds `max_bytes`. The cap matters because rosnet's `t_alloc` exits the process

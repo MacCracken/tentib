@@ -170,6 +170,7 @@ Worked example: [`examples/quickstart.cyr`](../examples/quickstart.cyr) step 5.
 | `tx_pack_serialize(buf, cap)` → i64 | write it to `buf`; returns the bytes written, **−1** if `cap` is too small, **−2** if the model holds a non-finite parameter or an invalid γ (nothing written in either case) | suite, fuzz, bench, example, demo |
 | `tx_pack_deserialize(buf, n, max_bytes)` → i64 | load a model from `buf[0..n)`, allocating at most `max_bytes`; returns **0**, or a negative status below, in which case nothing was allocated or changed | suite, fuzz, bench, example, demo |
 | `tx_model_alloc_bytes(V, T, C, F)` → i64 | the bytes a model of these dims allocates (the four `*_init` calls; what a load allocates); −1 for a dim outside [1, 2²⁰] | suite (against `alloc_used()`) |
+| `tx_pack_dims(dims)` | **1.3.0.** writes the live packed model's V, T (the longest context it serves), C, F to `dims[0..4)` — the `tx_fwd_packed` arguments of a model a consumer loaded but did not size; fails loud when no packed model is live | suite, example (`examples/serve.cyr`) |
 | `pk_err_length()` … `pk_err_param()` → i64 | the status codes: `length` −1, `magic` −2, `version` −3, `header` −4, `checksum` −5, `too_big` −6, `weights` −7, `gamma` −8, `param` −9 | suite (each one), fuzz |
 
 **Decoding is an untrusted-input surface.** Bad *data* is a status code, never a
@@ -177,6 +178,18 @@ Worked example: [`examples/quickstart.cyr`](../examples/quickstart.cyr) step 5.
 model is **packed-only**: it has no latent weights, so `tx_fwd`, `tx_fwd_q`,
 `tx_bwd`, `tx_sgd` and `tx_pack` fail loud on it, while `tx_fwd_packed` serves any
 T up to the stored T. `tx_init` or `tx_param_init` makes an ordinary model again.
+
+## 1.3.0 — consuming tentib as a library (`dist/tentib.cyr`)
+
+`cyrius distlib --all` bundles the library modules (`src/ternary.cyr` through
+`src/serial.cyr`, in include order) into `dist/tentib.cyr`, and the AGNOS GPU tile
+path into `dist/tentib-gpu.cyr`. A consumer declares `[deps.tentib]` with
+`modules = ["dist/tentib.cyr"]`; `cyrius deps` brings rosnet and tyche with it, and
+not akshara (a test-scope dependency of tentib's). The bundle's requires block
+carries the one stdlib leaf it needs (`math`), and it needs no consumer-defined hook.
+How-to: [`guides/consuming-tentib.md`](guides/consuming-tentib.md); the CI-gated
+example is [`examples/serve.cyr`](../examples/serve.cyr) (built with `--no-deps`,
+from the bundles alone; one process saves a model file, a second loads and serves it).
 
 ## Documented output cells (module globals, read-only for consumers)
 

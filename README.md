@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — 1.x STABLE (1.2.0: 186 assertions + a property fuzzer, x86_64 and aarch64; API frozen for the 1.x series)
+## Status — 1.x STABLE (1.3.0: 188 assertions + a property fuzzer, x86_64 and aarch64; API frozen for the 1.x series)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -87,6 +87,11 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   same logits bit for bit. The decoder treats the bytes as hostile: every field is
   checked before anything is allocated, bad data is a status code, the caller caps the
   memory. Format: [`docs/architecture/001-packed-model-format.md`](docs/architecture/001-packed-model-format.md).
+- **A library for consumers (v1.3.0)** — `dist/tentib.cyr` is a distlib bundle: one
+  `[deps.tentib]` entry brings it with rosnet + tyche (no akshara, no hooks to define).
+  [`examples/serve.cyr`](examples/serve.cyr) is the consumer shape, built from the bundles
+  alone: one process saves a model file, another loads and serves it bit for bit. How-to:
+  [`docs/guides/consuming-tentib.md`](docs/guides/consuming-tentib.md).
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39

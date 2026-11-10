@@ -10,7 +10,7 @@
 
 **tentib** — sovereign integer-native / ternary (1.58-bit) ML reference (`bitnet` reversed)
 
-- **Type**: Binary
+- **Type**: Binary, plus a distlib library bundle (`dist/tentib.cyr`) for consumers
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
 - **Version**: `VERSION` at the project root is the source of truth — do not inline the number here

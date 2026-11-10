@@ -58,12 +58,22 @@ jobs:
           CYRIUS_DCE=1 cyrius build src/main.cyr build/${{ github.event.repository.name }}
           echo "tentib: $(wc -c < build/${{ github.event.repository.name }}) bytes"
 
+      - name: Regenerate the library bundles
+        # `cyrius distlib --all` writes dist/tentib.cyr and dist/tentib-gpu.cyr, stamped
+        # from VERSION (1.3.0). CI's drift check already proved the committed bundles are
+        # in sync; regenerating here ships freshly built bytes.
+        run: cyrius distlib --all
+
       - name: Archive
         run: |
           TAG="${GITHUB_REF_NAME}"
           NAME="${{ github.event.repository.name }}"
           git archive --format=tar.gz --prefix="${NAME}-${TAG}/" -o "${NAME}-${TAG}-src.tar.gz" HEAD
-          sha256sum "${NAME}-${TAG}-src.tar.gz" "build/${NAME}" > SHA256SUMS
+          # The bundles as standalone, version-stamped assets — consumers import them via
+          # [deps.tentib] modules = ["dist/tentib.cyr"] (+ dist/tentib-gpu.cyr for #82).
+          cp dist/tentib.cyr "${NAME}-${TAG}.cyr"
+          cp dist/tentib-gpu.cyr "${NAME}-gpu-${TAG}.cyr"
+          sha256sum "${NAME}-${TAG}-src.tar.gz" "${NAME}-${TAG}.cyr" "${NAME}-gpu-${TAG}.cyr" "build/${NAME}" > SHA256SUMS
 
       - name: Extract changelog
         run: |
@@ -79,5 +89,6 @@ jobs:
           body_path: ${{ runner.temp }}/body.md
           files: |
             ${{ github.event.repository.name }}-*-src.tar.gz
+            ${{ github.event.repository.name }}-*.cyr
             build/${{ github.event.repository.name }}
             SHA256SUMS

@@ -133,6 +133,15 @@ fn tx_model_alloc_bytes(V, T, C, F): i64 {
     return s * 8;
 }
 
+# The live packed model's dims, for a consumer that loaded a model it did not size itself:
+# dims[0..4) = V, T (the longest context it serves), C, F — the arguments tx_fwd_packed
+# takes (1.3.0). Fails loud when no packed model is live.
+fn tx_pack_dims(dims): i64 {
+    guard(pk_ready == 1, "tx_pack_dims: no packed model (call tx_pack or tx_pack_deserialize first)");
+    store64(dims, pk_V0); store64(dims + 8, tx_T0); store64(dims + 16, pk_C0); store64(dims + 24, pk_F0);
+    return 0;
+}
+
 # ---- encode ----------------------------------------------------------------------
 
 # Bytes tx_pack_serialize needs for the live packed model.

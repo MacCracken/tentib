@@ -4,6 +4,88 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-11-09
+
+**tentib as a library.** Consumers (hoosh / murti, or any program) depend on tentib
+through a distlib bundle and ship models as files. The release is additive: no frozen
+signature changed, and on valid input every existing output is bit-identical to 1.2.0. The
+333,281-value golden dump is byte-identical, including the akshara path after the dep
+realign below.
+
+### Added
+
+- **`dist/tentib.cyr`**: the library bundle, built by `cyrius distlib` from a new `[lib]`
+  module list (`src/ternary.cyr` through `src/serial.cyr`, in include order).
+  `dist/tentib-gpu.cyr` holds the AGNOS `#82` tile path as a separate profile, as rosnet
+  does for its GPU backend. A consumer declares only `[deps.tentib]` with
+  `modules = ["dist/tentib.cyr"]`. `cyrius deps` then vendors rosnet and tyche with it, and
+  not akshara (see below), so a consumer defines no akshara hooks and no printer.
+
+  The bundle's sidecar and requires block carry the one stdlib leaf it needs, `math`. That
+  leaf used to come in silently through akshara's sidecar; once akshara left the bundle's
+  dependency set, distlib's aarch64 check showed that `f64_exp` / `f64_ln` need
+  `lib/math.cyr`'s polyfills there. `src/layers.cyr` and `src/model.cyr` now include it
+  themselves.
+
+  This was checked with a throwaway consumer project that declared only `[deps.tentib]`. It
+  got exactly tentib, rosnet and tyche, built without warnings, and served the same logits
+  digest as the in-repo example.
+- **`examples/serve.cyr`**, the consumer shape. It includes only the three dependency
+  bundles and the stdlib modules it calls, and builds with `--no-deps`, so it proves the
+  bundle compiles on its own.
+  - `serve save <path>` trains, packs and writes a model file. `serve load <path>` reads it
+    with a bounded read (64 MiB), loads it under a memory budget (1 GiB), and serves it.
+  - Both modes print the argmax row and a digest of the logits, and the digests must match:
+    the model crosses a process boundary bit for bit.
+  - Exit codes: 1 for usage (an empty path or one past 4095 bytes is refused), 2 for an I/O
+    error, 3 for a file `tx_pack_deserialize` refuses (its status is printed).
+- **`tx_pack_dims(dims)`** reports the live packed model's V, T, C, F, which are the
+  arguments `tx_fwd_packed` needs. Before it, a consumer that loaded a model it did not
+  size itself had no API to learn them. Writing the example found the gap.
+- **Portability checked under qemu:**
+  - a model file written on x86_64 loads and serves on aarch64;
+  - aarch64's own save → load round trip is bit-identical.
+
+  Serving is promised bit-identical **within** a target. Across targets the integer kernels
+  agree exactly, but `f64_exp` (attention, GELU) is only promised to within 1 ulp per
+  target. On this test model the two targets happened to give the same digest. The format
+  doc says so.
+- **CI:**
+  - a bundle drift check (`cyrius distlib --all` + `git diff --exit-code dist/`);
+  - the consumer example: build with `--no-deps`, save in one process, load in a second,
+    compare the digests, and require exit 3 on a corrupted file;
+  - on aarch64: the example's round trip, and an x86_64-written file loaded under qemu;
+  - the docs job requires both bundles and checks their version stamps.
+
+  The **release** regenerates the bundles and ships them as `tentib-<tag>.cyr` and
+  `tentib-gpu-<tag>.cyr` in `SHA256SUMS`.
+- [`docs/guides/consuming-tentib.md`](docs/guides/consuming-tentib.md): declare the dep,
+  ship a model, serve it, and the rules (untrusted files, the two bounds, token ids,
+  packed-only, portability). It is linked from `api.md` (a new 1.3.0 section) and the
+  getting-started guide.
+- Suite 186 → 188 assertions (`tx_pack_dims` after a load, and its guard).
+
+### Changed
+
+- **akshara 1.1.2 → 1.2.0, as a test-scope dependency.** akshara 1.2.0 pins rosnet
+  1.4.1, as tentib does, so the akshara → rosnet version mismatch the roadmap tracked is
+  closed: the resolver's "rosnet 1.2.2 (wanted by akshara) not used" note is gone. 1.2.0
+  speeds up `bpe_learn`; its outputs and signatures are unchanged, and tentib calls only
+  `corpus_set` / `gd_ld`. The vendored `lib/akshara.cyr` byte-matches the tag, and
+  `cyrius.lock` was regenerated: akshara `02a3d4e`, rosnet `af2bb1a`, tyche `cdb74e2`.
+
+  `scope = "test"` because the library never tokenizes; only the demo, the examples and
+  the harnesses do. The dep is still vendored and pinned by every resolve and prepended
+  to test, bench and fuzz builds, while the demo and examples include it explicitly. A
+  consumer never inherits it.
+- `programs/gpumm.cyr` no longer includes akshara, which it never used. That removes four
+  "undefined function" warnings its build always printed, and the AGNOS binary drops from
+  317,296 to 300,312 bytes.
+- `CLAUDE.md` names the bundle in the project type. `CONTRIBUTING.md` and the
+  getting-started guide add the `cyrius distlib --all` step. `SECURITY.md` covers the
+  bundle, the test-scope dep, the release assets and the example's bounded I/O. The
+  roadmap's 1.3.x packaging item and the akshara maintenance item are shipped.
+
 ## [1.2.0] — 2026-11-09
 
 **Packed-model serialization.** A trained, packed model can now be written to bytes and

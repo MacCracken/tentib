@@ -239,6 +239,8 @@ fn sc_po_bwd(): i64 { return tx_bwd(g_tok, g_tgt, g_V, g_T, g_C, g_F); }
 fn sc_po_sgd(): i64 { return tx_sgd(g_V, g_T, g_C, g_F, f64_from(0)); }
 # tx_pack on a deserialized model (must fail: it would re-pack from zero latents).
 fn sc_po_pack(): i64 { return tx_pack(g_V, g_T, g_C, g_F); }
+# tx_pack_dims with no packed model live (must fail).
+fn sc_dims_none(): i64 { pk_ready = 0; var d[32]; return tx_pack_dims(&d); }
 # Control: a deserialized model serves.
 fn sc_po_serve(): i64 { return tx_fwd_packed(g_tok, g_V, g_T, g_C, g_F); }
 # Control: tx_param_init makes an ordinary model again, so tx_fwd runs.
@@ -1222,6 +1224,12 @@ fn main() {
 
     # (d) a loaded model has no latent weights: the paths that read them refuse it
     tx_pack_deserialize(art, an, big);
+    var zdims = t_alloc(4);
+    tx_pack_dims(zdims);
+    var zdok = (load64(zdims) == zeV) & (load64(zdims + 8) == zeT);
+    zdok = zdok & (load64(zdims + 16) == zeC) & (load64(zdims + 24) == zeF);
+    assert(zdok == 1, "1.3.0: tx_pack_dims reports the loaded model's V, T, C, F");
+    assert(child_exit(&sc_dims_none) == 1, "1.3.0 guard: tx_pack_dims refuses when no packed model is live");
     g_V = zeV; g_T = zeT; g_C = zeC; g_F = zeF; g_tok = g_tok_s;
     g_tgt = t_alloc(zeT); t_copy(g_tgt, g_tok_s, zeT);
     assert(child_exit(&sc_po_serve) == 0, "1.2.0: a loaded model serves (tx_fwd_packed)");

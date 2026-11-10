@@ -20,6 +20,11 @@
 7. `CYRIUS_DCE=1 cyrius build tests/tentib.fcyr build/fuzz && ./build/fuzz` —
    seeded property fuzzing (5,000 rounds, a few seconds; exit 1 names the failed
    property and round).
+8. `cyrius distlib --all` after any change to a library module (`src/` other than
+   `main.cyr` / `test.cyr`) or to `VERSION`, then commit `dist/`: consumers import
+   `dist/tentib.cyr`, and CI fails when it is stale. `examples/serve.cyr` is the
+   consumer-shaped check: `cyrius build --no-deps examples/serve.cyr build/serve`,
+   then `./build/serve save build/m.tpk && ./build/serve load build/m.tpk`.
 
 See [`CLAUDE.md`](CLAUDE.md) for the full development loop and
 [`docs/development/roadmap.md`](docs/development/roadmap.md) for the open work (1.2.x – 1.x.x and

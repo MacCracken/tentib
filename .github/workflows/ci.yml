@@ -115,6 +115,31 @@ jobs:
           [ "$rc" -eq 96 ] || { echo "gpumm: exit $rc, expected 96 (host, no GPU)"; exit 1; }
           cyrius build --agnos programs/gpumm.cyr build/gputern_agnos
 
+      - name: Library bundle drift check
+        # tentib ships dist/tentib.cyr (+ dist/tentib-gpu.cyr) for consumers (1.3.0).
+        # distlib is byte-deterministic: regenerate both bundles and their sidecars and
+        # fail if dist/ differs from the commit.
+        run: |
+          cyrius distlib --all
+          git diff --exit-code dist/ \
+            || { echo "FAIL: dist/ is stale — run 'cyrius distlib --all' and commit."; exit 1; }
+
+      - name: Consumer example (the bundle only, two processes)
+        # examples/serve.cyr includes only the dependency bundles, and --no-deps prepends
+        # nothing, so this proves dist/tentib.cyr compiles on its own. One process trains,
+        # packs and writes a model file; a second reads it, loads it and serves it. The
+        # digests of the served logits must be equal (bit-identical across processes).
+        # A corrupted file must be refused with exit 3.
+        run: |
+          cyrius build --no-deps examples/serve.cyr build/serve
+          ./build/serve save build/model.tpk | tee build/save.out
+          ./build/serve load build/model.tpk | tee build/load.out
+          diff <(grep '^digest' build/save.out) <(grep '^digest' build/load.out)
+          cp build/model.tpk build/bad.tpk
+          printf '\x55' | dd of=build/bad.tpk bs=1 seek=300 conv=notrunc 2>/dev/null
+          set +e; ./build/serve load build/bad.tpk; rc=$?; set -e
+          [ "$rc" -eq 3 ] || { echo "serve: a corrupted model file exited $rc, expected 3"; exit 1; }
+
       - name: Fuzz
         # Seeded property fuzzing (tests/tentib.fcyr); exit 1 = a property failed.
         run: |
@@ -169,6 +194,20 @@ jobs:
           cyrius build --aarch64 tests/tentib.fcyr build/fuzz_a64
           timeout 600 "$QEMU" build/fuzz_a64
 
+      - name: Consumer example on aarch64, and an x86_64 model file loaded there
+        # The artifact format is portable (little-endian on both targets): a file
+        # written on x86_64 must load on aarch64. Its logits are only promised to be
+        # bit-identical within a target (cyrius's f64_exp is within 1 ulp per target),
+        # so the cross-target load is checked for success, not for the digest.
+        run: |
+          cyrius build --no-deps --aarch64 examples/serve.cyr build/serve_a64
+          "$QEMU" build/serve_a64 save build/model_a64.tpk | tee build/save_a64.out
+          "$QEMU" build/serve_a64 load build/model_a64.tpk | tee build/load_a64.out
+          diff <(grep '^digest' build/save_a64.out) <(grep '^digest' build/load_a64.out)
+          cyrius build --no-deps examples/serve.cyr build/serve
+          ./build/serve save build/model_x86.tpk
+          "$QEMU" build/serve_a64 load build/model_x86.tpk
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest
@@ -197,7 +236,8 @@ jobs:
         run: |
           MISSING=0
           for doc in README.md CHANGELOG.md VERSION LICENSE SECURITY.md CONTRIBUTING.md CLAUDE.md cyrius.cyml \
-                     docs/api.md docs/benchmarks.md docs/development/state.md docs/architecture/001-packed-model-format.md; do
+                     docs/api.md docs/benchmarks.md docs/development/state.md docs/architecture/001-packed-model-format.md \
+                     dist/tentib.cyr dist/tentib-gpu.cyr; do
             if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
           done
           exit $MISSING
@@ -209,4 +249,7 @@ jobs:
           if [ "$CYML_RAW" = "\${file:VERSION}" ]; then CYML_VERSION="$FILE_VERSION"; else CYML_VERSION="$CYML_RAW"; fi
           [ "$FILE_VERSION" = "$CYML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_RAW)"; exit 1; }
           grep -q "^## \[$FILE_VERSION\]" CHANGELOG.md || { echo "version $FILE_VERSION not in CHANGELOG.md"; exit 1; }
+          for b in dist/tentib.cyr dist/tentib-gpu.cyr; do
+            grep -q "^# Version: $FILE_VERSION\$" "$b" || { echo "$b is not stamped $FILE_VERSION (run cyrius distlib --all)"; exit 1; }
+          done
           echo "Version consistent: $FILE_VERSION (cyml: $CYML_RAW)"

@@ -12,6 +12,10 @@
 # (demb), the bias, and the embedding-table scatter are ALL exact full-precision.
 # Embeddings stay full-precision: BitNet b1.58 ternarizes ONLY linear layers.
 #
+# f64_exp / f64_ln run lib/math.cyr's polyfills on aarch64 (see layers.cyr), so this
+# module includes it too.
+include "lib/math.cyr"
+
 # softmax_xent_fwd/bwd are PORTED from attn11/src/ops.cyr (rosnet has no softmax).
 # Depends, in the includer's scope and IN ORDER: src/ternary.cyr + lib/rosnet.cyr
 # + src/bitlinear.cyr. Self-includes nothing.

@@ -1,7 +1,7 @@
-commit	b8b3f68b5f5c288489f18ed8afd401f142db51a5	akshara	https://github.com/MacCracken/akshara	1.1.2
+commit	02a3d4e97be02e2f87bc0da78b85065d6030392d	akshara	https://github.com/MacCracken/akshara	1.2.0
 commit	af2bb1a98f31d6447ff2ea4b937dcb92acc543cb	rosnet	https://github.com/MacCracken/rosnet	1.4.1
 commit	cdb74e281920da6130bd48f1de37d9b150ab0d3d	tyche	https://github.com/MacCracken/tyche	1.2.2
-38bdde386f9ba2d946e8aacfc2c552c8e0f3f4fd304b0e39344a1367a736624c  lib/akshara.cyr
+2a2b46e2c352355051bb93261a3d91f9fab256dac3ef53355a98626ebab6cf3e  lib/akshara.cyr
 346716377b00f36e58eb16cf7fe1dd62dd8fe577930d0d0429f822795b35817c  lib/alloc.cyr
 5afd5bb7cba4e49fee331f6a2838f4e01d9781defaf531403f6616f42ac7151b  lib/alloc_agnos.cyr
 57af1877c5082793ecfcfb2bf358c81cda79eaaae4feaa12eb7b963c4cbdf739  lib/alloc_cx.cyr

@@ -1,0 +1,117 @@
+# tentib serve — the consumer shape (1.3.0): a program that depends on tentib only
+# through its distlib bundle, as hoosh / murti would, and ships the model as a file.
+#
+#   serve save <path>   train a tiny ternary LM on a fixed token sequence, pack it,
+#                       and write the packed model to <path>
+#   serve load <path>   read <path>, load it under a memory budget, and serve it
+#
+# Both modes print the served next-token argmax per position and a digest of the
+# logits (FNV-1a 64 over their bits). The two `digest` lines must be equal: that is the
+# check that the model crossed a process boundary bit for bit. tentib itself does no
+# file I/O; this program does, with the stdlib's bounded read.
+#
+# It includes ONLY the dependency bundles (tyche, rosnet, dist/tentib.cyr) and the
+# stdlib modules it calls itself: no src/ file and no akshara. CI builds it with
+# --no-deps, so nothing is prepended either, which proves the bundle compiles on its own.
+#
+# Exit codes: 0 = done; 1 = usage; 2 = the file could not be read or written; 3 = the
+# file is not a model this tentib loads (the tx_pack_deserialize status is printed).
+#
+# Build + run (from the repo root):
+#   cyrius build --no-deps examples/serve.cyr build/serve
+#   ./build/serve save build/model.tpk && ./build/serve load build/model.tpk
+
+include "lib/tyche.cyr"      # rng_* (rosnet's t_randn draws from it)
+include "lib/rosnet.cyr"     # t_alloc, the f64 linear algebra tentib builds on
+include "dist/tentib.cyr"    # the tentib library bundle (1.3.0)
+include "lib/io.cyr"         # file_read_whole_max / file_write_all
+include "lib/args.cyr"       # args_init / argc / argv
+
+# The largest model file this program will read (64 MiB), and the memory it lets a load
+# allocate (1 GiB). Both are this consumer's policy, not tentib's.
+fn max_file(): i64 { return 67108864; }
+# The allocation budget handed to tx_pack_deserialize.
+fn max_load(): i64 { return 1073741824; }
+
+# Print a NUL-terminated string to stdout.
+fn say(s): i64 { var n = 0; while (load8(s + n) != 0) { n = n + 1; } sys_write(1, s, n); return 0; }
+# Print a newline.
+fn nl(): i64 { var b[8]; store8(&b, 10); sys_write(1, &b, 1); return 0; }
+
+# The fixed token sequence both modes serve: tokens[t] = (3t + 1) mod V.
+fn fill_tokens(tok, T, V): i64 {
+    var t = 0;
+    while (t < T) { store64(tok + t * 8, (t * 3 + 1) % V); t = t + 1; }
+    return 0;
+}
+
+# Serve tokens through the live packed model and print the argmax row and the digest.
+fn serve_and_report(V, T, C, F): i64 {
+    var tok = t_alloc(T);
+    fill_tokens(tok, T, V);
+    tx_fwd_packed(tok, V, T, C, F);
+    say("argmax:");
+    var t = 0;
+    while (t < T) { say(" "); fmt_int(logits_argmax(ki_logits + t * V * 8, V)); t = t + 1; }
+    nl();
+    var h = 0xCBF29CE484222325;
+    var i = 0;
+    while (i < T * V * 8) { h = (h ^ load8(ki_logits + i)) * 0x100000001B3; i = i + 1; }
+    say("digest: "); fmt_int(h); nl();
+    return 0;
+}
+
+# Save mode: train, pack, serialize, write the file.
+fn do_save(path): i64 {
+    var V = 8; var T = 8; var C = 8; var F = 16;
+    var tok = t_alloc(T); var tgt = t_alloc(T);
+    fill_tokens(tok, T, V);
+    var t = 0;
+    while (t < T) { store64(tgt + t * 8, load64(tok + ((t + 1) % T) * 8)); t = t + 1; }
+    var stats = t_alloc(2);
+    tx_train(tok, tgt, V, T, C, F, 300, 1, stats);
+    tx_int_init(V, T, C, F); tx_pack_init(V, T, C, F); tx_pack(V, T, C, F);
+    var n = tx_pack_serial_bytes();
+    var buf = alloc(n);
+    tx_pack_serialize(buf, n);
+    var w = file_write_all(path, buf, n);
+    if (w != n) { say("serve: cannot write the model file (errno "); fmt_int(0 - w); say(")"); nl(); return 2; }
+    say("saved: "); fmt_int(n); say(" bytes"); nl();
+    serve_and_report(V, T, C, F);
+    return 0;
+}
+
+# Load mode: read the file (bounded), load it (budgeted), ask for its dims, serve.
+fn do_load(path): i64 {
+    var lenp[8];
+    store64(&lenp, 0);
+    var buf = file_read_whole_max(path, max_file(), &lenp);
+    var n = load64(&lenp);
+    if (buf == 0) { say("serve: cannot read the model file (errno "); fmt_int(0 - n); say(")"); nl(); return 2; }
+    var rc = tx_pack_deserialize(buf, n, max_load());
+    if (rc != 0) { say("serve: not a model this tentib loads (status "); fmt_int(rc); say(")"); nl(); return 3; }
+    var dims[32];
+    tx_pack_dims(&dims);
+    say("loaded: "); fmt_int(n); say(" bytes, V="); fmt_int(load64(&dims)); say(" T="); fmt_int(load64(&dims + 8));
+    say(" C="); fmt_int(load64(&dims + 16)); say(" F="); fmt_int(load64(&dims + 24)); nl();
+    serve_and_report(load64(&dims), load64(&dims + 8), load64(&dims + 16), load64(&dims + 24));
+    return 0;
+}
+
+# Entry: validate the arguments, then save or load.
+fn main(): i64 {
+    alloc_init();
+    if (args_init() < 0) { say("serve: cannot read the command line"); nl(); return 1; }
+    if (argc() != 3) { say("usage: serve save|load <path>"); nl(); return 1; }
+    var mode = argv(1); var path = argv(2);
+    var plen = 0;
+    while (load8(path + plen) != 0) { plen = plen + 1; }
+    if ((plen == 0) | (plen > 4095)) { say("serve: the path must be 1 to 4095 bytes"); nl(); return 1; }
+    if (streq(mode, "save") == 1) { return do_save(path); }
+    if (streq(mode, "load") == 1) { return do_load(path); }
+    say("usage: serve save|load <path>"); nl();
+    return 1;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
