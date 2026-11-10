@@ -15,7 +15,7 @@ is enough:
 ```toml
 [deps.tentib]
 git = "https://github.com/MacCracken/tentib"
-tag = "1.4.0"
+tag = "1.5.0"
 modules = ["dist/tentib.cyr"]
 ```
 
@@ -58,7 +58,7 @@ var info[40];
 var pr = tx_pack_peek(buf, load64(&lenp), &info);       # 1.4.0: V, T, C, F, vocabulary
 if (pr != 0) { ... }                                    # the status the load would return
 # refuse here a V or vocabulary you cannot serve: nothing has changed yet
-var rc = tx_pack_deserialize(buf, load64(&lenp), MAX_LOAD);   # bound the memory
+var rc = tx_pack_deserialize_serving(buf, load64(&lenp), MAX_LOAD);   # 1.5.0: serving only
 if (rc != 0) { ... }                                    # a pk_err_* code; nothing changed
 
 var dims[32];
@@ -84,9 +84,15 @@ while ((tx_dec_len() < T) & (more)) {                   # the cache holds at mos
   allocates or changes anything, returns a status code for bad data (it never exits),
   and keeps the current model serving when it refuses. The checksum detects
   corruption, not tampering: if you need provenance, verify it before loading.
+- **Load for serving only** (1.5.0). `tx_pack_deserialize_serving` checks and serves exactly
+  as `tx_pack_deserialize`, but allocates only what serving reads: 1.4 MB instead of 12.2 MB
+  at the bench config. Use `tx_pack_deserialize` only if the process will go on to call
+  something that needs the training buffers. A serving-only model refuses those calls, and
+  `tx_init` makes an ordinary model again.
 - **Choose the two bounds.** `MAX_FILE` caps your read, and `MAX_LOAD` caps what a load
-  may allocate (`tx_model_alloc_bytes(V, T, C, F)` is the exact figure for a model).
-  The load bound matters: rosnet's allocator exits the process when an allocation fails.
+  may allocate. The exact figure for a model is `tx_serve_alloc_bytes(V, T, C, F)` for a
+  serving load, and `tx_model_alloc_bytes` for a full one. The load bound matters: rosnet's
+  allocator exits the process when an allocation fails.
 - **Token ids must be in [0, V).** `tx_fwd_packed` and `tx_dec_step` fail loud on one that
   is not, so map your tokenizer's ids onto the model's vocabulary before you serve.
 - **A loaded model only serves.** It has no latent weights, so `tx_fwd`, `tx_fwd_q`,
@@ -143,9 +149,10 @@ above and [`../api.md`](../api.md).
   checked under its lock, with `tx_dec_len()` as a cross-check).
 - **A same-shaped reload keeps no memory; a change of shape still does.** A load over a
   *loaded* model of the same V, T, C, F overwrites its buffers and allocates nothing
-  (1.4.0, [ADR 0003](../adr/0003-a-load-reuses-only-a-loaded-models-buffers.md)). Any
-  other load allocates `tx_model_alloc_bytes(V, T, C, F)`, and the model it replaces is not
-  freed (rosnet's allocator never frees; see the api's *Allocation & lifetime*). So budget
+  (1.4.0, [ADR 0003](../adr/0003-a-load-reuses-only-a-loaded-models-buffers.md)), and so
+  does a serving load over a model loaded for serving (1.5.0). Any other load allocates
+  its figure, `tx_serve_alloc_bytes` for a serving load (1.5.0) or `tx_model_alloc_bytes`
+  for a full one, and the model it replaces is not freed (rosnet's allocator never frees; see the api's *Allocation & lifetime*). So budget
   one model's memory per change of shape. Skipping a load of unchanged bytes (hoosh
   compares SHA-256 digests) still saves the validation and copy, a few milliseconds at
   the bench config. A refused load allocates nothing. Read the file into a buffer you

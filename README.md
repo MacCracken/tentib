@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — 1.x STABLE (1.4.0: 280 assertions + a property fuzzer, x86_64 and aarch64; API frozen for the 1.x series)
+## Status — 1.x STABLE (1.5.0: 346 assertions + a property fuzzer, x86_64 and aarch64, on a Raspberry Pi 4 too; API frozen for the 1.x series)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -100,6 +100,11 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   a same-shaped model allocates nothing** (it reuses the loaded model's buffers). The model
   file can declare the **byte vocabulary**, and `tx_pack_peek` reads a file's header before
   a load. Constraints: [`docs/architecture/002-incremental-decode.md`](docs/architecture/002-incremental-decode.md).
+- **A load for serving only (v1.5.0)** — `tx_pack_deserialize_serving` serves exactly what
+  `tx_pack_deserialize` does, from 8.5× less memory (1.4 MB instead of 12.2 MB at the bench
+  config): no latent weights, gradients or training scratch. Measured on a **Raspberry Pi 4**
+  (Cortex-A72): packed serving 1,241 tok/s, 2.85× the board's f64 path, and a cached decode
+  step 1,249 tok/s ([`docs/benchmarks.md`](docs/benchmarks.md) §6).
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39

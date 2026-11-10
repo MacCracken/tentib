@@ -41,7 +41,8 @@ scratch is gone: the bias-free projections pass `db = 0`.)
   pack time (`tpack2`, `tsimd_pack_w`), K > 2²² in `ternary_matmul_free_simd`
   (the i32 exactness bound), and packed-store misuse (`tx_pack` before its inits,
   `tx_fwd_packed` before `tx_pack`; since 1.4.0 a `tx_dec_step` on a cache older than
-  the model, on a full cache, or before any packed model). Cold paths only; hot loops
+  the model, on a full cache, or before any packed model; since 1.5.0 every call that needs
+  a training buffer, on a model loaded for serving only). Cold paths only; hot loops
   are unchecked.
   Audit record: [`audit/2026-07-06-audit.md`](audit/2026-07-06-audit.md).
 - **Ids and dims (1.1.2):** token ids (`tx_fwd`, `tx_fwd_q`, `tx_fwd_packed`,
@@ -66,8 +67,10 @@ path; the invariant is:
   (`lm_train`, `tx_train` — which begins with `tx_init`), **in a successful
   `tx_pack_deserialize`** (1.2.0: it runs `tx_init` + `tx_int_init` + `tx_pack_init`,
   exactly `tx_model_alloc_bytes(V, T, C, F)` bytes; since 1.4.0 **not** when it replaces
-  a loaded model of the same V, T, C, F, whose buffers it overwrites), and **in the
-  first `tx_dec_reset`** (1.4.0: the decode cache, `tx_dec_alloc_bytes(T, C)`, again
+  a loaded model of the same V, T, C, F, whose buffers it overwrites), **in a successful
+  `tx_pack_deserialize_serving`** (1.5.0: exactly `tx_serve_alloc_bytes(V, T, C, F)`, what
+  serving reads; nothing when it replaces a model loaded for serving with the same dims), and
+  **in the first `tx_dec_reset`** (1.4.0: the decode cache, `tx_dec_alloc_bytes(T, C)`, again
   only for a model larger than any before). Each such call allocates fresh buffers;
   call them a **bounded number of times per process**.
 - **Every forward, backward, and kernel path is allocation-free** and reuses the
@@ -181,12 +184,27 @@ Worked example: [`examples/quickstart.cyr`](../examples/quickstart.cyr) step 5.
 | `tx_pack_vocab()` → i64 | **1.4.0.** the vocabulary the live packed model declares: `pk_vocab_none()` or `pk_vocab_bytes()`; a load sets it from the artifact's flags word; fails loud when no packed model is live | suite, fuzz |
 | `tx_pack_set_vocab(kind)` | **1.4.0.** declares the packed model's vocabulary for `tx_pack_serialize` to record: `pk_vocab_bytes()` (token id = byte value; needs V = 256) or `pk_vocab_none()`. `tx_pack_init` resets it to none and `tx_pack` keeps it. Fails loud on another kind, on bytes with V ≠ 256, or before `tx_pack_init` | suite, fuzz |
 | `pk_vocab_none()`, `pk_vocab_bytes()` → i64 | **1.4.0.** the vocabulary kinds, 0 and 1 (flags bit 0) | suite |
+| `tx_pack_deserialize_serving(buf, n, max_bytes)` → i64 | **1.5.0.** `tx_pack_deserialize` for a server: the same bytes, checks, status codes and served logits (bit for bit), but it allocates only what serving reads, at most `max_bytes` measured against `tx_serve_alloc_bytes`. The model serves, decodes, reports its dims and vocabulary and serializes; every call that needs a training buffer refuses it (below). A serving load over a model loaded for serving with the same dims allocates nothing | suite, fuzz (P10, P13), bench, example |
+| `tx_serve_alloc_bytes(V, T, C, F)` → i64 | **1.5.0.** the bytes a serving load allocates: the packed store, the embeddings, gains and bias, and one forward's scratch (1,434,536 at the bench config, against `tx_model_alloc_bytes`' 12,192,728); −1 for a dim outside [1, 2²⁰] | suite (against `alloc_used()`), bench, example |
 
 **Decoding is an untrusted-input surface.** Bad *data* is a status code, never a
 `guard()` exit; the memory a load may take is the caller's `max_bytes`. A loaded
 model is **packed-only**: it has no latent weights, so `tx_fwd`, `tx_fwd_q`,
 `tx_bwd`, `tx_sgd` and `tx_pack` fail loud on it, while `tx_fwd_packed` serves any
 T up to the stored T. `tx_init` or `tx_param_init` makes an ordinary model again.
+
+**Loading for serving only (1.5.0).** `tx_pack_deserialize_serving` is the load for a
+server; `tx_pack_deserialize` is unchanged and still allocates the full model. A
+serving-only model has no latent weights, gradients, block training scratch or K×N integer
+scratch, so these calls refuse it (fail loud):
+- `tx_fwd`, `tx_fwd_q`, `tx_bwd`, `tx_sgd` and `tx_pack`, as on any loaded model;
+- `tx_param_init` and `tx_zero_grads` (new guards, on this state only);
+- `block_fwd` / `block_bwd`;
+- `bl_forward_q`.
+
+`tx_init` makes an ordinary model again, and `tx_int_init` / `blk_init` re-provide their
+families. Why a new entry point:
+[ADR 0004](adr/0004-serving-only-load-is-a-new-entry-point.md).
 
 **Reloading (1.4.0).** A load that replaces a *loaded* model of the same V, T, C, F
 overwrites its buffers and allocates nothing; any other load allocates

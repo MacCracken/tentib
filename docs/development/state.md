@@ -5,6 +5,15 @@
 
 ## Version
 
+**1.5.0** (2026-11-09): **a load for serving only.** `tx_pack_deserialize_serving` reads and checks a
+model file exactly as `tx_pack_deserialize` does and serves the same logits bit for bit. It allocates only
+what serving reads, `tx_serve_alloc_bytes`: 1,434,536 bytes at the bench config, against 12,192,728. It is a
+new entry point ([ADR 0004](../adr/0004-serving-only-load-is-a-new-entry-point.md)): `tx_pack_deserialize` is
+unchanged, and the golden dump is byte-identical. Every call that needs a training buffer refuses a
+serving-only model. Also: the Raspberry Pi 4 measurement (`docs/benchmarks.md` §6) and
+`scripts/bench-history.sh`'s `BENCH_HOST` mode, first committed after 1.4.0. Suite **346**; fuzz **P1–P13**; both
+also on aarch64 under qemu and on the Pi 4.
+
 **1.4.0** (2026-11-09): **what the first consumer asked for.** Incremental decode (`src/decode.cyr`:
 `tx_dec_reset` / `tx_dec_step` / `tx_dec_len` / `tx_dec_alloc_bytes`), bit-identical to the last row of
 `tx_fwd_packed` over the same tokens; a load over a loaded model of the same dims reuses its buffers and
@@ -62,7 +71,7 @@ Releases since 1.0.0: 1.0.1 (AGNOS GPU integer offload, `ternary_matmul_free_gpu
 1.0.2 (pin 6.5.27, deps to their 1.x freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20) ·
 1.1.0 (pin 6.7.9) · 1.1.1 (pin 6.7.18, latest deps) · 1.1.2 (P(-1) sweep) ·
 1.2.0 (packed-model serialization) · 1.3.0 (library bundle, consumer example) · 1.3.1 (hoosh adopts it) ·
-1.4.0 (incremental decode, same-dims reload, the vocabulary flag).
+1.4.0 (incremental decode, same-dims reload, the vocabulary flag) · 1.5.0 (the serving-only load, the Pi 4 benchmarks).
 
 **1.0.0 — STABLE**, cut 2026-07-06 (user-named; user tags). The clean cut
 (tarka/prajna/anukūlana precedent): **no code change from 0.8.0** — all six v1.0
@@ -147,7 +156,10 @@ STE), **0.1.0** (M0 — ternary quantizer).
   loaded model is packed-only (`tx_packed_only`, guarded in the latent-weight paths).
   **1.4.0:** `tx_pack_peek` (the header checks, `_pk_header`, without loading), the byte
   vocabulary (`tx_pack_set_vocab` / `tx_pack_vocab`, flags bit 0), and `_pk_reusable`:
-  a load over a loaded model of the same dims overwrites its buffers.
+  a load over a loaded model of the same dims overwrites its buffers. **1.5.0:**
+  `tx_pack_deserialize_serving` / `tx_serve_alloc_bytes`, through one loader (`_pk_load`) with
+  `tx_pack_deserialize`; `_tx_serve_alloc` allocates what serving reads and sets every other buffer
+  pointer to 0, and `tx_serve_only` (`src/block.cyr`) makes `tx_param_init` / `tx_zero_grads` refuse it.
 - `src/decode.cyr` — **1.4.0 incremental decode**: `tx_dec_reset` / `tx_dec_step` /
   `tx_dec_len` / `tx_dec_alloc_bytes`. One new position per step against a key/value cache
   (2·T·C f64), bit-identical to `tx_fwd_packed`'s row; the attention row is
@@ -169,7 +181,7 @@ STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Tests
 
-- `tests/tentib.tcyr` — **280/280** green (x86_64, aarch64 under qemu in CI, and since 2026-11-09 a real
+- `tests/tentib.tcyr` — **346/346** green (x86_64, aarch64 under qemu in CI, and since 2026-11-09 a real
   Raspberry Pi 4, Cortex-A72): rosnet smoke, M0 quantization, BitLinear
   forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
@@ -199,21 +211,26 @@ STE), **0.1.0** (M0 — ternary quantizer).
   decode (bit identity at every window length on five models, the cache's allocation and
   reuse, 8 guard paths + 2 controls), same-dims reloads (no allocation, 40 alternating
   loads serving bit-identically, the rule's edges, a refused load), and the vocabulary
-  flag + `tx_pack_peek` (round trip, refusals, peek verdicts, guards).
+  flag + `tx_pack_peek` (round trip, refusals, peek verdicts, guards), and the **1.5.0 group**: serving
+  loads at three shapes (exact allocation, bit-identical serving, prefix and decode, canonical bytes), the
+  bench figure, the memory bound and status codes, reuse between serving loads and none across loaders, and
+  the 9 refused calls plus 4 controls in forked children.
 - `tests/tentib.bcyr` — **the 0.5.0 benchmark harness** (drives `docs/benchmarks.md`):
   per-layer kernel sweep (branchy/branchless/SIMD-pack-once/rosnet-f64 at 128²–768²),
   prep-amortization costs, whole-model forward → tok/s (f64 / scalar-int / SIMD-int
   at a b1.58-shaped 267k-param config) + packed serving + (1.1.2) a training step +
   (1.2.0) serialize / deserialize + (1.4.0) a same-dims load, and a 32-token window
-  decoded with a full forward per token vs the cached step.
+  decoded with a full forward per token vs the cached step + (1.5.0) a serving load fresh and
+  same-dims, and packed serving from the serving-only model.
   B-series fairness; ratios reproduce, absolute ns vary with boost.
-- `tests/tentib.fcyr` — **seeded property fuzzer** (1.1.2): 5,000 rounds, ~9 s (33 s on the
+- `tests/tentib.fcyr` — **seeded property fuzzer** (1.1.2): 5,000 rounds, ~5–9 s (33 s on the
   Raspberry Pi 4, where it also holds),
-  properties P1–P12 (kernel agreement, code range, pack round-trip, Weff = code·γ,
+  properties P1–P13 (kernel agreement, code range, pack round-trip, Weff = code·γ,
   integer vs f64 within the summation bound, NaN rows, mask identity, whole-model
   modes + prefix serving, from 1.2.0 the bytes round trip (P9) and the decoder on
   mutated artifacts (P10; from 1.4.0 also a byte-vocabulary base and the peek agreeing
-  with the load), and from 1.4.0 incremental decode (P11) and same-dims reloads (P12)).
+  with the load; from 1.5.0 half its buffers load for serving only), from 1.4.0 incremental decode (P11)
+  and same-dims reloads (P12), and from 1.5.0 serving loads (P13)).
 
 ## Dependencies
 
@@ -255,8 +272,7 @@ gets rosnet + tyche (checked with a throwaway consumer project, 1.3.0).
 tentib is stable (1.x, API frozen); the open work is in [`roadmap.md`](roadmap.md),
 proposed in order (1.2.0, 1.3.0 and 1.4.0 shipped, and hoosh adopted 1.3.x): **1.3.x** murti once ported ·
 **1.4.x** the rest of what the first consumer asked for (a token table in the artifact) ·
-**1.5.x** serving from 2-bit / trit packed storage, with a serving-only allocation for loaded
-models · **1.6.x** the edge target, the Raspberry Pi 4 at `ssh pi` (retargeted from a Pi 5): measured after
+**1.5.x** serving from 2-bit / trit packed storage (1.5.0 shipped the serving-only load) · **1.6.x** the edge target, the Raspberry Pi 4 at `ssh pi` (retargeted from a Pi 5): measured after
 1.4.0 (`docs/benchmarks.md` §6: packed serving 1,241 tok/s, 2.85× the board's f64 path; a cached
 decode step 1,249 tok/s); sizing a model for its 2 GB waits on 1.5.x, and power is unmeasured · **1.7.x** GPU kernels via mabda · later 1.x minors
 (a matched-recipe quality ablation, the token-mixer research watch) · a **2.0.0

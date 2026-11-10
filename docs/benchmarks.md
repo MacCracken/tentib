@@ -61,6 +61,24 @@ is reproduced by the committed harness — no hand-curated numbers.
 > serving −1.2%), so the attention row's refactor costs nothing. Against 1.2.0's recorded
 > run every row, the unchanged per-layer kernels too, is 4–12% slower: that is this host's
 > state on the day, which is why only same-session rows compare.
+>
+> **1.5.0 (2026-11-09): loading for serving only.** `tx_pack_deserialize_serving` allocates what
+> serving reads (1,434,536 bytes for the bench artifact) instead of the whole model (12,192,728).
+> Median of three runs, both machines the same day:
+>
+> | | x86_64 (5800H, core 4) | Raspberry Pi 4 (core 3) |
+> |---|---:|---:|
+> | `tx_pack_deserialize`, fresh | 6.25 ms | 81.58 ms |
+> | `tx_pack_deserialize_serving`, fresh | **4.24 ms** | **36.92 ms** |
+> | the same over a serving-only model (allocates 0) | 3.94 ms | 30.69 ms |
+> | packed serving from the serving-only model | 2.22 ms | 25.78 ms |
+> | packed serving from a fully loaded model | 2.20 ms | 25.83 ms |
+>
+> Serving is the same kernel, and its speed does not move. A fresh serving load is a third
+> faster on x86_64 and more than twice as fast on the Pi, where allocating and first touching
+> 10.8 MB costs more. Every row whose code did not change sits within −1.5% to +1.1% of 1.4.0's
+> run on the Pi, which was idle both times. On x86_64 the same rows read a median 5.9% faster,
+> because the machine was quieter.
 
 ## 1. Per-layer kernel sweep (M=1 row, K×N; ns/call)
 
@@ -207,7 +225,8 @@ same as one 32-position forward (25.8 ms), as on x86_64.
 | 768×768 | 88,444,097 | 86,160,542 | 357,850 | 2,352,412 | 6.6× / 7.5× |
 
 **Load and serialization:**
-- a fresh `tx_pack_deserialize` takes 81.6 ms;
+- a fresh `tx_pack_deserialize` takes 81.6 ms, and a fresh `tx_pack_deserialize_serving`
+  (1.5.0, 1.4 MB instead of 12.2 MB) 36.9 ms;
 - a same-dims reload takes 31.2 ms;
 - serialization takes 27.1 ms;
 - the one-time `tx_pack` takes 43.3 ms.
@@ -227,8 +246,8 @@ same as one 32-position forward (25.8 ms), as on x86_64.
 - **Power.** No meter is on the board, so the integer-native plan's "under ~15 W" is
   untested.
 - **A model sized for the board.** These are the bench's toy dims. A b1.58-shaped model
-  near the plan's sizes needs 1.5.x's packed storage to fit 2 GB, and a fresh load still
-  allocates the training buffers (12.2 MB here) until 1.5.x's serving-only allocation.
+  near the plan's sizes needs 1.5.x's packed weight storage to fit 2 GB. Since 1.5.0 a
+  serving load no longer allocates the training buffers (1.4 MB here instead of 12.2 MB).
 
 ## Reproduction
 

@@ -4,8 +4,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-11-09
+
+**A load for serving only, and tentib measured on a Raspberry Pi 4.**
+`tx_pack_deserialize_serving` reads and checks a model file exactly as `tx_pack_deserialize`
+does, and the model serves the same logits bit for bit. It allocates only what serving reads:
+1,434,536 bytes at the bench config instead of 12,192,728, 8.5× less. That is the first half of
+the 1.5.x band.
+
+It is a new entry point, not a change to the old one
+([ADR 0004](docs/adr/0004-serving-only-load-is-a-new-entry-point.md)): `tx_pack_deserialize`'s
+allocation is documented, frozen semantics, and hoosh's suite asserts it. No frozen signature or
+semantics changed. The 796,704-byte golden dump of the existing outputs is byte-identical to
+1.3.1 and 1.4.0, and so is the demo's output.
+
+The release also carries the work committed after 1.4.0:
+- the Raspberry Pi 4 measurement, the 1.6.x band's first half;
+- `scripts/bench-history.sh`'s remote mode;
+- documentation of hoosh 2.11.1's adoption.
+
 ### Added
 
+- **`tx_pack_deserialize_serving(buf, n, max_bytes)` and `tx_serve_alloc_bytes(V, T, C, F)`**
+  (`src/serial.cyr`).
+  - **One loader.** Both entry points run `_pk_load`: the same header and field checks in
+    the same order, the same status codes, the same copy-in. Only the memory figure the
+    `max_bytes` check uses, and what is allocated, differ.
+  - **What a serving load allocates.** `_tx_serve_alloc` allocates the packed store, the
+    embeddings, gains and bias, and the scratch one forward writes. It sets every other
+    buffer pointer of the `tx_*`, `blk_*`, `mlp_*` and `ki_*` families to 0. At the bench
+    config: the i8 weight copy 229,376 bytes, the f64 parameters 300,032, the rest scratch.
+  - **What a serving-only model refuses.** Every call that needs a missing buffer fails
+    loud:
+    - `tx_fwd`, `tx_fwd_q`, `tx_bwd`, `tx_sgd` and `tx_pack`, as on any loaded model;
+    - `tx_param_init` and `tx_zero_grads`, through `tx_serve_only`, a new flag;
+    - `block_fwd` / `block_bwd`, because the block's dims stay 0;
+    - `bl_forward_q`, because the integer scratch is sized with no K×N room.
+
+    It serves, decodes, reports its dims and vocabulary, and serializes. `tx_init` makes
+    an ordinary model again.
+  - **Reuse.** A serving load over a model loaded for serving with the same dims overwrites
+    its buffers and allocates nothing (ADR 0003's rule, for this family). A serving load and
+    a full load never reuse each other's buffers.
+  - **Faster to load.** A fresh serving load takes 4.24 ms against 6.25 ms on x86_64, and
+    36.9 ms against 81.6 ms on the Pi 4. Serving speed is unchanged: 2.22 against 2.20 ms,
+    and 25.78 against 25.83 ms on the Pi.
+- **`examples/serve.cyr`** loads with `tx_pack_deserialize_serving` and prints both memory
+  figures (13,368 against 50,024 bytes for its model). It still builds from the bundles alone,
+  and the cross-process and cross-target digests are unchanged.
+- **Bench rows:** `deserialize serving` (fresh), `serving, same dims` and `PACKED, serving-only`.
+- **Tests:**
+  - **Suite 280 → 346 assertions.** The 1.5.0 group covers:
+    - serving loads at three shapes: exact allocation, bit-identical serving and prefix
+      rows, incremental decode, canonical re-serialization;
+    - the bench figure;
+    - the memory bound against the serving figure, and status codes for refused buffers;
+    - reuse between serving loads, and none across the two loaders;
+    - nine refused calls and four controls, each in a forked child;
+    - that a full load still allocates `tx_model_alloc_bytes`.
+  - **Fuzz:** new property P13 loads P9's two models for serving only (exact allocation,
+    bit-identical serving and decode, nothing allocated on a same-dims serving reload,
+    canonical bytes). P10 loads half its mutated buffers for serving only, against that
+    loader's own figure.
+  - **Everywhere:** both pass on x86_64, under qemu, and on the Raspberry Pi 4.
+- **Mutation run:** 11 mutants of the new code, and the suite kills 10. The survivor drops
+  the serving reuse rule's `tx_serve_only` test. It is equivalent, because a fully loaded
+  model also fails that rule's block-dims and K×N-scratch tests.
 - **Benchmarks on a Raspberry Pi 4, the 1.6.x edge target's first half.**
   `docs/benchmarks.md` §6 has the results, and `bench-history.csv` the `rpi4: …` rows (median
   of 3).
@@ -36,6 +100,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Documented
 
+- **[ADR 0004](docs/adr/0004-serving-only-load-is-a-new-entry-point.md)** records why the
+  serving-only load is a new entry point. `api.md` has the two new rows and the refused calls.
+  The format doc gives the serving loader's memory check. The consuming guide recommends the
+  serving load to servers, and the dependency example uses tag 1.5.0. `SECURITY.md` covers
+  the new loader.
 - **hoosh 2.11.1 adopts 1.4.0.** It decodes with the cache, reads the header with
   `tx_pack_peek`, logs the declared vocabulary, and reloads same-shaped models without
   keeping memory. It shares the one decode cache between its interleaved replies: the
@@ -51,6 +120,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Roadmap
 
+- **1.5.x:** the serving-only allocation has shipped. What remains is the 2-bit / trit kernel,
+  whose saving is the weight copy alone: under 0.2 MB of the 1.4 MB at the bench config, and
+  nearly all of the memory at b1.58 scale.
 - **The edge band (1.6.x) targets the Raspberry Pi 4 at hand, not a Pi 5.** The Pi 5 came
   from the agnosticos plan's target figure, not from anything tentib needs.
   - Its measuring half needs nothing from 1.5.x and no new hardware.

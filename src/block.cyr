@@ -214,6 +214,11 @@ var tx_packed_only = 0;
 # tx_pack_deserialize). The incremental decoder (src/decode.cyr) records it at
 # tx_dec_reset and refuses to step a cache built against an older revision.
 var tx_rev = 0;
+# 1 while the model was loaded for serving only (tx_pack_deserialize_serving, 1.5.0): it has the
+# packed store, the parameters serving reads and the forward's scratch, and no training buffers at
+# all (their pointers are 0). The calls that would touch them refuse it; tx_init makes an ordinary
+# model again.
+var tx_serve_only = 0;
 
 # Allocate the transformer's parameters, gradients and scratch (tx_*), plus the
 # block scratch (blk_init): vocabulary V, up to T positions, width C, MLP width F.
@@ -224,6 +229,7 @@ fn tx_init(V, T, C, F): i64 {
     blk_init(T, C, F);
     tx_V0 = V; tx_T0 = T; tx_C0 = C; tx_F0 = F;
     tx_packed_only = 0;
+    tx_serve_only = 0;
     tx_rev = tx_rev + 1;
     var TC = T * C; var CC = C * C; var CF = C * F; var CV = C * V; var VC = V * C; var TV = T * V;
     tx_tokemb = t_alloc(VC); tx_posemb = t_alloc(TC); tx_gns = t_alloc(2 * C); tx_gf = t_alloc(C);
@@ -275,6 +281,7 @@ fn _tx_embed(tokens, V, T, C): i64 {
 # gains 1, the head bias 0.
 fn tx_param_init(V, T, C, F, seed): i64 {
     _tx_dims(V, T, C, F);
+    guard(tx_serve_only == 0, "tx_param_init: a model loaded for serving only has no training buffers; call tx_init");
     tx_packed_only = 0;              # every parameter is re-drawn: an ordinary in-process model again
     tx_rev = tx_rev + 1;
     rng_seed(seed);
@@ -308,6 +315,7 @@ fn tx_loss(tokens, targets, V, T, C, F): i64 {
 # Zero every gradient tx_bwd accumulates into (call once per step, before tx_bwd).
 fn tx_zero_grads(V, T, C, F): i64 {
     _tx_dims(V, T, C, F);
+    guard(tx_serve_only == 0, "tx_zero_grads: a model loaded for serving only has no gradients; call tx_init");
     t_zero(tx_dtokemb, V * C); t_zero(tx_dposemb, T * C); t_zero(tx_dgns, 2 * C); t_zero(tx_dgf, C);
     t_zero(tx_dWa, 4 * C * C); t_zero(tx_dWm, 2 * C * F); t_zero(tx_dWhead, C * V); t_zero(tx_dbhead, V);
     return 0;

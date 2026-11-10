@@ -2,7 +2,7 @@
 
 > **Self-contained SemVer plan.** An agent can pick up the next version from this repo
 > alone. Volatile state (current version, test count, deps) is in [`state.md`](state.md).
-> What already shipped (M0 → 1.0.0, all six v1.0 criteria met at 1.0.0, then 1.0.1–1.4.0)
+> What already shipped (M0 → 1.0.0, all six v1.0 criteria met at 1.0.0, then 1.0.1–1.5.0)
 > is in [`../../CHANGELOG.md`](../../CHANGELOG.md); this file lists **only open work**.
 > The ecosystem map at agnosticos `docs/development/planning/integer-native-ml.md` is
 > background, not required.
@@ -104,15 +104,23 @@ forward over it: 2.35 ms for 32 steps against 2.33 ms at the bench config.)
 copy (1 byte per weight, 8× smaller than f64); the 2-bit form (`tpack2`, 32×) is storage
 only.
 
-**Scope.** Additive: a kernel that serves from 2-bit codes, or from 5 trits per byte
-(≈1.6 bits, a `tpack3` / `tunpack3` codec), unpacking in-register or through lookup
-tables in the bitnet.cpp TL1 / TL2 / I2_S shape (ported, never copied); a packed-store
-variant of `tx_pack` / `tx_fwd_packed` (and `tx_dec_step`) that uses it. With it, a
-**serving-only allocation for loaded models**: a fresh `tx_pack_deserialize` runs the full
-`tx_init`, so a load also allocates the latent weights, their gradients and the training
-scratch (12,192,728 bytes for the 357,504-byte bench artifact; a same-dims reload has
-allocated nothing since 1.4.0). The artifact format can stay at version 1; only what a
-load allocates changes.
+**Shipped in 1.5.0: the serving-only allocation.** `tx_pack_deserialize_serving` loads a
+model with only what serving reads: 1,434,536 bytes for the 357,504-byte bench artifact,
+against `tx_pack_deserialize`'s 12,192,728. It is a new entry point; `tx_pack_deserialize`
+is unchanged ([ADR 0004](../adr/0004-serving-only-load-is-a-new-entry-point.md)). Of
+those 1.4 MB, the i8 weight copy is 229,376 bytes, the f64 embeddings, gains and bias
+300,032, and the scratch of one forward the rest.
+
+**What remains (1.5.x).** Additive:
+- a kernel that serves from 2-bit codes, or from 5 trits per byte (≈1.6 bits, a
+  `tpack3` / `tunpack3` codec), unpacking in-register or through lookup tables in the
+  bitnet.cpp TL1 / TL2 / I2_S shape (ported, never copied);
+- a packed-store variant of `tx_pack` / `tx_fwd_packed` / `tx_dec_step`, and of the serving
+  load, that uses it.
+
+Its saving is the weight copy alone, 4× (2-bit) or 5× (trits) smaller. At the bench config
+that is under 0.2 MB of the 1.4 MB; at b1.58 scale the weights are nearly all of it. The
+artifact format can stay at version 1.
 
 **Gate.** Bit-identical to the scalar kernel (suite + fuzz property P1 extended to the
 new kernel); benchmarked against the i8 path at the four layer sizes and whole-model,
@@ -144,7 +152,9 @@ not from anything tentib needs.
    - This meets the gate below for the bench config.
 2. **Size a b1.58-shaped model the Pi 4 can serve.** With 2 GB of RAM, a model near the
    plan's sizes needs 1.5.x's packed storage: 2B weights at 1 byte each is the whole memory,
-   and at 2 bits it is 0.5 GB. Ship it with 1.2.0's format.
+   and at 2 bits it is 0.5 GB. Ship it with 1.2.0's format, and load it with 1.5.0's
+   serving-only load. On the board a fresh serving load of the bench artifact is 36.9 ms,
+   against 81.6 ms for a full load.
 
 **A Pi 5** (Cortex-A76, which has `SDOT`) is a second data point whenever one is available.
 It is also the only reason to add an `SDOT` path, which would keep the current one as the

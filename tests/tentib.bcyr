@@ -151,6 +151,8 @@ fn wm_gen_step(): i64 {
 # One load of the bench artifact over the loaded model of the same dims (1.4.0: it
 # reuses the buffers, so it can be timed over many calls).
 fn wm_load_same(): i64 { return tx_pack_deserialize(wmbuf, wmn, 1 << 40); }
+# The same for a serving-only load over a serving-only model (1.5.0).
+fn wm_load_serving_same(): i64 { return tx_pack_deserialize_serving(wmbuf, wmn, 1 << 40); }
 
 # Tokens per second for an average forward time in ns.
 fn toks_per_s(avg_ns): i64 {   # T tokens per forward
@@ -223,6 +225,24 @@ fn wm_bench(V, T, C, F, seed, iters): i64 {
     puts("  decode, full fwd/token = "); fmt_int(tgf); puts(" ns/tok  (window grows 1.."); fmt_int(T); puts(")\n");
     puts("  decode, cached step    = "); fmt_int(tgs); puts(" ns/tok  ("); f2dec(tgf, tgs);
     puts("x the full forward per token; cache "); fmt_int(tx_dec_alloc_bytes(T, C)); puts(" bytes)\n");
+    # Loading for serving only (1.5.0). Fresh: tx_packed_only cleared first, as above, so
+    # nothing is reused; timed over 3 calls. Then over a serving-only model of the same dims.
+    var tsv = 0; di = 0;
+    while (di < 3) {
+        tx_packed_only = 0;
+        var s0 = now_ns();
+        tx_pack_deserialize_serving(wmbuf, wmn, 1 << 40);
+        tsv = tsv + now_ns() - s0;
+        di = di + 1;
+    }
+    tsv = tsv / 3;
+    var tss = timed(&wm_load_serving_same, 2, iters);
+    var tsp = timed(&wm_packed, 2, iters);         # serving from the serving-only model
+    puts("  deserialize serving    = "); fmt_int(tsv); puts(" ns/op  (allocates ");
+    fmt_int(tx_serve_alloc_bytes(V, T, C, F)); puts(" bytes)\n");
+    puts("  serving, same dims     = "); fmt_int(tss); puts(" ns/op  (allocates 0 bytes)\n");
+    puts("  PACKED, serving-only   = "); fmt_int(tsp); puts(" ns/fwd  ("); fmt_int(toks_per_s(tsp));
+    puts(" tok/s; the same kernel, on the serving-only model's buffers)\n");
     return 0;
 }
 

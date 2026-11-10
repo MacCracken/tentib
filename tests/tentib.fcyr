@@ -35,6 +35,11 @@
 #   P12 (1.4.0, with P9) a second model of the same dims loaded over the loaded one,
 #       then the first back over it: each serves its own logits bit for bit, and
 #       neither load allocates
+#   P13 (1.5.0, with P9) the same two models loaded for serving only: the first
+#       serving load allocates exactly tx_serve_alloc_bytes, each serves and decodes
+#       bit for bit and re-serializes to its bytes, and the second serving load of the
+#       same dims allocates nothing. From 1.5.0, P10 also loads every other mutated
+#       buffer for serving only, against that loader's own memory figure
 #
 # Deterministic: the seed sequence is fixed, so a failure names a reproducible
 # round. Exit 0 = every property held; exit 1 = a property failed (message on
@@ -305,6 +310,20 @@ fn serial_round(tok, l0, V, T, C, F): i64 {
     if (same(l0, ki_logits, TV) == 0) { fail("P12 A loaded back over B serves differently"); }
     if (alloc_used() != u) { fail("P12 a same-dims load allocated"); }
     decode_round(tok, l0, V, T);
+    # P13: the same bytes loaded for serving only (the live model is a full load: new memory)
+    u = alloc_used();
+    if (tx_pack_deserialize_serving(bb, n, 1 << 30) != 0) { fail("P13 B did not load for serving"); }
+    if (alloc_used() - u != tx_serve_alloc_bytes(V, T, C, F)) { fail("P13 a serving load allocated another figure"); }
+    tx_fwd_packed(tok, V, T, C, F);
+    if (same(lb, ki_logits, TV) == 0) { fail("P13 B loaded for serving serves differently"); }
+    u = alloc_used();
+    if (tx_pack_deserialize_serving(a, n, 1 << 30) != 0) { fail("P13 A did not load for serving over B"); }
+    if (alloc_used() != u) { fail("P13 a same-dims serving load allocated"); }
+    tx_fwd_packed(tok, V, T, C, F);
+    if (same(l0, ki_logits, TV) == 0) { fail("P13 A loaded for serving over B serves differently"); }
+    decode_round(tok, l0, V, T);
+    tx_pack_serialize(b, n);
+    if (same_b(a, b, n) == 0) { fail("P13 a serving-loaded model re-serializes to other bytes"); }
     return 0;
 }
 
@@ -402,13 +421,17 @@ fn decoder_round(): i64 {
     }
     var before = t_alloc(tx_T0 * tx_V0);
     fz_serve(before);
+    var serving = rint(0, 1);                              # 1.5.0: half the rounds load for serving only
+    var need = tx_model_alloc_bytes(zb_V, zb_T, zb_C, zb_F);
+    if (serving == 1) { need = tx_serve_alloc_bytes(zb_V, zb_T, zb_C, zb_F); }
     var cap = 1 << 26;                                     # one round in four: a budget below the need
-    if (rint(0, 3) == 0) { cap = rint(0, tx_model_alloc_bytes(zb_V, zb_T, zb_C, zb_F) - 1); }
+    if (rint(0, 3) == 0) { cap = rint(0, need - 1); }
     var info[40];
     store64(&info, 0 - 7);
     var pr = tx_pack_peek(m, len, &info);
     if ((pr != 0) & (load64(&info) != (0 - 7))) { fail("P10 a refused peek wrote its info"); }
-    var rc = tx_pack_deserialize(m, len, cap);
+    var rc = 0;
+    if (serving == 1) { rc = tx_pack_deserialize_serving(m, len, cap); } else { rc = tx_pack_deserialize(m, len, cap); }
     if ((rc > 0) | (rc < (0 - 9))) { fail("P10 a status outside the documented codes"); }
     if ((pr != 0) & (rc != pr)) { fail("P10 a peek refusal is not the load's status"); }
     var hdr = (rc == pk_err_length()) | (rc == pk_err_magic()) | (rc == pk_err_version()) | (rc == pk_err_header());
@@ -487,7 +510,7 @@ fn main(): i64 {
         if ((fz_round % 2) == 0) { decoder_round(); }
         fz_round = fz_round + 1;
     }
-    puts("fuzz: 5000 rounds, P1-P12 held\n");
+    puts("fuzz: 5000 rounds, P1-P13 held\n");
     return 0;
 }
 

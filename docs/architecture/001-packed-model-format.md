@@ -105,7 +105,11 @@ artifact with `pk_err_header()`.
   load that replaces a **loaded** model of the same V, T, C, F overwrites that model's
   buffers and allocates nothing
   ([ADR 0003](../adr/0003-a-load-reuses-only-a-loaded-models-buffers.md)); the
-  `max_bytes` check still uses the model's figure.
+  `max_bytes` check still uses the model's figure. `tx_pack_deserialize_serving` (1.5.0)
+  reads the same bytes with the same checks and allocates only what serving reads,
+  `tx_serve_alloc_bytes(V, T, C, F)` (1,434,536 bytes for the bench artifact). For that
+  loader, the `max_bytes` row of the table above compares against that figure
+  ([ADR 0004](../adr/0004-serving-only-load-is-a-new-entry-point.md)).
 - **The checksum detects corruption, it does not authenticate.** Anyone can recompute
   it; memory safety comes from the field checks, not from the checksum.
 - **A loaded model has no latent weights.** `tx_fwd`, `tx_fwd_q`, `tx_bwd`, `tx_sgd`

@@ -341,6 +341,141 @@ fn serves(ref, V, T, C, F): i64 {
     return 1;
 }
 
+# 1.5.0: calls on a model loaded for serving only. Each must refuse it, in a forked child.
+fn sc_so_param_init(): i64 { return tx_param_init(g_V, g_T, g_C, g_F, 5); }
+# tx_zero_grads on a serving-only model (must fail: no gradients).
+fn sc_so_zero_grads(): i64 { return tx_zero_grads(g_V, g_T, g_C, g_F); }
+# tx_fwd on a serving-only model (must fail).
+fn sc_so_fwd(): i64 { return tx_fwd(g_tok, g_V, g_T, g_C, g_F); }
+# tx_bwd on a serving-only model (must fail).
+fn sc_so_bwd(): i64 { return tx_bwd(g_tok, g_tgt, g_V, g_T, g_C, g_F); }
+# tx_sgd on a serving-only model (must fail).
+fn sc_so_sgd(): i64 { return tx_sgd(g_V, g_T, g_C, g_F, f64_from(0)); }
+# tx_pack on a serving-only model (must fail).
+fn sc_so_pack(): i64 { return tx_pack(g_V, g_T, g_C, g_F); }
+# tx_fwd_q on a serving-only model (must fail).
+fn sc_so_fwdq(): i64 { return tx_fwd_q(2, g_tok, g_V, g_T, g_C, g_F); }
+# block_fwd on a serving-only model (must fail: no block training scratch).
+fn sc_so_block(): i64 { return block_fwd(tx_resid0, tx_gns, tx_Wa, tx_Wm, g_T, g_C, g_F); }
+# bl_forward_q on a serving-only model's scratch (must fail: no K*N scratch).
+fn sc_so_blq(): i64 { return bl_forward_q(0, tx_resid0, tx_tokemb, 0, ki_logits, 1, g_C, g_C); }
+# Control: a serving-only model serves.
+fn sc_so_serve(): i64 { return tx_fwd_packed(g_tok, g_V, g_T, g_C, g_F); }
+# Control: a serving-only model decodes.
+fn sc_so_decode(): i64 { tx_dec_reset(); return tx_dec_step(0); }
+# Control: a serving-only model serializes.
+fn sc_so_serialize(): i64 {
+    var r = tx_pack_serialize(g_buf2, tx_pack_serial_bytes());
+    if (r <= 0) { return sys_exit(3); }
+    return 0;
+}
+# Control: tx_init makes an ordinary model again, so tx_param_init and tx_fwd run.
+fn sc_so_reinit(): i64 {
+    tx_init(g_V, g_T, g_C, g_F); tx_param_init(g_V, g_T, g_C, g_F, 6);
+    return tx_fwd(g_tok, g_V, g_T, g_C, g_F);
+}
+
+# 1.5.0 group: loading a model for serving only.
+fn t15_serving(): i64 {
+    test_group("1.5.0 serving-only loads (tx_pack_deserialize_serving / tx_serve_alloc_bytes)");
+    var big = 1 << 40;
+    # (a) at three shapes (C = 4 / F = 8 all tail; C = 20 / F = 40 span and tail; C = 32 / F = 48),
+    # a serving load allocates exactly tx_serve_alloc_bytes, less than a full load, and serves,
+    # decodes and re-serializes exactly as the model it was written from
+    var cfg = 0; var a0 = 0;
+    while (cfg < 3) {
+        var V = 6; var T = 4; var C = 4; var F = 8;
+        if (cfg == 1) { V = 9; T = 5; C = 20; F = 40; }
+        if (cfg == 2) { V = 40; T = 6; C = 32; F = 48; }
+        var art = make_artifact(V, T, C, F, 70 + cfg); var n = g_art_n;
+        a0 = alloc_used();
+        assert(tx_pack_deserialize_serving(art, n, big) == 0, "1.5.0: a serving load succeeds");
+        assert(alloc_used() - a0 == tx_serve_alloc_bytes(V, T, C, F),
+          "1.5.0: ... allocating exactly tx_serve_alloc_bytes");
+        assert(tx_serve_alloc_bytes(V, T, C, F) < tx_model_alloc_bytes(V, T, C, F),
+          "1.5.0: ... which is less than a full load's tx_model_alloc_bytes");
+        assert(serves_ref(V, T, C, F) == 1, "1.5.0: ... and serves bit-identically to the model written");
+        tx_fwd_packed(g_tok_s, V, 2, C, F);
+        var pf = 1; var pi = 0;
+        while (pi < 2 * V) { if (tget(ki_logits, pi) != tget(g_ref, pi)) { pf = 0; } pi = pi + 1; }
+        assert(pf == 1, "1.5.0: ... and a prefix's rows");
+        assert(dec_matches_ref(V, T) == 1, "1.5.0: ... and decodes incrementally bit for bit");
+        var re = alloc(n + 8);
+        assert(tx_pack_serialize(re, n) == n, "1.5.0: ... and serializes");
+        assert(same_bytes(re, art, n) == 1, "1.5.0: ... to the bytes it was loaded from");
+        cfg = cfg + 1;
+    }
+    assert(tx_serve_alloc_bytes(256, 32, 128, 512) == 1434536,
+      "1.5.0: at the bench config a serving load is 1,434,536 bytes (a full load: 12,192,728)");
+    assert(tx_serve_alloc_bytes(0, 4, 4, 8) == (0 - 1), "1.5.0: tx_serve_alloc_bytes refuses a dim of 0");
+    assert(tx_serve_alloc_bytes(6, 4, 1048577, 8) == (0 - 1), "1.5.0: tx_serve_alloc_bytes refuses a dim past 2^20");
+    # (b) the memory bound uses the serving figure; the status codes are tx_pack_deserialize's
+    var V2 = 7; var T2 = 4; var C2 = 5; var F2 = 9;
+    var art2 = make_artifact(V2, T2, C2, F2, 80); var n2 = g_art_n; var ref2 = g_ref; var tok2 = g_tok_s;
+    var sneed = tx_serve_alloc_bytes(V2, T2, C2, F2); var fneed = tx_model_alloc_bytes(V2, T2, C2, F2);
+    assert(tx_pack_deserialize_serving(art2, n2, sneed - 1) == pk_err_too_big(),
+      "1.5.0: max_bytes one short of the serving figure -> pk_err_too_big");
+    assert(tx_pack_deserialize(art2, n2, sneed) == pk_err_too_big(),
+      "1.5.0: ... a budget of the serving figure refuses a full load");
+    assert(tx_pack_deserialize_serving(art2, n2, sneed) == 0, "1.5.0: ... and admits a serving load");
+    assert(fneed > sneed, "1.5.0: (the full figure is larger)");
+    var m = art_copy(art2, n2); store8(m + 100, load8(m + 100) ^ 4);
+    assert(tx_pack_deserialize_serving(m, n2, big) == pk_err_checksum(), "1.5.0: a flipped bit -> pk_err_checksum");
+    m = art_copy(art2, n2); store64(m + 8, 2);
+    assert(tx_pack_deserialize_serving(m, n2, big) == pk_err_version(), "1.5.0: version 2 -> pk_err_version");
+    m = art_copy(art2, n2); store8(m + 72, load8(m + 72) | 3); art_fix(m, n2);
+    assert(tx_pack_deserialize_serving(m, n2, big) == pk_err_weights(), "1.5.0: a weight code of 3 -> pk_err_weights");
+    assert(tx_pack_deserialize_serving(art2, n2 - 1, big) == pk_err_length(), "1.5.0: one byte short -> pk_err_length");
+    g_tok_s = tok2;
+    assert(serves(ref2, V2, T2, C2, F2) == 1, "1.5.0: after those refusals the model still serves");
+    # (c) reuse: a serving load over a serving-loaded model of the same dims allocates nothing
+    var art3 = make_artifact(V2, T2, C2, F2, 81); var ref3 = g_ref;
+    g_tok_s = tok2;
+    a0 = alloc_used();
+    assert(tx_pack_deserialize_serving(art3, n2, big) == 0, "1.5.0: model 3 loads for serving");
+    assert(alloc_used() - a0 == sneed, "1.5.0: ... over an in-process model: new memory (the serving figure)");
+    a0 = alloc_used();
+    assert(tx_pack_deserialize_serving(art2, n2, big) == 0, "1.5.0: model 2 loads for serving over model 3");
+    assert(alloc_used() == a0, "1.5.0: ... allocating nothing (same dims, both serving-only)");
+    assert(serves(ref2, V2, T2, C2, F2) == 1, "1.5.0: ... and serves model 2, none of model 3 left");
+    assert(tx_pack_deserialize_serving(art3, n2, big) == 0, "1.5.0: model 3 loads back");
+    assert(alloc_used() == a0, "1.5.0: ... allocating nothing");
+    assert(serves(ref3, V2, T2, C2, F2) == 1, "1.5.0: ... and serves model 3");
+    # a full load over a serving-only model allocates the full model, and the other way round
+    a0 = alloc_used();
+    assert(tx_pack_deserialize(art2, n2, big) == 0, "1.5.0: a full load over the serving-only model");
+    assert(alloc_used() - a0 == fneed, "1.5.0: ... allocates the full model (nothing to reuse)");
+    assert(serves(ref2, V2, T2, C2, F2) == 1, "1.5.0: ... and serves");
+    a0 = alloc_used();
+    assert(tx_pack_deserialize_serving(art3, n2, big) == 0, "1.5.0: a serving load over the fully loaded model");
+    assert(alloc_used() - a0 == sneed, "1.5.0: ... allocates the serving figure");
+    assert(serves(ref3, V2, T2, C2, F2) == 1, "1.5.0: ... and serves");
+    # (d) a serving-only model refuses every call that needs a training buffer, in forked children
+    g_V = V2; g_T = T2; g_C = C2; g_F = F2; g_tok = tok2; g_tgt = tok2;
+    g_buf2 = alloc(n2 + 8);
+    assert(child_exit(&sc_so_serve) == 0, "1.5.0: a serving-only model serves (tx_fwd_packed)");
+    assert(child_exit(&sc_so_decode) == 0, "1.5.0: ... decodes (tx_dec_step)");
+    assert(child_exit(&sc_so_serialize) == 0, "1.5.0: ... serializes (tx_pack_serialize)");
+    assert(child_exit(&sc_so_param_init) == 1, "1.5.0 guard: tx_param_init refuses a serving-only model");
+    assert(child_exit(&sc_so_zero_grads) == 1, "1.5.0 guard: tx_zero_grads refuses a serving-only model");
+    assert(child_exit(&sc_so_fwd) == 1, "1.5.0 guard: tx_fwd refuses a serving-only model");
+    assert(child_exit(&sc_so_bwd) == 1, "1.5.0 guard: tx_bwd refuses a serving-only model");
+    assert(child_exit(&sc_so_sgd) == 1, "1.5.0 guard: tx_sgd refuses a serving-only model");
+    assert(child_exit(&sc_so_pack) == 1, "1.5.0 guard: tx_pack refuses a serving-only model");
+    assert(child_exit(&sc_so_fwdq) == 1, "1.5.0 guard: tx_fwd_q refuses a serving-only model");
+    assert(child_exit(&sc_so_block) == 1, "1.5.0 guard: block_fwd refuses a serving-only model's scratch");
+    assert(child_exit(&sc_so_blq) == 1, "1.5.0 guard: bl_forward_q refuses a serving-only model's scratch");
+    assert(child_exit(&sc_so_reinit) == 0, "1.5.0: tx_init makes an ordinary model again (tx_param_init, tx_fwd run)");
+    # (e) tx_pack_deserialize is unchanged: a full load still allocates tx_model_alloc_bytes and
+    # leaves an ordinary loaded model whose training buffers exist (tx_zero_grads runs)
+    make_artifact(V2 + 1, T2, C2, F2, 82);
+    a0 = alloc_used();
+    assert(tx_pack_deserialize(art2, n2, big) == 0, "1.5.0: a full load");
+    assert(alloc_used() - a0 == fneed, "1.5.0: ... still allocates tx_model_alloc_bytes");
+    assert(child_exit(&sc_so_zero_grads) == 0, "1.5.0: ... and tx_zero_grads still runs on a fully loaded model");
+    return 0;
+}
+
 # 1.4.0 group: incremental decode.
 fn t14_decode(): i64 {
     test_group("1.4.0 incremental decode (tx_dec_reset / tx_dec_step / tx_dec_len)");
@@ -1548,6 +1683,7 @@ fn main() {
     t14_decode();
     t14_reuse();
     t14_vocab();
+    t15_serving();
     return assert_summary();
 }
 

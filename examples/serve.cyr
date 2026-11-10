@@ -14,7 +14,8 @@
 # decoder (tx_dec_reset / tx_dec_step) and check that its logits have the same digest,
 # then generate greedily from a one-token prompt the way a server does. Load mode reads
 # the file's header with tx_pack_peek first, the way a server checks that it can serve
-# a model before the load replaces the one it serves.
+# a model before the load replaces the one it serves. Since 1.5.0 it loads the model for
+# serving only (tx_pack_deserialize_serving), which allocates only what serving reads.
 #
 # It includes ONLY the dependency bundles (tyche, rosnet, dist/tentib.cyr) and the
 # stdlib modules it calls itself: no src/ file and no akshara. CI builds it with
@@ -35,7 +36,8 @@ include "lib/io.cyr"         # file_read_whole_max / file_write_all
 include "lib/args.cyr"       # args_init / argc / argv
 
 # The largest model file this program will read (64 MiB), and the memory it lets a load
-# allocate (1 GiB). Both are this consumer's policy, not tentib's.
+# allocate (1 GiB; a serving load needs tx_serve_alloc_bytes). Both are this consumer's
+# policy, not tentib's.
 fn max_file(): i64 { return 67108864; }
 # The allocation budget handed to tx_pack_deserialize.
 fn max_load(): i64 { return 1073741824; }
@@ -129,12 +131,15 @@ fn do_load(path): i64 {
     say("header: V="); fmt_int(load64(&info)); say(", vocabulary ");
     if (load64(&info + 32) == pk_vocab_bytes()) { say("bytes"); } else { say("none declared"); }
     nl();
-    var rc = tx_pack_deserialize(buf, n, max_load());
+    var rc = tx_pack_deserialize_serving(buf, n, max_load());
     if (rc != 0) { say("serve: not a model this tentib loads (status "); fmt_int(rc); say(")"); nl(); return 3; }
     var dims[32];
     tx_pack_dims(&dims);
     say("loaded: "); fmt_int(n); say(" bytes, V="); fmt_int(load64(&dims)); say(" T="); fmt_int(load64(&dims + 8));
     say(" C="); fmt_int(load64(&dims + 16)); say(" F="); fmt_int(load64(&dims + 24)); nl();
+    var dV = load64(&dims); var dT = load64(&dims + 8); var dC = load64(&dims + 16); var dF = load64(&dims + 24);
+    say("memory: "); fmt_int(tx_serve_alloc_bytes(dV, dT, dC, dF));
+    say(" bytes for serving (a full load: "); fmt_int(tx_model_alloc_bytes(dV, dT, dC, dF)); say(")"); nl();
     return serve_and_report(load64(&dims), load64(&dims + 8), load64(&dims + 16), load64(&dims + 24));
 }
 
