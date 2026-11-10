@@ -5,8 +5,9 @@
 # 1e-3 to 1e3, whole zero rows, exact zeros, and in some rounds one NaN. It checks
 # properties that must hold on EVERY input, not just the suite's fixed cases:
 #
-#   P1  the four integer kernels agree bit for bit: scalar == branchless == SIMD
-#       == the GPU tile path's host fallback (with and without a bias)
+#   P1  the integer kernels agree bit for bit: scalar == branchless == SIMD == the GPU
+#       tile path's host fallback, and from 1.5.1 == the 2-bit SIMD kernel (with and
+#       without a bias)
 #   P2  act_quant_int codes lie in [-127, +127]; a zero row has scale 0 and codes 0
 #   P3  tpack2 / tunpack2 round-trip every ternary weight exactly
 #   P4  bl_weight_effective emits ternary codes and Weff = code * gamma, bit for bit
@@ -39,7 +40,9 @@
 #       serving load allocates exactly tx_serve_alloc_bytes, each serves and decodes
 #       bit for bit and re-serializes to its bytes, and the second serving load of the
 #       same dims allocates nothing. From 1.5.0, P10 also loads every other mutated
-#       buffer for serving only, against that loader's own memory figure
+#       buffer for serving only, against that loader's own memory figure. From 1.5.1 the
+#       first model also loads with the 2-bit store (_tx_pack_deserialize_compact):
+#       its exact figure, the same logits and decode, the same bytes back
 #
 # Deterministic: the seed sequence is fixed, so a failure names a reproducible
 # round. Exit 0 = every property held; exit 1 = a property failed (message on
@@ -139,6 +142,12 @@ fn kernels_agree(qx, sx, Wq, g, b, M, K, N, y0, y1, y2, y3, w8t, wsum, xu8): i64
     if (same(y0, y1, MN) == 0) { return 0; }
     if (same(y0, y2, MN) == 0) { return 0; }
     if (same(y0, y3, MN) == 0) { return 0; }
+    # 1.5.1: the 2-bit kernel on the same weights, stored 2 bits each
+    var w2 = alloc(N * _pk2_row_bytes(K) + 8); var xu8m = alloc(M * K + 16); var wrow = alloc(K + 16);
+    var y4 = t_alloc(MN);
+    _pk2_from_w8t(w8t, K, N, w2);
+    _tmf_simd2(qx, sx, w2, wsum, g, b, y4, M, K, N, xu8m, wrow);
+    if (same(y0, y4, MN) == 0) { return 0; }
     return 1;
 }
 
@@ -232,6 +241,10 @@ fn layer_round(): i64 {
         ternary_matmul_free_bl(qn, sn, Wq, g, b, z1, M, K, N);
         ternary_matmul_free_simd(qn, sn, w8t, wsum, g, b, z2, M, K, N, xu8);
         ternary_matmul_free_gpu(qn, sn, Wq, g, b, z3, M, K, N);
+        var z4 = t_alloc(MN); var w2n = alloc(N * _pk2_row_bytes(K) + 8);
+        var xu8n = alloc(M * K + 16); var wrown = alloc(K + 16);
+        _pk2_from_w8t(w8t, K, N, w2n);
+        _tmf_simd2(qn, sn, w2n, wsum, g, b, z4, M, K, N, xu8n, wrown);
         m = 0;
         while (m < M) {
             var n = 0;
@@ -239,13 +252,15 @@ fn layer_round(): i64 {
                 var o = (m * N + n) * 8;
                 if (m == nr) {
                     var nans = is_nan(load64(z0 + o)) & is_nan(load64(z1 + o));
-                    nans = nans & is_nan(load64(z2 + o)) & is_nan(load64(z3 + o));
+                    nans = nans & is_nan(load64(z2 + o)) & is_nan(load64(z3 + o)) & is_nan(load64(z4 + o));
                     if (nans == 0) {
                         fail("P6 NaN row has a non-NaN output");
                     }
                 } else {
                     var v = load64(y0 + o);
-                    if ((load64(z0 + o) != v) | (load64(z1 + o) != v) | (load64(z2 + o) != v) | (load64(z3 + o) != v)) {
+                    var same4 = (load64(z0 + o) == v) & (load64(z1 + o) == v) & (load64(z2 + o) == v);
+                    same4 = same4 & (load64(z3 + o) == v) & (load64(z4 + o) == v);
+                    if (same4 == 0) {
                         fail("P6 a NaN-free row changed");
                     }
                 }
@@ -324,6 +339,17 @@ fn serial_round(tok, l0, V, T, C, F): i64 {
     decode_round(tok, l0, V, T);
     tx_pack_serialize(b, n);
     if (same_b(a, b, n) == 0) { fail("P13 a serving-loaded model re-serializes to other bytes"); }
+    # 1.5.1: A with the 2-bit store (over an i8 serving model: new memory)
+    u = alloc_used();
+    if (_tx_pack_deserialize_compact(a, n, 1 << 30) != 0) { fail("P13 A did not load compact"); }
+    if (alloc_used() - u != _tx_compact_alloc_bytes(V, T, C, F)) {
+        fail("P13 a compact load allocated another figure");
+    }
+    tx_fwd_packed(tok, V, T, C, F);
+    if (same(l0, ki_logits, TV) == 0) { fail("P13 A with the 2-bit store serves differently"); }
+    decode_round(tok, l0, V, T);
+    tx_pack_serialize(b, n);
+    if (same_b(a, b, n) == 0) { fail("P13 a compact model re-serializes to other bytes"); }
     return 0;
 }
 

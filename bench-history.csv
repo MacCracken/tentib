@@ -195,3 +195,42 @@ date,version,commit,benchmark,time_ns
 2026-11-10T04:21:47Z,1.5.0,c9ceb6d+dirty,"rpi4: model deserialize serving",36918105
 2026-11-10T04:21:47Z,1.5.0,c9ceb6d+dirty,"rpi4: model serving, same dims",30690309
 2026-11-10T04:21:47Z,1.5.0,c9ceb6d+dirty,"rpi4: model PACKED, serving-only",25776617
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 128x128 branchy",880449
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 128x128 branchless",861083
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 128x128 simd",19666
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 128x128 simd2",105136
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 128x128 rosnet-f64",77729
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 256x256 branchy",3999953
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 256x256 branchless",3752519
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 256x256 simd",52744
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 256x256 simd2",385424
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 256x256 rosnet-f64",257757
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 512x512 branchy",18298339
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 512x512 branchless",17186913
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 512x512 simd",172362
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 512x512 simd2",1479220
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 512x512 rosnet-f64",1070098
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 768x768 branchy",83770733
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 768x768 branchless",82683713
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 768x768 simd",350226
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 768x768 simd2",3288746
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: layer 768x768 rosnet-f64",2319616
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: prep 768x768 tsimd_pack_w",35930499
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: prep 768x768 act_quant_int",73356
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model f64 weight-only",73223954
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model integer scalar",475325859
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model integer SIMD (0.4.1)",68585520
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model PACKED serving (0.7.0)",25787251
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model tx_pack (one-time)",43171722
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model training step (f64)",228268266
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model serialize",26986036
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model deserialize",81889821
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model deserialize same dims",30879828
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model decode, full fwd/token",12573882
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model decode, cached step",809910
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model deserialize serving",37137641
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model serving, same dims",30869109
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model PACKED, serving-only",25783600
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model deserialize 2-bit",32439586
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model PACKED, 2-bit store",27485641
+2026-11-10T04:53:06Z,1.5.1,730ef74+dirty,"rpi4: model decode, 2-bit step",1929195

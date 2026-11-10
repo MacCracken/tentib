@@ -2,7 +2,7 @@
 
 > **Self-contained SemVer plan.** An agent can pick up the next version from this repo
 > alone. Volatile state (current version, test count, deps) is in [`state.md`](state.md).
-> What already shipped (M0 → 1.0.0, all six v1.0 criteria met at 1.0.0, then 1.0.1–1.5.0)
+> What already shipped (M0 → 1.0.0, all six v1.0 criteria met at 1.0.0, then 1.0.1–1.5.1)
 > is in [`../../CHANGELOG.md`](../../CHANGELOG.md); this file lists **only open work**.
 > The ecosystem map at agnosticos `docs/development/planning/integer-native-ml.md` is
 > background, not required.
@@ -111,21 +111,41 @@ is unchanged ([ADR 0004](../adr/0004-serving-only-load-is-a-new-entry-point.md))
 those 1.4 MB, the i8 weight copy is 229,376 bytes, the f64 embeddings, gains and bias
 300,032, and the scratch of one forward the rest.
 
-**What remains (1.5.x).** Additive:
-- a kernel that serves from 2-bit codes, or from 5 trits per byte (≈1.6 bits, a
-  `tpack3` / `tunpack3` codec), unpacking in-register or through lookup tables in the
-  bitnet.cpp TL1 / TL2 / I2_S shape (ported, never copied);
-- a packed-store variant of `tx_pack` / `tx_fwd_packed` / `tx_dec_step`, and of the serving
-  load, that uses it.
+**Built in 1.5.1, internal: the 2-bit store and its kernel.**
+- **What exists.** `_tmf_simd2` serves from weights stored 2 bits each (the artifact's own
+  codes, one padded line per output row). It is bit-identical to the i8 kernel by
+  construction, gated in the suite and by fuzz P1 / P6 / P13. `_tx_pack_deserialize_compact`
+  loads a model with that store, and `tx_fwd_packed` / `tx_dec_step` / `tx_pack_serialize`
+  use it unchanged.
+- **The measurement** (`docs/benchmarks.md`'s 1.5.1 note):
+  - the weights shrink 4×;
+  - a one-row decode step is 2.4–2.9× slower, and a single layer at M = 1 is 5–13× slower;
+  - a T-row forward is about 7% slower.
+- **Why the decode step is slow.** The unpack is scalar (a 256-entry table, one code byte to
+  four weights), because cyrius has no vector shuffle or shift. bitnet.cpp's TL1 / TL2 unpack
+  in-register with `pshufb` / `tbl`.
 
-Its saving is the weight copy alone, 4× (2-bit) or 5× (trits) smaller. At the bench config
-that is under 0.2 MB of the 1.4 MB; at b1.58 scale the weights are nearly all of it. The
-artifact format can stay at version 1.
+**What remains (1.5.x), the maintainer's call:**
+- **Expose it, in a minor.** A public compact load (`tx_pack_deserialize_serving`'s 2-bit
+  sibling) is worth it where memory decides, not speed. At b1.58 scale the weights are nearly
+  all of a model's memory, and on the Pi 4's 2 GB a 2B model fits only at 2 bits (0.5 GB of
+  weights, against 2 GB at i8), at 2–3× the decode cost.
+- **Make it fast, upstream first.** An in-register unpack needs an `i8v16` byte shuffle, or
+  vector `and` / shift, from cyrius. With one, the kernel could unpack 16 or 64 codes at a
+  time, or go table-lookup in the TL1 / TL2 shape (ported, never copied), and the M = 1 gap
+  should mostly close. The suite and P1 already gate whatever replaces the scalar unpack.
+- **5 trits per byte** (≈1.6 bits, a `tpack3` / `tunpack3` codec) saves another 20% of the
+  weights over 2 bits, but its unpack is costlier still (a base-3 decode per byte). It waits
+  for the same intrinsics.
+
+The artifact format stays at version 1 throughout: the 2-bit store is the artifact's own
+codes.
 
 **Gate.** Bit-identical to the scalar kernel (suite + fuzz property P1 extended to the
 new kernel); benchmarked against the i8 path at the four layer sizes and whole-model,
 reporting the memory/speed trade honestly if it is slower; resident weight memory
-measured.
+measured. **Met by 1.5.1's internal kernel**, on x86_64 and the Pi 4. A public entry point,
+or a faster unpack, would be measured against the same gate.
 
 ## 1.6.x — the edge target (Raspberry Pi 4, for seema)
 

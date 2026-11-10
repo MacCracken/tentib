@@ -375,6 +375,117 @@ fn sc_so_reinit(): i64 {
     return tx_fwd(g_tok, g_V, g_T, g_C, g_F);
 }
 
+# 1.5.1: 1 when the 2-bit kernel reproduces the i8 SIMD kernel, bit for bit, on one random
+# M x K -> N layer (with a bias when withb is 1).
+fn k2_matches(M, K, N, seed, withb): i64 {
+    rng_seed(seed);
+    var KN = K * N; var MK = M * K; var MN = M * N;
+    var W = t_alloc(KN); var Wq = t_alloc(KN); var We = t_alloc(KN);
+    var x = t_alloc(MK); var qx = t_alloc(MK); var sx = t_alloc(M);
+    t_randn(W, KN, f64_div(f64_from(1), f64_from(2))); t_randn(x, MK, f64_from(1));
+    var g = bl_weight_effective(W, KN, Wq, We);
+    act_quant_int(x, M, K, qx, sx);
+    var w8t = alloc(KN + 16); var wsum = t_alloc(N); var xu8 = alloc(K + 16);
+    tsimd_pack_w(Wq, K, N, w8t, wsum);
+    var w2 = alloc(N * _pk2_row_bytes(K) + 8);
+    _pk2_from_w8t(w8t, K, N, w2);
+    var b = 0;
+    if (withb == 1) { b = t_alloc(N); t_randn(b, N, f64_from(1)); }
+    var y1 = t_alloc(MN); var y2 = t_alloc(MN);
+    ternary_matmul_free_simd(qx, sx, w8t, wsum, g, b, y1, M, K, N, xu8);
+    var xu8m = alloc(MK + 16); var wrow = alloc(K + 16);
+    _tmf_simd2(qx, sx, w2, wsum, g, b, y2, M, K, N, xu8m, wrow);
+    var i = 0;
+    while (i < MN) { if (tget(y1, i) != tget(y2, i)) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# 1.5.1 group: the 2-bit weight store (internal).
+fn t151_compact(): i64 {
+    test_group("1.5.1 the 2-bit weight store (internal: _tmf_simd2, _tx_pack_deserialize_compact)");
+    var big = 1 << 40;
+    # (a) the kernel, against the i8 SIMD kernel: all tail (K = 4, 13, 17), a span and a tail
+    # (20), whole spans (32, 48, 64, 768), K = 1, one row and several, with and without a bias
+    assert(k2_matches(1, 4, 3, 1, 0) == 1, "1.5.1: _tmf_simd2 == the i8 kernel at 1x4x3");
+    assert(k2_matches(1, 20, 5, 2, 1) == 1, "1.5.1: ... at 1x20x5 + bias (a span and a tail)");
+    assert(k2_matches(3, 32, 7, 3, 0) == 1, "1.5.1: ... at 3x32x7 (whole spans, three rows)");
+    assert(k2_matches(5, 13, 9, 4, 1) == 1, "1.5.1: ... at 5x13x9 + bias (K not a multiple of 4)");
+    assert(k2_matches(2, 48, 16, 5, 1) == 1, "1.5.1: ... at 2x48x16 + bias");
+    assert(k2_matches(1, 1, 1, 6, 0) == 1, "1.5.1: ... at 1x1x1");
+    assert(k2_matches(4, 17, 6, 7, 1) == 1, "1.5.1: ... at 4x17x6 + bias");
+    assert(k2_matches(1, 768, 8, 8, 0) == 1, "1.5.1: ... at 1x768x8");
+    assert(k2_matches(7, 64, 33, 9, 1) == 1, "1.5.1: ... at 7x64x33 + bias");
+    assert(_pk2_row_bytes(768) * 768 * 4 == 768 * 768, "1.5.1: a 2-bit 768x768 store is a quarter of the i8 one");
+    # (b) a whole model loaded with the 2-bit store: exact allocation, bit-identical serving,
+    # prefix rows, incremental decode, canonical bytes, at three shapes
+    var cfg = 0; var a0 = 0;
+    while (cfg < 3) {
+        var V = 6; var T = 4; var C = 4; var F = 8;
+        if (cfg == 1) { V = 9; T = 5; C = 20; F = 40; }
+        if (cfg == 2) { V = 40; T = 6; C = 33; F = 47; }
+        var art = make_artifact(V, T, C, F, 90 + cfg); var n = g_art_n;
+        a0 = alloc_used();
+        assert(_tx_pack_deserialize_compact(art, n, big) == 0, "1.5.1: a compact load succeeds");
+        assert(alloc_used() - a0 == _tx_compact_alloc_bytes(V, T, C, F),
+          "1.5.1: ... allocating exactly _tx_compact_alloc_bytes");
+        assert(pk_kind == 2, "1.5.1: ... with the 2-bit store");
+        assert(serves_ref(V, T, C, F) == 1, "1.5.1: ... and serves bit-identically to the model written");
+        tx_fwd_packed(g_tok_s, V, 2, C, F);
+        var pf = 1; var pi = 0;
+        while (pi < 2 * V) { if (tget(ki_logits, pi) != tget(g_ref, pi)) { pf = 0; } pi = pi + 1; }
+        assert(pf == 1, "1.5.1: ... and a prefix's rows");
+        assert(dec_matches_ref(V, T) == 1, "1.5.1: ... and decodes incrementally bit for bit");
+        var re = alloc(n + 8);
+        assert(tx_pack_serialize(re, n) == n, "1.5.1: ... and serializes from the 2-bit rows");
+        assert(same_bytes(re, art, n) == 1, "1.5.1: ... to the bytes it was loaded from");
+        cfg = cfg + 1;
+    }
+    assert(_tx_compact_alloc_bytes(256, 32, 128, 512) == 1279464,
+      "1.5.1: at the bench config a compact load is 1,279,464 bytes (a serving load 1,434,536)");
+    assert(_tx_compact_alloc_bytes(0, 4, 4, 8) == (0 - 1), "1.5.1: _tx_compact_alloc_bytes refuses a dim of 0");
+    # (c) the memory bound, refusals, and no reuse across store kinds
+    var V2 = 7; var T2 = 4; var C2 = 5; var F2 = 9;
+    var art2 = make_artifact(V2, T2, C2, F2, 95); var n2 = g_art_n; var ref2 = g_ref; var tok2 = g_tok_s;
+    var art3 = make_artifact(V2, T2, C2, F2, 96); var ref3 = g_ref;
+    g_tok_s = tok2;
+    var cneed = _tx_compact_alloc_bytes(V2, T2, C2, F2); var sneed = tx_serve_alloc_bytes(V2, T2, C2, F2);
+    assert(_tx_pack_deserialize_compact(art2, n2, cneed - 1) == pk_err_too_big(),
+      "1.5.1: max_bytes one short of the compact figure -> pk_err_too_big");
+    assert(_tx_pack_deserialize_compact(art2, n2, cneed) == 0, "1.5.1: ... and the figure itself loads");
+    var m = art_copy(art2, n2); store8(m + 100, load8(m + 100) ^ 4);
+    assert(_tx_pack_deserialize_compact(m, n2, big) == pk_err_checksum(), "1.5.1: a flipped bit -> pk_err_checksum");
+    assert(serves(ref2, V2, T2, C2, F2) == 1, "1.5.1: ... and the compact model still serves");
+    a0 = alloc_used();
+    assert(_tx_pack_deserialize_compact(art3, n2, big) == 0, "1.5.1: model 3 loads compact over model 2");
+    assert(alloc_used() == a0, "1.5.1: ... allocating nothing (same dims, same store)");
+    assert(serves(ref3, V2, T2, C2, F2) == 1, "1.5.1: ... and serves model 3, none of model 2 left");
+    a0 = alloc_used();
+    assert(tx_pack_deserialize_serving(art2, n2, big) == 0, "1.5.1: an i8 serving load over the compact model");
+    assert(alloc_used() - a0 == sneed, "1.5.1: ... allocates its own store (no reuse across kinds)");
+    assert(pk_kind == 0, "1.5.1: ... and serves from the i8 copy");
+    assert(serves(ref2, V2, T2, C2, F2) == 1, "1.5.1: ... bit-identically");
+    a0 = alloc_used();
+    assert(_tx_pack_deserialize_compact(art3, n2, big) == 0, "1.5.1: a compact load over the i8 serving model");
+    assert(alloc_used() - a0 == cneed, "1.5.1: ... allocates its own store");
+    assert(serves(ref3, V2, T2, C2, F2) == 1, "1.5.1: ... and serves");
+    a0 = alloc_used();
+    assert(tx_pack_deserialize(art2, n2, big) == 0, "1.5.1: a full load over the compact model");
+    assert(alloc_used() - a0 == tx_model_alloc_bytes(V2, T2, C2, F2), "1.5.1: ... allocates the full model");
+    assert(pk_kind == 0, "1.5.1: ... with the i8 store");
+    # (d) a compact model is a serving-only model: it serves and decodes, and refuses training
+    assert(_tx_pack_deserialize_compact(art2, n2, big) == 0, "1.5.1: model 2 loads compact again");
+    g_V = V2; g_T = T2; g_C = C2; g_F = F2; g_tok = tok2; g_tgt = tok2;
+    g_buf2 = alloc(n2 + 8);
+    assert(child_exit(&sc_so_serve) == 0, "1.5.1: a compact model serves");
+    assert(child_exit(&sc_so_decode) == 0, "1.5.1: ... decodes");
+    assert(child_exit(&sc_so_serialize) == 0, "1.5.1: ... serializes");
+    assert(child_exit(&sc_so_param_init) == 1, "1.5.1 guard: tx_param_init refuses a compact model");
+    assert(child_exit(&sc_so_pack) == 1, "1.5.1 guard: tx_pack refuses a compact model");
+    assert(child_exit(&sc_so_blq) == 1, "1.5.1 guard: bl_forward_q refuses a compact model's scratch");
+    assert(child_exit(&sc_so_reinit) == 0, "1.5.1: tx_init makes an ordinary model again");
+    return 0;
+}
+
 # 1.5.0 group: loading a model for serving only.
 fn t15_serving(): i64 {
     test_group("1.5.0 serving-only loads (tx_pack_deserialize_serving / tx_serve_alloc_bytes)");
@@ -1684,6 +1795,7 @@ fn main() {
     t14_reuse();
     t14_vocab();
     t15_serving();
+    t151_compact();
     return assert_summary();
 }
 

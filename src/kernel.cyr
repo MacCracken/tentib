@@ -388,6 +388,123 @@ fn ternary_matmul_free_simd(qx, sx, w8t, wsum, gamma, b, y, M, K, N, xu8): i64 {
     return 0;
 }
 
+# ---- 1.5.1: serving from 2-bit weight storage (internal, not frozen) --------------
+# The i8 working copy above is 1 byte per weight. This stores each weight in 2 bits, the
+# artifact's own code (0 = 0, 1 = +1, 2 = -1), 4 to a byte, one output row per line padded
+# to a whole byte: row n of a [N, K] layer is (K + 3) / 4 bytes at n * ((K + 3) / 4). The
+# kernel unpacks one row at a time into a K-byte i8 scratch through a 256-entry table (one
+# code byte -> four i8 weights, one store32), then runs ternary_matmul_free_simd's exact
+# arithmetic on it: the same iv_dp8 over the 16-lane span, the same -128 * wsum offset
+# correction, the same branchless tail, the same dequant expression. So the output is
+# bit-identical by construction; the suite and the fuzz harness (P1) check it.
+#
+# The trade: a quarter of the weight memory, for an unpack of K / 4 table lookups per
+# output row per call. cyrius has no vector shuffle or shift to do it in-register, so it
+# is scalar. The kernel loops rows of weights outermost, so one unpack serves every
+# activation row of the call: amortized over a T-row forward, paid in full by a one-row
+# decode step. docs/benchmarks.md measures both.
+#
+# Internal in 1.5.1 (a patch adds no public symbol): reached through
+# _tx_pack_deserialize_compact (src/serial.cyr), which loads a model with this store, and
+# then tx_fwd_packed and tx_dec_step serve from it unchanged. Not frozen: the layout, the
+# names and the entry points may change before a minor exposes them.
+
+var pk_lut[128];                  # 256 u32 entries: code byte -> 4 i8 weights (built once)
+var pk_lut_ready = 0;
+
+# Build the unpack table: entry b holds the i8 weights of the four codes in byte b, low
+# code in the low byte. Code 3 (invalid; the decoder refuses it) maps to 0.
+fn _pk_lut_build(): i64 {
+    var b = 0;
+    while (b < 256) {
+        var word = 0; var i = 0;
+        while (i < 4) {
+            var c = (b >> (i * 2)) & 3;
+            var w = 0;
+            if (c == 1) { w = 1; }
+            if (c == 2) { w = 255; }
+            word = word | (w << (i * 8));
+            i = i + 1;
+        }
+        store32(&pk_lut + b * 4, word);
+        b = b + 1;
+    }
+    pk_lut_ready = 1;
+    return 0;
+}
+
+# The bytes one row of a 2-bit layer of K inputs takes.
+fn _pk2_row_bytes(K): i64 { return (K + 3) / 4; }
+
+# A 2-bit store of the i8 weights w8t [N, K] (bytes 0 / 1 / 0xFF), into w2
+# (N * _pk2_row_bytes(K) bytes, zero padding codes). For tests, the fuzz harness and the
+# bench; a compact load writes the store straight from the artifact's codes.
+fn _pk2_from_w8t(w8t, K, N, w2): i64 {
+    var Kp = _pk2_row_bytes(K);
+    var z = 0;
+    while (z < N * Kp) { store8(w2 + z, 0); z = z + 1; }
+    var n = 0;
+    while (n < N) {
+        var k = 0;
+        while (k < K) {
+            var wb = load8(w8t + n * K + k);
+            var c = 0;
+            if (wb == 1) { c = 1; }
+            if (wb == 255) { c = 2; }
+            var at = w2 + n * Kp + k / 4;
+            store8(at, load8(at) | (c << ((k % 4) * 2)));
+            k = k + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
+
+# The 2-bit SIMD kernel: ternary_matmul_free_simd's contract and output, bit for bit, on
+# weights stored by _pk2_from_w8t's layout. wsum is the same offset table. Scratch: xu8m
+# (M * K bytes: every row's u8-offset activations) and wrow (K + 3 bytes: one unpacked
+# weight row).
+fn _tmf_simd2(qx, sx, w2, wsum, gamma, b, y, M, K, N, xu8m, wrow): i64 {
+    guard(K <= 4194304, "_tmf_simd2: K > 2^22 voids the i32 exactness bound");
+    if (pk_lut_ready == 0) { _pk_lut_build(); }
+    var K16 = (K / 16) * 16;
+    var Kp = _pk2_row_bytes(K);
+    var m = 0;
+    while (m < M) {
+        var qrow = qx + m * K * 8; var xr = xu8m + m * K;
+        var k = 0;
+        while (k < K) { store8(xr + k, load64(qrow + k * 8) + 128); k = k + 1; }   # u8 in [1,255]
+        m = m + 1;
+    }
+    var n = 0;
+    while (n < N) {
+        var src = w2 + n * Kp; var j = 0;
+        while (j < Kp) { store32(wrow + j * 4, load32(&pk_lut + load8(src + j) * 4)); j = j + 1; }
+        var corr = 128 * load64(wsum + n * 8);
+        m = 0;
+        while (m < M) {
+            var qrow2 = qx + m * K * 8;
+            var acc = 0;
+            if (K16 > 0) { acc = iv_dp8(xu8m + m * K, wrow, K16) - corr; }
+            var k2 = K16;                         # branchless tail on the unpacked bytes
+            while (k2 < K) {
+                var w = load8(wrow + k2);
+                var qv = load64(qrow2 + k2 * 8);
+                var pm = 0 - (w == 1);
+                var nm = 0 - (w == 255);
+                acc = acc + (qv & pm) - (qv & nm);
+                k2 = k2 + 1;
+            }
+            var yv = f64_mul(f64_from(acc), f64_mul(load64(sx + m * 8), gamma));
+            if (b != 0) { yv = f64_add(yv, load64(b + n * 8)); }
+            store64(y + (m * N + n) * 8, yv);
+            m = m + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
+
 # ---- 0.7.0: pack-once deployment inference --------------------------------------
 # The consumer-facing serving path. tx_fwd_q re-quantizes (and mode 2 re-packs)
 # every forward by reference-fairness design; a deployment quantizes + packs ONCE
@@ -406,6 +523,10 @@ var pk_V0 = 0; var pk_C0 = 0; var pk_F0 = 0;     # the dims the store is laid ou
 # The vocabulary the packed model declares (1.4.0; src/serial.cyr): 0 = none, the
 # consumer's own convention; 1 = bytes. tx_pack_init resets it, tx_pack keeps it.
 var pk_vocab = 0;
+# How the live store keeps its weights (1.5.1, internal): 0 = the i8 copy (pk_w8t), 2 = 2-bit
+# rows (pk_w2t, from _tx_pack_deserialize_compact), with that kernel's scratch.
+var pk_kind = 0;
+var pk_w2t = 0; var pk_xu8m = 0; var pk_wrow = 0;
 
 # Allocate the packed store (pointer tables + per-layer buffers).
 fn tx_pack_init(V, T, C, F): i64 {
@@ -424,6 +545,8 @@ fn tx_pack_init(V, T, C, F): i64 {
     }
     pk_ready = 0;
     pk_vocab = 0;
+    pk_kind = 0;
+    pk_w2t = 0;
     tx_rev = tx_rev + 1;
     return 0;
 }
@@ -463,6 +586,11 @@ fn tx_pack(V, T, C, F): i64 {
 # pre-packed layer `i`. The only per-call work besides the matmul is act quant.
 fn bl_forward_pk(i, x, b, y, M, K, N): i64 {
     act_quant_int(x, M, K, ki_q, ki_sx);
+    if (pk_kind == 2) {                           # 1.5.1: a 2-bit store (internal)
+        _tmf_simd2(ki_q, ki_sx, load64(pk_w2t + i * 8), load64(pk_wsum + i * 8),
+          load64(pk_gamma + i * 8), b, y, M, K, N, pk_xu8m, pk_wrow);
+        return 0;
+    }
     ternary_matmul_free_simd(ki_q, ki_sx, load64(pk_w8t + i * 8), load64(pk_wsum + i * 8),
       load64(pk_gamma + i * 8), b, y, M, K, N, ki_xu8);
     return 0;

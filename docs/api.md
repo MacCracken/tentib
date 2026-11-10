@@ -249,6 +249,17 @@ Internal (not frozen): `dec_*` globals, `tx_rev` (the model revision the stalene
 check reads), `_attn_row` / `_attn_scale` (`src/layers.cyr`; `attn_fwd` runs every
 row through `_attn_row`, the step runs its one row).
 
+**Internal in 1.5.1 (not frozen): the 2-bit weight store.**
+- **Names:** `_tmf_simd2`, `_pk2_from_w8t`, `_pk2_row_bytes`, `_pk_lut_build`,
+  `_tx_pack_deserialize_compact`, `_tx_compact_alloc_bytes`, `pk_kind` / `pk_w2t` /
+  `pk_xu8m` / `pk_wrow` / `pk_lut`.
+- **What a compact load gives:** a serving-only model whose weights are 2 bits each (a
+  quarter of the i8 copy). Every public serving call (`tx_fwd_packed`, `tx_dec_step`,
+  `tx_pack_serialize`) returns the same bits from it.
+- **Status:** it is a measurement vehicle until a minor decides to expose it
+  (`docs/benchmarks.md`'s 1.5.1 note has the trade). Its names and layout may change before
+  then.
+
 ## Documented output cells (module globals, read-only for consumers)
 
 | global | written by | contents |

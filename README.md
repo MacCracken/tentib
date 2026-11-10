@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — 1.x STABLE (1.5.0: 346 assertions + a property fuzzer, x86_64 and aarch64, on a Raspberry Pi 4 too; API frozen for the 1.x series)
+## Status — 1.x STABLE (1.5.1: 407 assertions + a property fuzzer, x86_64 and aarch64, on a Raspberry Pi 4 too; API frozen for the 1.x series)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's

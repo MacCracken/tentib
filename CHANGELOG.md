@@ -4,6 +4,102 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-11-09
+
+**The 2-bit weight store, built and measured: internal for now.** The rest of the 1.5.x band is
+a kernel that serves from 2-bit weights instead of the i8 copy, and it ships here behind internal
+names.
+- **Why internal:** a patch adds no public symbol, and the measurement does not yet make the
+  case for one.
+- **Same output:** it is bit-identical to the i8 kernel by construction.
+- **The trade:** the weights take a quarter of the memory, but a one-row decode step is 2.4–2.9×
+  slower, because cyrius has no vector shuffle or shift to unpack 2-bit codes in-register.
+- **Nothing public changed:** no signature or semantics. The golden dump of every public output
+  is byte-identical to 1.3.1, 1.4.0 and 1.5.0, and so is the demo's output.
+
+### Added (internal, not frozen)
+
+- **A 2-bit row store** (`src/kernel.cyr`). Each weight is its artifact code (0 = 0, 1 = +1,
+  2 = −1), 4 per byte. Each output row is padded to a whole byte: `_pk2_row_bytes(K)` =
+  (K + 3) / 4.
+- **`_tmf_simd2`**, the 2-bit SIMD kernel.
+  - **How it unpacks.** It unpacks one weight row at a time into a K-byte i8 scratch through
+    a 256-entry table, one code byte to four weights with one `store32` (`pk_lut`, 1 KB of
+    static data, built once).
+  - **Why it's bit-identical.** It then runs `ternary_matmul_free_simd`'s exact arithmetic:
+    the same `iv_dp8` over the 16-lane span, the same −128·`wsum` correction, the same
+    branchless tail, the same dequant expression.
+  - **The loop order.** Weight rows are the outer loop, so one unpack serves every
+    activation row of a call.
+- **`_pk2_from_w8t`**, which builds a 2-bit store from an i8 one (for tests, the fuzz harness
+  and the bench).
+- **`_tx_pack_deserialize_compact` / `_tx_compact_alloc_bytes`**, a serving-only load that keeps
+  the 2-bit store. It writes the store straight from the artifact's codes and computes `wsum`
+  from them. Three things then use the store unchanged:
+  - `tx_fwd_packed` and `tx_dec_step`, through a `pk_kind` dispatch in `bl_forward_pk`;
+  - `tx_pack_serialize`, which reads the codes back.
+
+  It shares `_pk_load` with the two public loaders: the same checks, the same status codes,
+  the same refused-call guards as a serving-only model. Neither reuse rule lets one store
+  kind reuse another's buffers (`pk_kind` checks).
+
+### Measured (`docs/benchmarks.md`, 1.5.1 note)
+
+At the bench config (V = 256, T = 32, C = 128, F = 512):
+
+| | i8 store | 2-bit store |
+|---|---:|---:|
+| weight bytes | 229,376 | **57,344 (4×)** |
+| a serving load allocates | 1,434,536 | 1,279,464 (−11%: at this scale the weights are a sixth) |
+| one 768×768 layer at M = 1, x86_64 / Pi 4 | 28.6 µs / 350 µs | 371 µs / 3.29 ms |
+| a 32-token forward, Pi 4 | 25.78 ms | 27.49 ms (+6.6%) |
+| a cached decode step, Pi 4 | 810 µs | 1.93 ms (2.4×) |
+
+- **Two costs.** At M = 1 the scalar unpack, K/4 table lookups per row, costs 5–13× the
+  `iv_dp8` dot it feeds. Over a T-row forward it is paid once per weight row and nearly
+  vanishes.
+- **What would close the gap.** An in-register unpack, as in bitnet.cpp's TL1 / TL2 kernels
+  (`pshufb` / `tbl`). That needs a byte-shuffle or vector-shift intrinsic cyrius does not have.
+- **Where it pays.** At b1.58 scale the weights are nearly all of a model's memory. There the
+  2-bit store is the difference between fitting the Pi 4's 2 GB and not, at 2–3× the decode
+  cost.
+- **Exposing it** is a minor's decision: the roadmap's 1.5.x band.
+
+### Tests
+
+- **Suite 346 → 407 assertions.** The kernel matches the i8 kernel bit for bit at nine shapes:
+  all-tail K (4, 13, 17), span and tail (20), whole spans (32, 48, 64, 768), K = 1, one row and
+  several, with and without a bias. The compact load is checked at three shapes:
+  - the exact allocation;
+  - bit-identical serving, prefix rows and incremental decode;
+  - canonical bytes from the 2-bit rows;
+  - the bench figure and the memory bound;
+  - no reuse across store kinds;
+  - the serving-only guards.
+- **Fuzz:**
+  - P1 adds the 2-bit kernel to the kernels that must agree on every random layer.
+  - P6 adds it to the NaN-row check.
+  - P13 also loads P9's model with the 2-bit store: the exact figure, the same logits and
+    decode, the same bytes back.
+- **Everywhere:** both pass on x86_64, under qemu and on the Raspberry Pi 4.
+- **Mutation run:** 12 mutants of the new code, and the suite kills 11. Among the killed:
+  - a wrong table byte, or a reversed byte order;
+  - the offset off by one;
+  - a dropped last code byte;
+  - `wsum` over all of K;
+  - a wrong code shift, or the wrong serialize stride;
+  - reuse across store kinds;
+  - a missing scratch in the figure;
+  - an untaken dispatch.
+
+  The survivor drops the full-load reuse rule's store-kind test. It is equivalent, because a
+  compact model also fails that rule's block-dims test.
+
+### Changed
+
+- **The 2-bit unpack table adds 1 KB of static data** to the bundle (`pk_lut`).
+- **`_tx_serve_alloc` and `_pk_reusable_serving` take the store kind** (internal).
+
 ## [1.5.0] — 2026-11-09
 
 **A load for serving only, and tentib measured on a Raspberry Pi 4.**

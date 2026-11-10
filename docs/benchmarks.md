@@ -79,6 +79,34 @@ is reproduced by the committed harness — no hand-curated numbers.
 > 10.8 MB costs more. Every row whose code did not change sits within −1.5% to +1.1% of 1.4.0's
 > run on the Pi, which was idle both times. On x86_64 the same rows read a median 5.9% faster,
 > because the machine was quieter.
+>
+> **1.5.1 (2026-11-09): the 2-bit weight store (internal).** `_tmf_simd2` serves from weights
+> stored 2 bits each, bit-identical to the i8 SIMD kernel. It unpacks each weight row through a
+> 256-entry table, then runs the same `iv_dp8` arithmetic. Median of three runs:
+>
+> | | x86_64 (5800H) | Raspberry Pi 4 |
+> |---|---:|---:|
+> | one layer at M = 1, i8 → 2-bit, 128² | X86_L128 | 19.7 → 105.1 µs (5.3×) |
+> | ... 256² | X86_L256 | 52.7 → 385.4 µs (7.3×) |
+> | ... 512² | X86_L512 | 172.4 µs → 1.48 ms (8.6×) |
+> | ... 768² | X86_L768 | 350.2 µs → 3.29 ms (9.4×) |
+> | a 32-token forward, i8 → 2-bit | X86_FWD | 25.78 → 27.49 ms (+6.6%) |
+> | a cached decode step, i8 → 2-bit | X86_STEP | 0.810 → 1.93 ms (2.4×) |
+> | a fresh serving load, i8 → 2-bit | X86_LOAD | 37.1 → 32.4 ms |
+>
+> Weights take 57,344 bytes instead of 229,376 (4×), so a serving load is 1,279,464 bytes
+> instead of 1,434,536.
+>
+> **Where the time goes.** At M = 1 the unpack, K/4 table lookups and `store32`s per weight row,
+> costs several times the 16-lane dot it feeds. The ratio grows with the layer, and at 768² the
+> 2-bit layer is slower than rosnet's f64 one (2.32 ms on the Pi). Over a 32-row forward each row
+> is unpacked once for 32 dots, and the cost nearly vanishes.
+>
+> **The fix and the use.** The fix is an in-register unpack (bitnet.cpp's TL1 / TL2 use
+> `pshufb` / `tbl`), which needs a byte-shuffle or vector-shift intrinsic cyrius does not yet
+> have. Until then the 2-bit store is a memory trade, worth it where the weights decide whether
+> a model fits at all: at b1.58 scale, on the Pi 4's 2 GB. The store is internal in 1.5.1; see the
+> roadmap's 1.5.x band.
 
 ## 1. Per-layer kernel sweep (M=1 row, K×N; ns/call)
 

@@ -5,6 +5,18 @@
 
 ## Version
 
+**1.5.1** (2026-11-09): **the 2-bit weight store, internal.**
+- **What it is:** `_tmf_simd2` serves from weights kept 2 bits each, bit-identical to the
+  i8 kernel by construction. `_tx_pack_deserialize_compact` loads a model with that store,
+  and every public serving call returns the same bits from it.
+- **The trade** (`docs/benchmarks.md`'s 1.5.1 note): a quarter of the weight memory, against
+  a 2.4–2.9× slower decode step and a ~7% slower T-row forward. The unpack is scalar, since
+  cyrius has no vector shuffle or shift.
+- **Not public yet:** a patch adds no public symbol, and exposing it is a minor's decision.
+- **Unchanged:** no public behavior, and the golden dump is byte-identical.
+- Suite **407**; fuzz **P1–P13** (P1, P6 and P13 cover the 2-bit kernel), also on aarch64
+  under qemu and on the Pi 4.
+
 **1.5.0** (2026-11-09): **a load for serving only.** `tx_pack_deserialize_serving` reads and checks a
 model file exactly as `tx_pack_deserialize` does and serves the same logits bit for bit. It allocates only
 what serving reads, `tx_serve_alloc_bytes`: 1,434,536 bytes at the bench config, against 12,192,728. It is a
@@ -71,7 +83,8 @@ Releases since 1.0.0: 1.0.1 (AGNOS GPU integer offload, `ternary_matmul_free_gpu
 1.0.2 (pin 6.5.27, deps to their 1.x freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20) ·
 1.1.0 (pin 6.7.9) · 1.1.1 (pin 6.7.18, latest deps) · 1.1.2 (P(-1) sweep) ·
 1.2.0 (packed-model serialization) · 1.3.0 (library bundle, consumer example) · 1.3.1 (hoosh adopts it) ·
-1.4.0 (incremental decode, same-dims reload, the vocabulary flag) · 1.5.0 (the serving-only load, the Pi 4 benchmarks).
+1.4.0 (incremental decode, same-dims reload, the vocabulary flag) · 1.5.0 (the serving-only load, the Pi 4 benchmarks) ·
+1.5.1 (the 2-bit weight store, internal and measured).
 
 **1.0.0 — STABLE**, cut 2026-07-06 (user-named; user tags). The clean cut
 (tarka/prajna/anukūlana precedent): **no code change from 0.8.0** — all six v1.0
@@ -143,7 +156,9 @@ STE), **0.1.0** (M0 — ternary quantizer).
   (u8-offset codes, `iv_dp8` 16-lane inner loop, branchless tail — bit-identical,
   exactness bounds documented in-file). **0.7.0 pack-once serving**:
   `tx_pack_init`/`tx_pack` (7-layer packed store, built once) + `tx_fwd_packed`
-  (deployment forward; internal `bl_forward_pk`/`*_sublayer_pk` chain).
+  (deployment forward; internal `bl_forward_pk`/`*_sublayer_pk` chain). **1.5.1 (internal)**:
+  the 2-bit row store and `_tmf_simd2` (a 256-entry unpack table, `pk_lut`, then the SIMD
+  kernel's exact arithmetic), dispatched in `bl_forward_pk` on `pk_kind`.
 - `src/gpu.cyr` — `ternary_matmul_free_gpu`: the integer accumulate tiled 8×8×8 onto the
   AGNOS `#82` dispatch, bit-exact at any K; the host computes every tile itself (gated in
   the suite at ragged shapes since 1.1.2). Built by `programs/gpumm.cyr`.
@@ -181,7 +196,7 @@ STE), **0.1.0** (M0 — ternary quantizer).
 
 ## Tests
 
-- `tests/tentib.tcyr` — **346/346** green (x86_64, aarch64 under qemu in CI, and since 2026-11-09 a real
+- `tests/tentib.tcyr` — **407/407** green (x86_64, aarch64 under qemu in CI, and since 2026-11-09 a real
   Raspberry Pi 4, Cortex-A72): rosnet smoke, M0 quantization, BitLinear
   forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
@@ -272,7 +287,8 @@ gets rosnet + tyche (checked with a throwaway consumer project, 1.3.0).
 tentib is stable (1.x, API frozen); the open work is in [`roadmap.md`](roadmap.md),
 proposed in order (1.2.0, 1.3.0 and 1.4.0 shipped, and hoosh adopted 1.3.x): **1.3.x** murti once ported ·
 **1.4.x** the rest of what the first consumer asked for (a token table in the artifact) ·
-**1.5.x** serving from 2-bit / trit packed storage (1.5.0 shipped the serving-only load) · **1.6.x** the edge target, the Raspberry Pi 4 at `ssh pi` (retargeted from a Pi 5): measured after
+**1.5.x** serving from 2-bit / trit packed storage (1.5.0 shipped the serving-only load; 1.5.1 built and measured
+the 2-bit kernel, internal: exposing it, or a faster in-register unpack once cyrius has a byte shuffle, is open) · **1.6.x** the edge target, the Raspberry Pi 4 at `ssh pi` (retargeted from a Pi 5): measured after
 1.4.0 (`docs/benchmarks.md` §6: packed serving 1,241 tok/s, 2.85× the board's f64 path; a cached
 decode step 1,249 tok/s); sizing a model for its 2 GB waits on 1.5.x, and power is unmeasured · **1.7.x** GPU kernels via mabda · later 1.x minors
 (a matched-recipe quality ablation, the token-mixer research watch) · a **2.0.0
