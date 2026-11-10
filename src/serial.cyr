@@ -18,6 +18,10 @@
 # The format is canonical: any buffer the decoder accepts re-serializes to the same bytes,
 # and every buffer tx_pack_serialize writes, the decoder accepts.
 #
+# 1.4.0 (additive): the flags word defines its first bit, the byte vocabulary
+# (tx_pack_set_vocab / tx_pack_vocab); tx_pack_peek reads a header without loading; and
+# a load that replaces a loaded model of the same dims reuses its buffers (_pk_reusable).
+#
 # Depends (includer order): ternary + bitlinear + layers + model + block + kernel.
 
 # ---- format constants ----------------------------------------------------------
@@ -28,6 +32,15 @@ fn _pk_magic(): i64 { return load64("TENTIBPK"); }
 fn _pk_version(): i64 { return 1; }
 # Each of V, T, C, F must lie in [1, 2^20]: products of two dims then fit easily in i64.
 fn _pk_maxdim(): i64 { return 1048576; }
+# Flags bit 0 (1.4.0): the byte vocabulary, token id = byte value, so V must be 256. It
+# is the only bit defined; a decoder refuses any other (1.2.0 through 1.3.1 refuse all).
+fn _pk_flag_bytes(): i64 { return 1; }
+
+# The vocabulary a packed model declares (1.4.0): tx_pack_vocab returns one of these.
+# None: format version 1's default; the token ids mean what the consumer says they mean.
+fn pk_vocab_none(): i64 { return 0; }
+# Bytes: token id = byte value, V = 256 (the flags word's bit 0).
+fn pk_vocab_bytes(): i64 { return 1; }
 
 # Status codes of tx_pack_deserialize (0 = loaded; each code is negative).
 # Buffer too short, or its length is not the artifact's.
@@ -36,7 +49,8 @@ fn pk_err_length(): i64 { return 0 - 1; }
 fn pk_err_magic(): i64 { return 0 - 2; }
 # A format version this decoder does not read.
 fn pk_err_version(): i64 { return 0 - 3; }
-# A dim outside [1, 2^20], or a nonzero flags word.
+# A dim outside [1, 2^20], or a flags word this decoder does not accept (an undefined
+# bit, or the byte vocabulary with V other than 256).
 fn pk_err_header(): i64 { return 0 - 4; }
 # The bytes do not match their FNV-1a checksum.
 fn pk_err_checksum(): i64 { return 0 - 5; }
@@ -142,6 +156,27 @@ fn tx_pack_dims(dims): i64 {
     return 0;
 }
 
+# The vocabulary the live packed model declares: pk_vocab_none() or pk_vocab_bytes()
+# (1.4.0). A load sets it from the artifact's flags word. Fails loud when no packed model
+# is live.
+fn tx_pack_vocab(): i64 {
+    guard(pk_ready == 1, "tx_pack_vocab: no packed model (call tx_pack or tx_pack_deserialize first)");
+    return pk_vocab;
+}
+
+# Declare the vocabulary of the packed model, for tx_pack_serialize to record (1.4.0):
+# pk_vocab_bytes() when the model was trained on token id = byte value, which needs
+# V = 256; pk_vocab_none() to record none. tx_pack_init resets it to none, and tx_pack
+# keeps it. Fails loud on another kind, on bytes with V other than 256, or before
+# tx_pack_init.
+fn tx_pack_set_vocab(kind): i64 {
+    guard(pk_w8t != 0, "tx_pack_set_vocab: call tx_pack_init (or tx_pack_deserialize) first");
+    guard((kind == pk_vocab_none()) | (kind == pk_vocab_bytes()), "tx_pack_set_vocab: unknown vocabulary kind");
+    guard((kind == pk_vocab_none()) | (pk_V0 == 256), "tx_pack_set_vocab: the byte vocabulary needs V = 256");
+    pk_vocab = kind;
+    return 0;
+}
+
 # ---- encode ----------------------------------------------------------------------
 
 # Bytes tx_pack_serialize needs for the live packed model.
@@ -166,7 +201,9 @@ fn tx_pack_serialize(buf, cap): i64 {
     }
     store64(buf, _pk_magic()); store64(buf + 8, _pk_version()); store64(buf + 16, size);
     store64(buf + 24, V); store64(buf + 32, T); store64(buf + 40, C); store64(buf + 48, F);
-    store64(buf + 56, 0);                                 # flags: none defined in version 1
+    var flags = 0;
+    if (pk_vocab == pk_vocab_bytes()) { flags = _pk_flag_bytes(); }
+    store64(buf + 56, flags);                             # bit 0: the byte vocabulary (1.4.0)
     var p = buf + 64;
     i = 0;
     while (i < 7) {
@@ -222,24 +259,76 @@ fn _pk_codes_ok(p, KN): i64 {
     return 1;
 }
 
+# The header checks, in the decoder's order: the length is at least a header's, the
+# magic, the version, the dims, the flags, then the length word and n against the length
+# the dims imply. Returns 0 or the first failure's pk_err_* code. Reads buf[0..64) only
+# when n >= 72.
+fn _pk_header(buf, n): i64 {
+    if (n < 72) { return pk_err_length(); }
+    if (load64(buf) != _pk_magic()) { return pk_err_magic(); }
+    if (load64(buf + 8) != _pk_version()) { return pk_err_version(); }
+    var V = load64(buf + 24); var T = load64(buf + 32); var C = load64(buf + 40); var F = load64(buf + 48);
+    var M = _pk_maxdim();
+    if ((V < 1) | (T < 1) | (C < 1) | (F < 1)) { return pk_err_header(); }
+    if ((V > M) | (T > M) | (C > M) | (F > M)) { return pk_err_header(); }
+    var flags = load64(buf + 56);
+    if ((flags & (0 - 1 - _pk_flag_bytes())) != 0) { return pk_err_header(); }   # an undefined bit
+    if ((flags == _pk_flag_bytes()) & (V != 256)) { return pk_err_header(); }
+    var size = _pk_size(V, T, C, F);
+    if ((load64(buf + 16) != size) | (n != size)) { return pk_err_length(); }
+    return 0;
+}
+
+# Read an artifact's header without loading it (1.4.0): runs tx_pack_deserialize's header
+# checks (length, magic, version, dims, flags, the length the dims imply) and, when they
+# pass, writes info[0..5) = V, T, C, F and the declared vocabulary (pk_vocab_none() or
+# pk_vocab_bytes()). Returns 0, or the pk_err_* code tx_pack_deserialize would return
+# for the same header, writing nothing. It changes no state. A 0 is not a promise that
+# the load succeeds: the load also checks max_bytes, the checksum and every field.
+fn tx_pack_peek(buf, n, info): i64 {
+    var r = _pk_header(buf, n);
+    if (r != 0) { return r; }
+    store64(info, load64(buf + 24)); store64(info + 8, load64(buf + 32));
+    store64(info + 16, load64(buf + 40)); store64(info + 24, load64(buf + 48));
+    store64(info + 32, load64(buf + 56) & _pk_flag_bytes());   # flag bit 0 = pk_vocab_bytes()
+    return 0;
+}
+
+# 1 when a load of dims V, T, C, F can overwrite the live model's buffers instead of
+# allocating new ones (1.4.0): the live model is itself a loaded one (tx_packed_only, so
+# its latent and gradient buffers still hold the zeros a fresh tx_init would give), and
+# every init family was last sized for exactly these dims. A model built in this process
+# (tx_init, tx_param_init, tx_pack) is never overwritten: the load allocates as before.
+fn _pk_reusable(V, T, C, F): i64 {
+    if ((tx_packed_only != 1) | (pk_w8t == 0)) { return 0; }
+    if ((tx_V0 != V) | (tx_T0 != T) | (tx_C0 != C) | (tx_F0 != F)) { return 0; }
+    if ((blk_T0 != T) | (blk_C0 != C) | (blk_F0 != F)) { return 0; }
+    if ((pk_V0 != V) | (pk_C0 != C) | (pk_F0 != F)) { return 0; }
+    var mkn = C * C;                                      # tx_int_init's sizing
+    if (C * F > mkn) { mkn = C * F; }
+    if (C * V > mkn) { mkn = C * V; }
+    var kf = C; if (F > kf) { kf = F; }
+    var nmax = C; if (F > nmax) { nmax = F; } if (V > nmax) { nmax = V; }
+    if ((ki_V0 != V) | (ki_T0 != T) | (ki_cap_k != kf) | (ki_cap_n != nmax) | (ki_cap_kn != mkn)) { return 0; }
+    return 1;
+}
+
 # Load a packed model from buf[0..n), allocating at most max_bytes (see
 # tx_model_alloc_bytes). Returns 0 when loaded, or one of the pk_err_* codes (negative),
 # in which case nothing was allocated or changed and the current model, if any, still
 # serves. A loaded model serves through tx_fwd_packed for any T up to the stored T; it has
 # no latent weights, so tx_fwd / tx_fwd_q / tx_bwd / tx_sgd / tx_pack refuse it until
 # tx_init or tx_param_init makes an ordinary model again.
+#
+# Memory (1.4.0): a load allocates tx_model_alloc_bytes(V, T, C, F), except a load that
+# replaces a LOADED model of the same V, T, C, F, which overwrites that model's buffers
+# and allocates nothing. Either way the max_bytes check uses the model's figure, so
+# whether a buffer loads does not depend on what was loaded before it.
 fn tx_pack_deserialize(buf, n, max_bytes): i64 {
-    if (n < 72) { return pk_err_length(); }
-    if (load64(buf) != _pk_magic()) { return pk_err_magic(); }
-    if (load64(buf + 8) != _pk_version()) { return pk_err_version(); }
-    var total = load64(buf + 16);
+    var hr = _pk_header(buf, n);
+    if (hr != 0) { return hr; }
     var V = load64(buf + 24); var T = load64(buf + 32); var C = load64(buf + 40); var F = load64(buf + 48);
-    if (load64(buf + 56) != 0) { return pk_err_header(); }
-    var M = _pk_maxdim();
-    if ((V < 1) | (T < 1) | (C < 1) | (F < 1)) { return pk_err_header(); }
-    if ((V > M) | (T > M) | (C > M) | (F > M)) { return pk_err_header(); }
     var size = _pk_size(V, T, C, F);
-    if ((total != size) | (n != size)) { return pk_err_length(); }
     if (tx_model_alloc_bytes(V, T, C, F) > max_bytes) { return pk_err_too_big(); }
     if (_pk_fnv(buf, size - 8) != load64(buf + size - 8)) { return pk_err_checksum(); }
     # validate every field before anything is allocated or changed
@@ -254,9 +343,11 @@ fn tx_pack_deserialize(buf, n, max_bytes): i64 {
     }
     if (_pk_all_finite(p, V * C + T * C + 3 * C + V) == 0) { return pk_err_param(); }
     # commit: every check passed, and the allocation fits max_bytes
-    tx_init(V, T, C, F);
-    tx_int_init(V, T, C, F);
-    tx_pack_init(V, T, C, F);
+    if (_pk_reusable(V, T, C, F) == 0) {
+        tx_init(V, T, C, F);
+        tx_int_init(V, T, C, F);
+        tx_pack_init(V, T, C, F);
+    }
     p = buf + 64;
     i = 0;
     while (i < 7) {
@@ -298,5 +389,8 @@ fn tx_pack_deserialize(buf, n, max_bytes): i64 {
     t_copy(tx_bhead, p, V);
     pk_ready = 1;
     tx_packed_only = 1;
+    pk_vocab = pk_vocab_none();
+    if (load64(buf + 56) == _pk_flag_bytes()) { pk_vocab = pk_vocab_bytes(); }
+    tx_rev = tx_rev + 1;
     return 0;
 }

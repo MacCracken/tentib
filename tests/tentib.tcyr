@@ -14,6 +14,7 @@ include "lib/akshara.cyr"   # corpus_set / gd_ld — sovereign tokenizer (M2 bit
 include "src/block.cyr"     # attn_sublayer_* / tx_* — transformer block + LM (M2 bite-E/F)
 include "src/kernel.cyr"    # ternary_matmul_free / act_quant_int / tpack2 — matmul-free kernel (M3)
 include "src/serial.cyr"  # tx_pack_serialize / tx_pack_deserialize — packed-model bytes (1.2.0)
+include "src/decode.cyr"  # tx_dec_reset / tx_dec_step — incremental decode (1.4.0)
 include "src/gpu.cyr"       # ternary_matmul_free_gpu — its host fallback is gated here (1.1.2)
 
 # akshara consumer symbols (unused — we drive the pure corpus_set/gd_ld path)
@@ -245,6 +246,310 @@ fn sc_dims_none(): i64 { pk_ready = 0; var d[32]; return tx_pack_dims(&d); }
 fn sc_po_serve(): i64 { return tx_fwd_packed(g_tok, g_V, g_T, g_C, g_F); }
 # Control: tx_param_init makes an ordinary model again, so tx_fwd runs.
 fn sc_po_reinit(): i64 { tx_param_init(g_V, g_T, g_C, g_F, 3); return tx_fwd(g_tok, g_V, g_T, g_C, g_F); }
+
+# --- 1.4.0: incremental decode, same-dims reload, the vocabulary flag ---------
+# 1 when stepping g_tok_s[0..T) through tx_dec_step reproduces, at every position t,
+# the last row of tx_fwd_packed over the first t + 1 tokens, bit for bit, with the
+# returned position and tx_dec_len right. The full forwards run between the steps, so
+# the cache also survives a forward that overwrites the shared scratch.
+fn dec_matches(V, T, C, F): i64 {
+    var ok = 1;
+    var last = t_alloc(V);
+    tx_dec_reset();
+    if (tx_dec_len() != 0) { ok = 0; }
+    var t = 0;
+    while (t < T) {
+        tx_fwd_packed(g_tok_s, V, t + 1, C, F);
+        t_copy(last, ki_logits + t * V * 8, V);
+        if (tx_dec_step(load64(g_tok_s + t * 8)) != t) { ok = 0; }
+        if (tx_dec_len() != t + 1) { ok = 0; }
+        var i = 0;
+        while (i < V) { if (tget(ki_logits, i) != tget(last, i)) { ok = 0; } i = i + 1; }
+        t = t + 1;
+    }
+    return ok;
+}
+# 1 when a reset and T uninterrupted steps of g_tok_s reproduce g_ref's T rows.
+fn dec_matches_ref(V, T): i64 {
+    var ok = 1;
+    tx_dec_reset();
+    var t = 0;
+    while (t < T) {
+        tx_dec_step(load64(g_tok_s + t * 8));
+        var i = 0;
+        while (i < V) { if (tget(ki_logits, i) != tget(g_ref, t * V + i)) { ok = 0; } i = i + 1; }
+        t = t + 1;
+    }
+    return ok;
+}
+var g_art = 0; var g_art2 = 0;
+# tx_dec_step before any tx_dec_reset (must fail: the cache predates the model).
+fn sc_dec_never(): i64 { dec_rev = 0 - 1; return tx_dec_step(0); }
+# A load (of the same dims, so the cache would fit) and a step without a reset (must fail).
+fn sc_dec_stale_load(): i64 {
+    tx_dec_reset(); tx_dec_step(0);
+    tx_pack_deserialize(g_art, g_art_n, 1 << 40);
+    return tx_dec_step(0);
+}
+# An in-process model: a step after tx_sgd moved the embeddings (must fail).
+fn sc_dec_stale_sgd(): i64 {
+    tx_dec_reset(); tx_dec_step(0);
+    tx_sgd(g_V, g_T, g_C, g_F, f64_from(0));
+    return tx_dec_step(0);
+}
+# T steps, then one more (must fail: the window is full).
+fn sc_dec_full(): i64 {
+    tx_dec_reset();
+    var t = 0;
+    while (t < g_T) { tx_dec_step(0); t = t + 1; }
+    return tx_dec_step(0);
+}
+# Control: exactly T steps after a reset are legal.
+fn sc_dec_ok(): i64 {
+    tx_dec_reset();
+    var t = 0;
+    while (t < g_T) { tx_dec_step(0); t = t + 1; }
+    return 0;
+}
+# Control: a reset after a load makes the next step legal.
+fn sc_dec_reset_ok(): i64 {
+    tx_pack_deserialize(g_art, g_art_n, 1 << 40);
+    tx_dec_reset();
+    return tx_dec_step(0);
+}
+# tx_dec_step with token id V (must fail).
+fn sc_dec_tok_hi(): i64 { tx_dec_reset(); return tx_dec_step(g_V); }
+# tx_dec_step with token id -1 (must fail).
+fn sc_dec_tok_neg(): i64 { tx_dec_reset(); return tx_dec_step(0 - 1); }
+# tx_dec_reset with no packed model live (must fail).
+fn sc_dec_no_model(): i64 { pk_ready = 0; return tx_dec_reset(); }
+# The byte vocabulary on a model whose V is not 256 (must fail).
+fn sc_vocab_v(): i64 { return tx_pack_set_vocab(pk_vocab_bytes()); }
+# An undefined vocabulary kind (must fail).
+fn sc_vocab_kind(): i64 { return tx_pack_set_vocab(2); }
+# tx_pack_set_vocab before tx_pack_init (must fail).
+fn sc_vocab_noinit(): i64 { pk_w8t = 0; return tx_pack_set_vocab(pk_vocab_none()); }
+# tx_pack_vocab with no packed model live (must fail).
+fn sc_vocab_none_live(): i64 { pk_ready = 0; return tx_pack_vocab(); }
+# Control: declaring no vocabulary is legal at any V.
+fn sc_vocab_ok(): i64 { return tx_pack_set_vocab(pk_vocab_none()); }
+# 1 when the serve of g_tok_s at T rows equals ref's T x V logits.
+fn serves(ref, V, T, C, F): i64 {
+    tx_fwd_packed(g_tok_s, V, T, C, F);
+    var i = 0;
+    while (i < T * V) { if (tget(ki_logits, i) != tget(ref, i)) { return 0; } i = i + 1; }
+    return 1;
+}
+
+# 1.4.0 group: incremental decode.
+fn t14_decode(): i64 {
+    test_group("1.4.0 incremental decode (tx_dec_reset / tx_dec_step / tx_dec_len)");
+    var big = 1 << 40;
+    # (a) model A: C = 20 and F = 40 put a 16-lane span AND a tail in every layer
+    var aV = 7; var aT = 6; var aC = 20; var aF = 40;
+    var artA = make_artifact(aV, aT, aC, aF, 41); var nA = g_art_n; var refA = g_ref; var tokA = g_tok_s;
+    var a0 = alloc_used();
+    tx_dec_reset();
+    assert(alloc_used() - a0 == tx_dec_alloc_bytes(aT, aC),
+      "1.4.0: the first tx_dec_reset allocates exactly tx_dec_alloc_bytes(T, C)");
+    assert(tx_dec_alloc_bytes(aT, aC) == 16 * aT * aC, "1.4.0: tx_dec_alloc_bytes is 2 x T x C f64");
+    assert(tx_dec_alloc_bytes(0, 4) == (0 - 1), "1.4.0: tx_dec_alloc_bytes refuses T = 0");
+    assert(tx_dec_alloc_bytes(4, 1048577) == (0 - 1), "1.4.0: tx_dec_alloc_bytes refuses C past 2^20");
+    assert(dec_matches(aV, aT, aC, aF) == 1,
+      "1.4.0: each step's logits are the last row of tx_fwd_packed over the same tokens, at every length");
+    assert(dec_matches_ref(aV, aT) == 1, "1.4.0: T uninterrupted steps reproduce the full forward's T rows");
+    # (b) a TRAINED model at C = 4, F = 8 (every layer all tail), C = 32 / F = 64 (whole
+    # 16-lane spans), and T = 1
+    var tV = 6; var tT = 5; var tC = 4; var tF = 8;
+    var ttok = t_alloc(tT); var ttgt = t_alloc(tT); var st = t_alloc(2); var i = 0;
+    while (i < tT) { store64(ttok + i * 8, (i * 7 + 1) % tV); store64(ttgt + i * 8, (i * 7 + 2) % tV); i = i + 1; }
+    tx_train(ttok, ttgt, tV, tT, tC, tF, 60, 17, st);
+    tx_int_init(tV, tT, tC, tF); tx_pack_init(tV, tT, tC, tF); tx_pack(tV, tT, tC, tF);
+    g_tok_s = ttok;
+    assert(dec_matches(tV, tT, tC, tF) == 1, "1.4.0: ... on a trained model (C = 4, F = 8)");
+    make_artifact(11, 9, 32, 64, 43);
+    assert(dec_matches(11, 9, 32, 64) == 1, "1.4.0: ... at C = 32, F = 64");
+    make_artifact(5, 1, 3, 5, 44);
+    assert(dec_matches(5, 1, 3, 5) == 1, "1.4.0: ... at T = 1");
+    # (c) a loaded model; then the cache is reused: no allocation per sequence
+    assert(tx_pack_deserialize(artA, nA, big) == 0, "1.4.0: model A loads");
+    g_tok_s = tokA; g_ref = refA;
+    assert(dec_matches_ref(aV, aT) == 1, "1.4.0: a loaded model decodes bit-identically to its full forward");
+    var a1 = alloc_used(); var k = 0; var okk = 1;
+    while (k < 50) { if (dec_matches_ref(aV, aT) == 0) { okk = 0; } k = k + 1; }
+    assert(okk == 1, "1.4.0: 50 more sequences decode bit-identically");
+    assert(alloc_used() == a1,
+      "1.4.0: once the cache exists, resets and steps allocate nothing (a smaller model reuses it)");
+    var artB = make_artifact(9, 10, 32, 40, 45); var nB = g_art_n;
+    assert(tx_pack_deserialize(artB, nB, big) == 0, "1.4.0: model B (T x C = 320, larger than any before) loads");
+    var a2 = alloc_used();
+    tx_dec_reset();
+    assert(alloc_used() - a2 == tx_dec_alloc_bytes(10, 32),
+      "1.4.0: ... and its first reset allocates a cache its size");
+    assert(dec_matches(9, 10, 32, 40) == 1, "1.4.0: ... and decodes bit-identically");
+    # (d) the guards, in forked children
+    assert(tx_pack_deserialize(artA, nA, big) == 0, "1.4.0: model A loads again");
+    g_V = aV; g_T = aT; g_C = aC; g_F = aF; g_art = artA; g_art_n = nA;
+    assert(child_exit(&sc_dec_ok) == 0, "1.4.0: exactly T steps after a reset are legal");
+    assert(child_exit(&sc_dec_reset_ok) == 0, "1.4.0: a reset after a load makes the next step legal");
+    assert(child_exit(&sc_dec_never) == 1, "1.4.0 guard: tx_dec_step before any tx_dec_reset");
+    assert(child_exit(&sc_dec_stale_load) == 1, "1.4.0 guard: tx_dec_step after a same-dims load, with no reset");
+    assert(child_exit(&sc_dec_full) == 1, "1.4.0 guard: tx_dec_step on a cache that holds T positions");
+    assert(child_exit(&sc_dec_tok_hi) == 1, "1.4.0 guard: tx_dec_step refuses token id V");
+    assert(child_exit(&sc_dec_tok_neg) == 1, "1.4.0 guard: tx_dec_step refuses token id -1");
+    assert(child_exit(&sc_dec_no_model) == 1, "1.4.0 guard: tx_dec_reset with no packed model");
+    tx_train(ttok, ttgt, tV, tT, tC, tF, 2, 18, st);
+    tx_int_init(tV, tT, tC, tF); tx_pack_init(tV, tT, tC, tF); tx_pack(tV, tT, tC, tF);
+    g_V = tV; g_T = tT; g_C = tC; g_F = tF;
+    assert(child_exit(&sc_dec_stale_sgd) == 1, "1.4.0 guard: tx_dec_step after tx_sgd moved the model, with no reset");
+    return 0;
+}
+
+# 1.4.0 group: a load over a loaded model of the same dims reuses its buffers.
+fn t14_reuse(): i64 {
+    test_group("1.4.0 a load over a loaded model of the same dims reuses its buffers");
+    var big = 1 << 40;
+    var V = 9; var T = 5; var C = 20; var F = 24;
+    var artX = make_artifact(V, T, C, F, 51); var n = g_art_n; var refX = g_ref; var tok = g_tok_s;
+    var artY = make_artifact(V, T, C, F, 52); var refY = g_ref;
+    var artZ = make_artifact(V + 2, T, C, F, 53); var nZ = g_art_n;
+    var need = tx_model_alloc_bytes(V, T, C, F);
+    g_tok_s = tok;
+    assert(tx_pack_deserialize(artZ, nZ, big) == 0, "1.4.0: model Z (V + 2) loads");
+    var a0 = alloc_used();
+    assert(tx_pack_deserialize(artY, n, big) == 0, "1.4.0: model Y loads over Z");
+    assert(alloc_used() - a0 == need, "1.4.0: ... allocating tx_model_alloc_bytes (other dims: a fresh load)");
+    assert(serves(refY, V, T, C, F) == 1, "1.4.0: ... and serves Y bit-identically");
+    var a1 = alloc_used();
+    assert(tx_pack_deserialize(artX, n, big) == 0, "1.4.0: model X loads over Y (same dims)");
+    assert(alloc_used() == a1, "1.4.0: ... allocating nothing");
+    assert(serves(refX, V, T, C, F) == 1, "1.4.0: ... and serves X bit-identically to X's own packed model");
+    tx_fwd_packed(tok, V, 2, C, F);
+    var pf = 1; var pi = 0;
+    while (pi < 2 * V) { if (tget(ki_logits, pi) != tget(refX, pi)) { pf = 0; } pi = pi + 1; }
+    assert(pf == 1, "1.4.0: ... and a prefix's rows");
+    assert(tx_pack_deserialize(artY, n, big) == 0, "1.4.0: Y loads back over X");
+    assert(serves(refY, V, T, C, F) == 1, "1.4.0: ... and serves Y, none of X left in it");
+    var k = 0; var ok = 1;
+    while (k < 20) {
+        if (tx_pack_deserialize(artX, n, big) != 0) { ok = 0; }
+        if (serves(refX, V, T, C, F) == 0) { ok = 0; }
+        if (tx_pack_deserialize(artY, n, big) != 0) { ok = 0; }
+        if (serves(refY, V, T, C, F) == 0) { ok = 0; }
+        k = k + 1;
+    }
+    assert(ok == 1, "1.4.0: 40 alternating same-dims loads each serve their own model");
+    assert(alloc_used() == a1, "1.4.0: ... and allocate nothing");
+    var re = alloc(n + 8); tx_pack_serialize(re, n);
+    assert(same_bytes(re, artY, n) == 1, "1.4.0: a model loaded over another re-serializes to its own bytes");
+    assert(tx_pack_deserialize(artX, n, need - 1) == pk_err_too_big(),
+      "1.4.0: max_bytes below the model's figure refuses a same-dims load too (the cap does not depend on history)");
+    var m = art_copy(artX, n); store8(m + 100, load8(m + 100) ^ 4);
+    var a2 = alloc_used();
+    assert(tx_pack_deserialize(m, n, big) == pk_err_checksum(), "1.4.0: a corrupt same-dims buffer is refused");
+    assert(serves(refY, V, T, C, F) == 1, "1.4.0: ... and Y still serves");
+    assert(alloc_used() == a2, "1.4.0: ... and nothing was allocated");
+    # the rule's edges: a resized init family, or a model built in this process, loads afresh
+    tx_int_init(V, T + 1, C, F);
+    a2 = alloc_used();
+    assert(tx_pack_deserialize(artX, n, big) == 0, "1.4.0: X loads after tx_int_init resized the scratch");
+    assert(alloc_used() - a2 == need, "1.4.0: ... allocating afresh (the scratch no longer fits the rule)");
+    assert(serves(refX, V, T, C, F) == 1, "1.4.0: ... and serves X");
+    make_artifact(V, T, C, F, 54);
+    g_tok_s = tok;
+    a2 = alloc_used();
+    assert(tx_pack_deserialize(artX, n, big) == 0, "1.4.0: X loads over a same-dims model built in this process");
+    assert(alloc_used() - a2 == need, "1.4.0: ... allocating afresh (a load never overwrites an in-process model)");
+    assert(serves(refX, V, T, C, F) == 1, "1.4.0: ... and serves X");
+    assert(tx_pack_deserialize(artY, n, big) == 0, "1.4.0: Y loads over X once more");
+    g_V = V; g_T = T; g_C = C; g_F = F; g_tok = tok; g_tgt = tok;
+    assert(child_exit(&sc_po_fwd) == 1, "1.4.0 guard: tx_fwd refuses a model loaded over a loaded one");
+    assert(child_exit(&sc_po_reinit) == 0, "1.4.0: ... and after tx_param_init it is an ordinary model again");
+    return 0;
+}
+
+# 1.4.0 group: the vocabulary in the artifact, and the header peek.
+fn t14_vocab(): i64 {
+    test_group("1.4.0 the vocabulary in the artifact (flags bit 0) and tx_pack_peek");
+    var big = 1 << 40;
+    # (a) by default no vocabulary is declared, and the flags word stays 0
+    var V = 5; var T = 3; var C = 3; var F = 5;
+    var art = make_artifact(V, T, C, F, 61); var n = g_art_n;
+    assert(tx_pack_vocab() == pk_vocab_none(), "1.4.0: a packed model declares no vocabulary by default");
+    assert(load64(art + 56) == 0, "1.4.0: ... so its flags word is 0, the bytes 1.2.0 - 1.3.1 wrote");
+    var info = t_alloc(5);
+    assert(tx_pack_peek(art, n, info) == 0, "1.4.0: tx_pack_peek reads a valid header");
+    var iok = (load64(info) == V) & (load64(info + 8) == T) & (load64(info + 16) == C);
+    iok = iok & (load64(info + 24) == F) & (load64(info + 32) == pk_vocab_none());
+    assert(iok == 1, "1.4.0: ... and reports V, T, C, F and the vocabulary");
+    # (b) a byte-vocabulary model, V = 256
+    var bV = 256; var bT = 4; var bC = 4; var bF = 6;
+    var art0 = make_artifact(bV, bT, bC, bF, 62); var bn = g_art_n; var bref = g_ref; var btok = g_tok_s;
+    tx_pack_set_vocab(pk_vocab_bytes());
+    assert(tx_pack_vocab() == pk_vocab_bytes(), "1.4.0: tx_pack_set_vocab declares the byte vocabulary");
+    tx_pack(bV, bT, bC, bF);
+    assert(tx_pack_vocab() == pk_vocab_bytes(), "1.4.0: ... and tx_pack keeps it");
+    var bart = alloc(bn + 8);
+    assert(tx_pack_serialize(bart, bn) == bn, "1.4.0: the artifact keeps its length");
+    assert(load64(bart + 56) == 1, "1.4.0: ... sets flags bit 0");
+    store64(art0 + 56, 1); art_fix(art0, bn);
+    assert(same_bytes(art0, bart, bn) == 1, "1.4.0: ... and changes no other byte but the checksum");
+    assert(tx_pack_deserialize(art, n, big) == 0, "1.4.0: a flags-0 artifact loads");
+    assert(tx_pack_vocab() == pk_vocab_none(), "1.4.0: ... and declares no vocabulary");
+    store64(info + 32, 7);
+    assert(tx_pack_peek(bart, bn, info) == 0, "1.4.0: tx_pack_peek reads the byte-vocabulary header");
+    assert((load64(info) == 256) & (load64(info + 32) == pk_vocab_bytes()), "1.4.0: ... and reports V = 256, bytes");
+    assert(tx_pack_deserialize(bart, bn, big) == 0, "1.4.0: a byte-vocabulary artifact loads");
+    assert(tx_pack_vocab() == pk_vocab_bytes(), "1.4.0: ... and declares the byte vocabulary");
+    g_tok_s = btok;
+    assert(serves(bref, bV, bT, bC, bF) == 1, "1.4.0: ... and serves bit-identically (the flag changes no output)");
+    var re = alloc(bn + 8); tx_pack_serialize(re, bn);
+    assert(same_bytes(re, bart, bn) == 1, "1.4.0: ... and re-serializes to the same bytes (canonical)");
+    g_ref = bref;
+    assert(dec_matches_ref(bV, bT) == 1, "1.4.0: ... and decodes incrementally at V = 256");
+    # (c) the decoder refuses an undefined bit, and the byte vocabulary at V other than 256
+    var m = art_copy(art, n); store64(m + 56, 1); art_fix(m, n);
+    assert(tx_pack_deserialize(m, n, big) == pk_err_header(), "1.4.0: the byte vocabulary at V = 5 -> pk_err_header");
+    assert(tx_pack_peek(m, n, info) == pk_err_header(), "1.4.0: ... and tx_pack_peek agrees");
+    m = art_copy(bart, bn); store64(m + 56, 2); art_fix(m, bn);
+    assert(tx_pack_deserialize(m, bn, big) == pk_err_header(), "1.4.0: flags bit 1 (undefined) -> pk_err_header");
+    m = art_copy(bart, bn); store64(m + 56, 3); art_fix(m, bn);
+    assert(tx_pack_deserialize(m, bn, big) == pk_err_header(), "1.4.0: flags bits 0 and 1 -> pk_err_header");
+    m = art_copy(bart, bn); store64(m + 56, 1 << 63); art_fix(m, bn);
+    assert(tx_pack_deserialize(m, bn, big) == pk_err_header(), "1.4.0: the flags word's top bit -> pk_err_header");
+    assert(serves(bref, bV, bT, bC, bF) == 1, "1.4.0: after those refusals the byte model still serves");
+    # (d) tx_pack_peek returns the decoder's header verdicts, writes nothing on a refusal,
+    # does not read the body, and changes no state
+    store64(info, 77);
+    m = art_copy(art, n);
+    assert(tx_pack_peek(m, 10, info) == pk_err_length(), "1.4.0: tx_pack_peek: shorter than a header -> pk_err_length");
+    assert(tx_pack_peek(m, n + 8, info) == pk_err_length(), "1.4.0: tx_pack_peek: trailing bytes -> pk_err_length");
+    store64(m + 16, n + 8);
+    assert(tx_pack_peek(m, n, info) == pk_err_length(),
+      "1.4.0: tx_pack_peek: a length word that disagrees -> pk_err_length");
+    m = art_copy(art, n); store8(m, 0x55);
+    assert(tx_pack_peek(m, n, info) == pk_err_magic(), "1.4.0: tx_pack_peek: a wrong magic -> pk_err_magic");
+    m = art_copy(art, n); store64(m + 8, 2);
+    assert(tx_pack_peek(m, n, info) == pk_err_version(), "1.4.0: tx_pack_peek: version 2 -> pk_err_version");
+    m = art_copy(art, n); store64(m + 24, 0);
+    assert(tx_pack_peek(m, n, info) == pk_err_header(), "1.4.0: tx_pack_peek: V = 0 -> pk_err_header");
+    assert(load64(info) == 77, "1.4.0: a refused peek writes nothing");
+    m = art_copy(art, n); store8(m + 100, load8(m + 100) ^ 4);
+    assert(tx_pack_peek(m, n, info) == 0, "1.4.0: tx_pack_peek does not read the body (a corrupt payload peeks clean)");
+    assert(tx_pack_deserialize(m, n, big) == pk_err_checksum(), "1.4.0: ... which the load then refuses");
+    assert(serves(bref, bV, bT, bC, bF) == 1, "1.4.0: peeks change no state (the byte model still serves)");
+    # (e) tx_pack_init resets the vocabulary to none
+    make_artifact(bV, bT, bC, bF, 63);
+    assert(tx_pack_vocab() == pk_vocab_none(), "1.4.0: tx_pack_init resets the vocabulary to none");
+    # (f) the guards, on a V = 5 model built in this process
+    make_artifact(V, T, C, F, 64);
+    assert(child_exit(&sc_vocab_ok) == 0, "1.4.0: declaring no vocabulary is legal at any V");
+    assert(child_exit(&sc_vocab_v) == 1, "1.4.0 guard: the byte vocabulary needs V = 256");
+    assert(child_exit(&sc_vocab_kind) == 1, "1.4.0 guard: tx_pack_set_vocab refuses an undefined kind");
+    assert(child_exit(&sc_vocab_noinit) == 1, "1.4.0 guard: tx_pack_set_vocab before tx_pack_init");
+    assert(child_exit(&sc_vocab_none_live) == 1, "1.4.0 guard: tx_pack_vocab with no packed model live");
+    return 0;
+}
 
 # 1 when every element of p[0..n) is NaN (f64_eq(v, v) is 0 only for NaN)
 fn all_nan(p, n): i64 {
@@ -1240,6 +1545,9 @@ fn main() {
     assert(child_exit(&sc_po_pack) == 1, "1.2.0 guard: tx_pack refuses a loaded model (it would pack zero latents)");
     assert(child_exit(&sc_po_reinit) == 0, "1.2.0: after tx_param_init the model is ordinary again");
 
+    t14_decode();
+    t14_reuse();
+    t14_vocab();
     return assert_summary();
 }
 

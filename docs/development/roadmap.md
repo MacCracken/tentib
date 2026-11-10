@@ -2,7 +2,7 @@
 
 > **Self-contained SemVer plan.** An agent can pick up the next version from this repo
 > alone. Volatile state (current version, test count, deps) is in [`state.md`](state.md).
-> What already shipped (M0 → 1.0.0, all six v1.0 criteria met at 1.0.0, then 1.0.1–1.1.2)
+> What already shipped (M0 → 1.0.0, all six v1.0 criteria met at 1.0.0, then 1.0.1–1.4.0)
 > is in [`../../CHANGELOG.md`](../../CHANGELOG.md); this file lists **only open work**.
 > The ecosystem map at agnosticos `docs/development/planning/integer-native-ml.md` is
 > background, not required.
@@ -73,29 +73,31 @@ CHANGELOG.
 from Cyrius only (no FFI). When murti has a Cyrius port, it declares `[deps.tentib]` the
 way hoosh did, and tentib answers what that integration finds, as here.
 
-**What the first consumer asks for.** Additive, so each is a 1.x minor; proposed, not
-scheduled, and the order is the maintainer's:
+## 1.4.x — what the first consumer asked for
 
-- **Incremental decode.** A server decodes one token at a time, and each token is a full
-  `tx_fwd_packed` over the window: n new tokens cost n forwards of up to T positions
-  (about 50 µs per token at C = 16 in hoosh). A KV-cached step that runs one new position
-  against cached keys and values makes it one position per token. **Gate:** the step's
-  logits are bit-identical to the last row of the full forward at every window length
-  (suite + a fuzz property), and the cache's memory is counted in a stated figure.
-- **A load that reuses the live model's buffers.** Every load runs the four `*_init`
-  calls, so a server that reloads keeps every model it has loaded (802,376 bytes each at
-  T = 30, C = 16 in hoosh). A load whose dims match the live model's can overwrite its
-  buffers instead, with no signature change. **Gate:** `alloc_used()` does not grow across
-  a same-dims reload, and serving is bit-identical to a fresh load's. 1.4.x's serving-only
-  allocation changes what a load allocates and may take this with it.
-- **A vocabulary in the artifact.** Format v1 stores V but no tokenizer, so every consumer
-  invents a convention (hoosh: byte identity, V = 256). The flags word is reserved for
-  additive variants: a flag can declare the byte vocabulary, or a section can carry a
-  token table. A v1 decoder refuses any flag, as it should. **Gate:** the format doc
-  specifies it, the decoder checks it like every other field, and P10's mutation fuzzer
-  covers it.
+**Shipped in 1.4.0.** Incremental decode
+(`tx_dec_reset` / `tx_dec_step`, bit-identical to the full forward's row), a load that
+reuses a loaded model's buffers when the dims match, and the byte vocabulary as flags
+bit 0 (with `tx_pack_peek` to read it before a load). See the CHANGELOG,
+[`../architecture/002-incremental-decode.md`](../architecture/002-incremental-decode.md)
+and [`../adr/0003-a-load-reuses-only-a-loaded-models-buffers.md`](../adr/0003-a-load-reuses-only-a-loaded-models-buffers.md).
+**hoosh adopting them** (decode with the cache, peek instead of reading offset 24,
+check the flag) is hoosh's work, a hoosh minor.
 
-## 1.4.x — serve from packed ternary storage
+What remains, additive, so a 1.x minor; proposed, not scheduled:
+
+- **A token table in the artifact.** The byte vocabulary covers byte-level models only. A
+  model trained on akshara's BPE needs its tokenizer beside the file today. A new flags
+  bit would mark a section that carries one: either akshara's own serialized tables,
+  opaque to tentib and checked only for length, or a plain id → bytes table (decode
+  only; encode needs the merges). Which one is a question for the first consumer that
+  serves a BPE model. **Gate:** the format doc specifies it, the decoder bounds and checks
+  it like every other field, and P10 covers it.
+
+(No batched prefill is planned. A prompt fed through `tx_dec_step` already costs one full
+forward over it: 2.35 ms for 32 steps against 2.33 ms at the bench config.)
+
+## 1.5.x — serve from packed ternary storage
 
 **Goal.** Make the memory story true at serve time. Serving now reads an i8 working
 copy (1 byte per weight, 8× smaller than f64); the 2-bit form (`tpack2`, 32×) is storage
@@ -104,18 +106,19 @@ only.
 **Scope.** Additive: a kernel that serves from 2-bit codes, or from 5 trits per byte
 (≈1.6 bits, a `tpack3` / `tunpack3` codec), unpacking in-register or through lookup
 tables in the bitnet.cpp TL1 / TL2 / I2_S shape (ported, never copied); a packed-store
-variant of `tx_pack` / `tx_fwd_packed` that uses it. With it, a **serving-only
-allocation for loaded models**: `tx_pack_deserialize` runs the full `tx_init` today, so a
-load also allocates the latent weights, their gradients and the training scratch
-(12,192,728 bytes for the 357,504-byte bench artifact). The artifact format can stay at
-version 1; only what a load allocates changes.
+variant of `tx_pack` / `tx_fwd_packed` (and `tx_dec_step`) that uses it. With it, a
+**serving-only allocation for loaded models**: a fresh `tx_pack_deserialize` runs the full
+`tx_init`, so a load also allocates the latent weights, their gradients and the training
+scratch (12,192,728 bytes for the 357,504-byte bench artifact; a same-dims reload has
+allocated nothing since 1.4.0). The artifact format can stay at version 1; only what a
+load allocates changes.
 
 **Gate.** Bit-identical to the scalar kernel (suite + fuzz property P1 extended to the
 new kernel); benchmarked against the i8 path at the four layer sizes and whole-model,
 reporting the memory/speed trade honestly if it is slower; resident weight memory
 measured.
 
-## 1.5.x — the edge target (Pi 5, for seema)
+## 1.6.x — the edge target (Pi 5, for seema)
 
 **Goal.** The Pi-class tok/s result the integer-native plan is aimed at. The SIMD kernel
 already runs NEON on aarch64 (cyrius SIMD Phase 5, 6.4.32, lowers `iv_dp8` natively), and
@@ -123,13 +126,13 @@ the suite and fuzz harness pass under qemu in CI. Nothing has been measured on r
 hardware.
 
 **Scope.** Benchmark on a Pi 5 (an aarch64 path for `scripts/bench-history.sh`), and size
-a b1.58-shaped model the Pi can serve (with 1.2.0's format to ship it and 1.4.x's storage
+a b1.58-shaped model the Pi can serve (with 1.2.0's format to ship it and 1.5.x's storage
 to fit it).
 
 **Gate.** `docs/benchmarks.md` gains an aarch64 section: host, pin, model size, tok/s, and
 the f64 path on the same board for comparison.
 
-## 1.6.x — GPU ternary kernels via mabda
+## 1.7.x — GPU ternary kernels via mabda
 
 **Goal.** A portable GPU path. Today `ternary_matmul_free_gpu` tiles the integer
 accumulate onto the AGNOS `#82` dispatch (8×8 i32 tiles), which is AGNOS-only.
@@ -157,7 +160,8 @@ tested on a host (rosnet's `gpu_host` pattern).
   `ki_*`, `pk_*`) is module-global, so a process holds one model. Every call re-passes
   V, T, C, F, which the 1.1.2 dims guards have to police. Re-calling an `*_init` leaks the
   previous buffers (the bump allocator never frees); a server that reloads models keeps
-  every one it has loaded (hoosh 2.11.0: 802,376 bytes per load at T = 30, C = 16), and
+  every one of another shape it has loaded (hoosh 2.11.0: 802,376 bytes per load at T = 30,
+  C = 16; a same-shaped reload has kept nothing since 1.4.0), holds one decode cache, and
   must serialize every call. Outputs land in globals (`tx_logits`, `ki_logits`). An
   arena-owned, freeable handle fixes all four, allows more than one model per process, and
   changes every `tx_*` signature.
@@ -179,7 +183,7 @@ tested on a host (rosnet's `gpu_host` pattern).
 - **b1.58**: Ma et al., *The Era of 1-bit LLMs* (2024), arXiv:2402.17764 (the recipe and the
   scaling claims to cite).
 - **bitnet.cpp**: Microsoft's CPU inference kernels (TL1 / TL2 / I2_S), the packing and
-  lookup shape for 1.4.x.
+  lookup shape for 1.5.x.
 - **STE**: Bengio, Léonard, Courville (2013), arXiv:1308.3432, the surrogate the FD gates
   validate.
 - **Scalable MatMul-free LM**: Zhu et al. (2024), arXiv:2406.02528 (the research watch).

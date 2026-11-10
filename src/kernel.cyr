@@ -403,6 +403,9 @@ fn ternary_matmul_free_simd(qx, sx, w8t, wsum, gamma, b, y, M, K, N, xu8): i64 {
 
 var pk_w8t = 0; var pk_wsum = 0; var pk_gamma = 0; var pk_ready = 0;
 var pk_V0 = 0; var pk_C0 = 0; var pk_F0 = 0;     # the dims the store is laid out for (1.1.2)
+# The vocabulary the packed model declares (1.4.0; src/serial.cyr): 0 = none, the
+# consumer's own convention; 1 = bytes. tx_pack_init resets it, tx_pack keeps it.
+var pk_vocab = 0;
 
 # Allocate the packed store (pointer tables + per-layer buffers).
 fn tx_pack_init(V, T, C, F): i64 {
@@ -420,6 +423,8 @@ fn tx_pack_init(V, T, C, F): i64 {
         i = i + 1;
     }
     pk_ready = 0;
+    pk_vocab = 0;
+    tx_rev = tx_rev + 1;
     return 0;
 }
 
@@ -450,6 +455,7 @@ fn tx_pack(V, T, C, F): i64 {
         i = i + 1;
     }
     pk_ready = 1;
+    tx_rev = tx_rev + 1;
     return 0;
 }
 

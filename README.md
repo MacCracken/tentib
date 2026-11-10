@@ -19,7 +19,7 @@ autodiff; every hand-derived gradient is finite-difference-gated.
 
 > Forward-design map: [`agnosticos/docs/development/planning/integer-native-ml.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/integer-native-ml.md).
 
-## Status — 1.x STABLE (1.3.1: 188 assertions + a property fuzzer, x86_64 and aarch64; API frozen for the 1.x series)
+## Status — 1.x STABLE (1.4.0: 280 assertions + a property fuzzer, x86_64 and aarch64; API frozen for the 1.x series)
 
 - **M0 (v0.1.0)** — ternary quantizer + matmul-free dot ([`src/ternary.cyr`](src/ternary.cyr)).
 - **M1 (v0.2.0)** — **BitLinear**: ternary weights + int8 activations over rosnet's
@@ -94,6 +94,12 @@ autodiff; every hand-derived gradient is finite-difference-gated.
   [`docs/guides/consuming-tentib.md`](docs/guides/consuming-tentib.md). **First consumer
   (v1.3.1):** hoosh 2.11.0 serves tentib models in its own gateway process; the guide's §4
   is what a long-running server has to handle.
+- **What the first consumer asked for (v1.4.0)** — **incremental decode**: `tx_dec_step`
+  runs one new position against a key/value cache, bit-identical to the full forward's
+  row, so a generated token no longer costs a forward over the whole window. A **reload of
+  a same-shaped model allocates nothing** (it reuses the loaded model's buffers). The model
+  file can declare the **byte vocabulary**, and `tx_pack_peek` reads a file's header before
+  a load. Constraints: [`docs/architecture/002-incremental-decode.md`](docs/architecture/002-incremental-decode.md).
 
 ```
 M0  ternary w = [ -1 -1 -1 -1 0 1 1 1 ]   gamma = 0.39
@@ -115,8 +121,8 @@ M3-SIMD  the 0.4.1 kernel (iv_dp8, 16 int8 lanes/instr), 128x128 layer:
     PACKED serving 13675 tok/s  vs  f64 2378 tok/s  (5.7x, bit-identical)
 ```
 
-Deps: rosnet 1.4.1 + tyche 1.2.2 + akshara 1.1.2 (the shared sovereign tokenizer); the
-current pins live in `cyrius.cyml` and [`docs/development/state.md`](docs/development/state.md).
+Deps: rosnet 1.4.1 + tyche 1.2.2 + akshara 1.3.1 (the shared sovereign tokenizer, test scope);
+the current pins live in `cyrius.cyml` and [`docs/development/state.md`](docs/development/state.md).
 
 See [`docs/development/roadmap.md`](docs/development/roadmap.md) for the open work
 (1.2.x – 1.x.x, and the 2.0.0 backlog), [`CHANGELOG.md`](CHANGELOG.md) for what shipped, and

@@ -23,6 +23,7 @@
 #   "  ... (one-time tx_pack = 8261595 ns, amortized over the serve)"
 #   "  training step (f64)    = 1234567 ns/step"
 #   "  serialize              = 123456 ns/op  (339560 bytes)"
+#   "  decode, cached step    = 123456 ns/tok  (...)"           (1.4.0)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -82,7 +83,7 @@ while [ "$i" -le "$RUNS" ]; do
                 if (split($f, kv, "=") == 2 && kv[2] ~ /^[0-9]+$/) printf "prep 768x768 %s\t%s\n", kv[1], kv[2]
             next
         }
-        / = [0-9]+ ns\/(fwd|step|op)/ {
+        / = [0-9]+ ns\/(fwd|step|op|tok)/ {
             line = $0
             sub(/^[[:space:]]+/, "", line)
             name = line; sub(/[[:space:]]*= [0-9]+ ns\/.*/, "", name)

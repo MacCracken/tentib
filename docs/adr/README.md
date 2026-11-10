@@ -23,3 +23,4 @@ Decisions about tentib — what we chose, the context, and the consequences we a
 |---|---|---|
 | [0001](0001-tentib-scope.md) | tentib scope, the integer-native thesis, and the name | Accepted |
 | [0002](0002-hardening-preserves-bits.md) | Hardening and optimization preserve bits; guards sit at call entry, never in kernel loops | Accepted |
+| [0003](0003-a-load-reuses-only-a-loaded-models-buffers.md) | A load reuses only a loaded model's buffers | Accepted |

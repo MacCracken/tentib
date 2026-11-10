@@ -13,6 +13,7 @@ include "lib/akshara.cyr"    # corpus_set / gd_ld — sovereign tokenizer (M2 bi
 include "src/block.cyr"      # the full transformer block + tx_train (M2 bite-E)
 include "src/kernel.cyr"     # the matmul-free integer inference kernel (M3)
 include "src/serial.cyr"    # tx_pack_serialize / tx_pack_deserialize — packed-model bytes (1.2.0)
+include "src/decode.cyr"    # tx_dec_reset / tx_dec_step — incremental decode (1.4.0)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 # The demo's printer: a NUL-terminated string to stdout.

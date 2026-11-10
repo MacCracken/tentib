@@ -1,8 +1,9 @@
 # 001 — The packed-model format (version 1)
 
 What `tx_pack_serialize` writes and `tx_pack_deserialize` reads (`src/serial.cyr`,
-since 1.2.0). A reader in another language can implement it from this page; the
-decoder's checks below are part of the format, not an implementation detail.
+since 1.2.0; flags bit 0 since 1.4.0). A reader in another language can implement it
+from this page; the decoder's checks below are part of the format, not an
+implementation detail.
 
 ## What it holds
 
@@ -26,7 +27,7 @@ the start of the artifact.
 | 32 | 8 | T, the context length (rows of the position embedding) |
 | 40 | 8 | C, model width |
 | 48 | 8 | F, MLP width |
-| 56 | 8 | flags: `0` (no flag is defined in version 1) |
+| 56 | 8 | flags: `0`, or `1` = the byte vocabulary (below; since 1.4.0) |
 | 64 | … | the seven layers, in order (below) |
 | … | 8·(V·C + T·C + 3C + V) | the f64 parameters (below) |
 | length − 8 | 8 | FNV-1a 64 checksum of bytes [0, length − 8) |
@@ -47,6 +48,14 @@ token), the position embedding (T·C), the two RMSNorm gains of the block (2C, t
 attention norm's then the MLP norm's), the final RMSNorm gain (C), and the head bias
 (V).
 
+**Flags** (1.4.0). Bit 0 declares the **byte vocabulary**: token id = byte value, so V
+must be 256. With it a consumer knows what the token ids mean without a convention of
+its own; without it (flags `0`) they mean what the consumer says. No other bit is
+defined. The flag changes no other byte: an artifact with flags `0` is exactly what
+1.2.0 – 1.3.1 wrote, and setting bit 0 changes the flags word and the checksum only.
+`tx_pack_set_vocab` declares it before `tx_pack_serialize`, and `tx_pack_vocab` reports
+it after a load.
+
 The length is therefore
 `64 + Σ_layers (8 + pad8(ceil(K·N / 4))) + 8·(V·C + T·C + 3C + V) + 8`.
 At the bench config (V = 256, T = 32, C = 128, F = 512) that is 357,504 bytes, of
@@ -61,7 +70,7 @@ which the 229,376 ternary weights take 57,344 and the f64 parameters 300,032.
 | `n ≥ 72` | `pk_err_length()` = −1 |
 | the magic | `pk_err_magic()` = −2 |
 | version `1` | `pk_err_version()` = −3 |
-| flags `0`; each of V, T, C, F in [1, 2²⁰] | `pk_err_header()` = −4 |
+| each of V, T, C, F in [1, 2²⁰]; flags `0`, or `1` with V = 256 | `pk_err_header()` = −4 |
 | the length word and `n` both equal the length the dims imply | `pk_err_length()` = −1 |
 | `tx_model_alloc_bytes(V, T, C, F) ≤ max_bytes` | `pk_err_too_big()` = −6 |
 | the checksum | `pk_err_checksum()` = −5 |
@@ -72,6 +81,11 @@ which the 229,376 ternary weights take 57,344 and the f64 parameters 300,032.
 Every check runs before anything is allocated or changed, so a refused buffer leaves
 the current model serving exactly as before. The SIMD kernel's `wsum` offsets are
 derived data and are recomputed from the codes, never read from the artifact.
+
+`tx_pack_peek(buf, n, info)` (1.4.0) runs the first five rows, the header, and stops:
+it returns the same status the load would for that header, or 0 with V, T, C, F and the
+vocabulary. A decoder before 1.4.0 accepts only flags `0`, so it refuses a byte-vocabulary
+artifact with `pk_err_header()`.
 
 ## Invariants
 
@@ -87,7 +101,11 @@ derived data and are recomputed from the codes, never read from the artifact.
   bytes, the four `*_init` calls' total, and refuses before allocating if that
   exceeds `max_bytes`. The cap matters because rosnet's `t_alloc` exits the process
   when an allocation fails. Today a load runs the full `tx_init`, latent and gradient
-  buffers included: 12,192,728 bytes for the 357,504-byte bench artifact.
+  buffers included: 12,192,728 bytes for the 357,504-byte bench artifact. Since 1.4.0 a
+  load that replaces a **loaded** model of the same V, T, C, F overwrites that model's
+  buffers and allocates nothing
+  ([ADR 0003](../adr/0003-a-load-reuses-only-a-loaded-models-buffers.md)); the
+  `max_bytes` check still uses the model's figure.
 - **The checksum detects corruption, it does not authenticate.** Anyone can recompute
   it; memory safety comes from the field checks, not from the checksum.
 - **A loaded model has no latent weights.** `tx_fwd`, `tx_fwd_q`, `tx_bwd`, `tx_sgd`
@@ -97,6 +115,8 @@ derived data and are recomputed from the codes, never read from the artifact.
 ## Versioning
 
 A change to the layout or to the meaning of a field is a new format version; this
-decoder refuses any version but 1. The flags word is reserved for additive variants
-(for example a future layout that also carries the latent weights), and version 1
-requires it to be 0.
+decoder refuses any version but 1. The flags word is for additive variants: a bit a
+decoder does not know is refused, never skipped, so an old decoder refuses a variant
+rather than misreading it. Version 1 has one defined bit, the byte vocabulary (1.4.0).
+A later variant (a token table for vocabularies other than bytes, or a layout that also
+carries the latent weights) takes a new bit.

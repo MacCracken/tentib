@@ -79,7 +79,7 @@ jobs:
         # entry points main.cyr / test.cyr hold only main and consumer hooks.)
         run: |
           fail=0
-          for f in src/ternary.cyr src/bitlinear.cyr src/layers.cyr src/model.cyr src/block.cyr src/kernel.cyr src/gpu.cyr src/serial.cyr; do
+          for f in src/ternary.cyr src/bitlinear.cyr src/layers.cyr src/model.cyr src/block.cyr src/kernel.cyr src/gpu.cyr src/serial.cyr src/decode.cyr; do
             out=$(cyrius doc --check "$f" 2>&1)
             echo "$f: $(echo "$out" | tail -1)"
             if echo "$out" | grep -q 'undocumented:'; then echo "$out"; fail=1; fi

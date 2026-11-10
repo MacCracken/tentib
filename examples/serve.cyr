@@ -10,12 +10,19 @@
 # check that the model crossed a process boundary bit for bit. tentib itself does no
 # file I/O; this program does, with the stdlib's bounded read.
 #
+# Since 1.4.0 both modes also decode the same tokens one at a time with the incremental
+# decoder (tx_dec_reset / tx_dec_step) and check that its logits have the same digest,
+# then generate greedily from a one-token prompt the way a server does. Load mode reads
+# the file's header with tx_pack_peek first, the way a server checks that it can serve
+# a model before the load replaces the one it serves.
+#
 # It includes ONLY the dependency bundles (tyche, rosnet, dist/tentib.cyr) and the
 # stdlib modules it calls itself: no src/ file and no akshara. CI builds it with
 # --no-deps, so nothing is prepended either, which proves the bundle compiles on its own.
 #
 # Exit codes: 0 = done; 1 = usage; 2 = the file could not be read or written; 3 = the
-# file is not a model this tentib loads (the tx_pack_deserialize status is printed).
+# file is not a model this tentib loads (the tx_pack_peek / tx_pack_deserialize status is
+# printed); 4 = the incremental decoder disagreed with the full forward (a tentib bug).
 #
 # Build + run (from the repo root):
 #   cyrius build --no-deps examples/serve.cyr build/serve
@@ -23,7 +30,7 @@
 
 include "lib/tyche.cyr"      # rng_* (rosnet's t_randn draws from it)
 include "lib/rosnet.cyr"     # t_alloc, the f64 linear algebra tentib builds on
-include "dist/tentib.cyr"    # the tentib library bundle (1.3.0)
+include "dist/tentib.cyr"    # the tentib library bundle (1.3.0; incremental decode since 1.4.0)
 include "lib/io.cyr"         # file_read_whole_max / file_write_all
 include "lib/args.cyr"       # args_init / argc / argv
 
@@ -45,7 +52,16 @@ fn fill_tokens(tok, T, V): i64 {
     return 0;
 }
 
-# Serve tokens through the live packed model and print the argmax row and the digest.
+# FNV-1a 64 of the bytes p[0..n), continuing from h.
+fn fnv(h, p, n): i64 {
+    var i = 0;
+    while (i < n) { h = (h ^ load8(p + i)) * 0x100000001B3; i = i + 1; }
+    return h;
+}
+
+# Serve tokens through the live packed model and print the argmax row and the digest;
+# decode the same tokens incrementally and check the digest; generate greedily. Returns
+# 0, or 4 when the decoder's logits differ from the full forward's.
 fn serve_and_report(V, T, C, F): i64 {
     var tok = t_alloc(T);
     fill_tokens(tok, T, V);
@@ -54,10 +70,27 @@ fn serve_and_report(V, T, C, F): i64 {
     var t = 0;
     while (t < T) { say(" "); fmt_int(logits_argmax(ki_logits + t * V * 8, V)); t = t + 1; }
     nl();
-    var h = 0xCBF29CE484222325;
-    var i = 0;
-    while (i < T * V * 8) { h = (h ^ load8(ki_logits + i)) * 0x100000001B3; i = i + 1; }
+    var h = fnv(0xCBF29CE484222325, ki_logits, T * V * 8);
     say("digest: "); fmt_int(h); nl();
+    # The same T tokens, one cached step each: step t's logits (ki_logits[0..V)) are the
+    # full forward's row t, so the digest over the steps in order is the same.
+    tx_dec_reset();
+    var hd = 0xCBF29CE484222325;
+    t = 0;
+    while (t < T) { tx_dec_step(load64(tok + t * 8)); hd = fnv(hd, ki_logits, V * 8); t = t + 1; }
+    if (hd != h) { say("serve: the incremental decoder disagrees with the full forward"); nl(); return 4; }
+    say("decode: the incremental decoder reproduces the digest"); nl();
+    # Greedy generation from a one-token prompt: each step's argmax is the next token,
+    # until the cache holds the model's T positions.
+    tx_dec_reset();
+    var next = load64(tok);
+    say("generate:");
+    while (tx_dec_len() < T) {
+        say(" "); fmt_int(next);
+        tx_dec_step(next);
+        next = logits_argmax(ki_logits, V);
+    }
+    nl();
     return 0;
 }
 
@@ -77,25 +110,32 @@ fn do_save(path): i64 {
     var w = file_write_all(path, buf, n);
     if (w != n) { say("serve: cannot write the model file (errno "); fmt_int(0 - w); say(")"); nl(); return 2; }
     say("saved: "); fmt_int(n); say(" bytes"); nl();
-    serve_and_report(V, T, C, F);
-    return 0;
+    return serve_and_report(V, T, C, F);
 }
 
-# Load mode: read the file (bounded), load it (budgeted), ask for its dims, serve.
+# Load mode: read the file (bounded), check its header, load it (budgeted), ask for its
+# dims, serve.
 fn do_load(path): i64 {
     var lenp[8];
     store64(&lenp, 0);
     var buf = file_read_whole_max(path, max_file(), &lenp);
     var n = load64(&lenp);
     if (buf == 0) { say("serve: cannot read the model file (errno "); fmt_int(0 - n); say(")"); nl(); return 2; }
+    # The header first (1.4.0): a server that cannot serve a model's V or vocabulary
+    # refuses it here, before the load replaces the model it serves.
+    var info[40];
+    var pr = tx_pack_peek(buf, n, &info);
+    if (pr != 0) { say("serve: not a model this tentib loads (status "); fmt_int(pr); say(")"); nl(); return 3; }
+    say("header: V="); fmt_int(load64(&info)); say(", vocabulary ");
+    if (load64(&info + 32) == pk_vocab_bytes()) { say("bytes"); } else { say("none declared"); }
+    nl();
     var rc = tx_pack_deserialize(buf, n, max_load());
     if (rc != 0) { say("serve: not a model this tentib loads (status "); fmt_int(rc); say(")"); nl(); return 3; }
     var dims[32];
     tx_pack_dims(&dims);
     say("loaded: "); fmt_int(n); say(" bytes, V="); fmt_int(load64(&dims)); say(" T="); fmt_int(load64(&dims + 8));
     say(" C="); fmt_int(load64(&dims + 16)); say(" F="); fmt_int(load64(&dims + 24)); nl();
-    serve_and_report(load64(&dims), load64(&dims + 8), load64(&dims + 16), load64(&dims + 24));
-    return 0;
+    return serve_and_report(load64(&dims), load64(&dims + 8), load64(&dims + 16), load64(&dims + 24));
 }
 
 # Entry: validate the arguments, then save or load.

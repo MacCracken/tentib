@@ -209,6 +209,11 @@ var tx_V0 = 0; var tx_T0 = 0; var tx_C0 = 0; var tx_F0 = 0;
 # 1 while the model came from tx_pack_deserialize (src/serial.cyr): it holds the packed
 # store and the f64 embeddings / gains / bias, but no latent weights (1.2.0).
 var tx_packed_only = 0;
+# The model's revision (1.4.0): bumped by every call that changes what serving reads
+# (tx_init, tx_param_init, tx_sgd here; tx_pack_init, tx_pack and a successful
+# tx_pack_deserialize). The incremental decoder (src/decode.cyr) records it at
+# tx_dec_reset and refuses to step a cache built against an older revision.
+var tx_rev = 0;
 
 # Allocate the transformer's parameters, gradients and scratch (tx_*), plus the
 # block scratch (blk_init): vocabulary V, up to T positions, width C, MLP width F.
@@ -219,6 +224,7 @@ fn tx_init(V, T, C, F): i64 {
     blk_init(T, C, F);
     tx_V0 = V; tx_T0 = T; tx_C0 = C; tx_F0 = F;
     tx_packed_only = 0;
+    tx_rev = tx_rev + 1;
     var TC = T * C; var CC = C * C; var CF = C * F; var CV = C * V; var VC = V * C; var TV = T * V;
     tx_tokemb = t_alloc(VC); tx_posemb = t_alloc(TC); tx_gns = t_alloc(2 * C); tx_gf = t_alloc(C);
     tx_Wa = t_alloc(4 * CC); tx_Wm = t_alloc(2 * CF); tx_Whead = t_alloc(CV); tx_bhead = t_alloc(V);
@@ -270,6 +276,7 @@ fn _tx_embed(tokens, V, T, C): i64 {
 fn tx_param_init(V, T, C, F, seed): i64 {
     _tx_dims(V, T, C, F);
     tx_packed_only = 0;              # every parameter is re-drawn: an ordinary in-process model again
+    tx_rev = tx_rev + 1;
     rng_seed(seed);
     var std = f64_div(f64_from(1), f64_from(10));   # 0.1
     t_randn(tx_tokemb, V * C, std); t_randn(tx_posemb, T * C, std);
@@ -344,6 +351,7 @@ fn tx_sgd(V, T, C, F, nlr): i64 {
     t_axpy(tx_Whead, tx_dWhead, nlr, C * V);
     t_axpy(tx_tokemb, tx_dtokemb, nlr, V * C); t_axpy(tx_posemb, tx_dposemb, nlr, T * C);
     t_axpy(tx_gns, tx_dgns, nlr, 2 * C); t_axpy(tx_gf, tx_dgf, nlr, C); t_axpy(tx_bhead, tx_dbhead, nlr, V);
+    tx_rev = tx_rev + 1;             # the embeddings, gains and bias serving reads moved
     return 0;
 }
 

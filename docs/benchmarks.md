@@ -42,6 +42,25 @@ is reproduced by the committed harness — no hand-curated numbers.
 > integer SIMD mode 2 10.84 → 6.30 ms; packed serving 2.40 → 2.25 ms (13.3k → 14.2k tok/s);
 > one-time `tx_pack` 8.28 → 3.93 ms; a training step 27.85 → 22.43 ms. Because the f64
 > reference path got faster too, packed serving is 3.3× the f64 path at this config.
+>
+> **1.4.0 (2026-11-09): decoding one token at a time, and reloading.** New rows, all at the
+> whole-model config (V = 256, T = 32, C = 128, F = 512), same host, `taskset -c 4`, median of
+> three runs (`bench-history.csv`):
+>
+> | | per token / per load |
+> |---|---:|
+> | decode a 32-token window, a full `tx_fwd_packed` per token (the 1.3.x way) | 1.14 ms |
+> | decode the same window, `tx_dec_step` per token | **73.5 µs (15.5×)** |
+> | `tx_pack_deserialize`, fresh (allocates 12,192,728 bytes) | 6.73 ms |
+> | `tx_pack_deserialize` over a loaded model of the same dims (allocates 0) | **4.22 ms** |
+>
+> 32 steps take 2.35 ms, the same as one 32-position forward (2.33 ms): stepping a prompt in
+> costs what one forward over it does. The same-dims load still runs every validation pass,
+> the byte-at-a-time FNV checksum among them. An interleaved A/B against the 1.3.1 sources
+> (five runs each, alternating, median) puts every whole-model row within ±1.3% (packed
+> serving −1.2%), so the attention row's refactor costs nothing. Against 1.2.0's recorded
+> run every row, the unchanged per-layer kernels too, is 4–12% slower: that is this host's
+> state on the day, which is why only same-session rows compare.
 
 ## 1. Per-layer kernel sweep (M=1 row, K×N; ns/call)
 

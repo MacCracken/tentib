@@ -40,7 +40,9 @@ scratch is gone: the bias-free projections pass `db = 0`.)
   or silently-wrong numerics **fail loud** via `guard()` — non-ternary weights at
   pack time (`tpack2`, `tsimd_pack_w`), K > 2²² in `ternary_matmul_free_simd`
   (the i32 exactness bound), and packed-store misuse (`tx_pack` before its inits,
-  `tx_fwd_packed` before `tx_pack`). Cold paths only; hot loops are unchecked.
+  `tx_fwd_packed` before `tx_pack`; since 1.4.0 a `tx_dec_step` on a cache older than
+  the model, on a full cache, or before any packed model). Cold paths only; hot loops
+  are unchecked.
   Audit record: [`audit/2026-07-06-audit.md`](audit/2026-07-06-audit.md).
 - **Ids and dims (1.1.2):** token ids (`tx_fwd`, `tx_fwd_q`, `tx_fwd_packed`,
   `tx_bwd`) and target ids (`softmax_xent_fwd`/`_bwd`) must lie in [0, V); each
@@ -61,15 +63,18 @@ path; the invariant is:
 
 - **Allocation happens ONLY in** `blk_init` / `tx_init` / `tx_int_init` /
   `tx_pack_init` (the `*_init` pattern), **at the top of the one-shot trainers**
-  (`lm_train`, `tx_train` — which begins with `tx_init`), and **in a successful
+  (`lm_train`, `tx_train` — which begins with `tx_init`), **in a successful
   `tx_pack_deserialize`** (1.2.0: it runs `tx_init` + `tx_int_init` + `tx_pack_init`,
-  exactly `tx_model_alloc_bytes(V, T, C, F)` bytes). Each such call allocates fresh
-  buffers; call them a **bounded number of times per process**.
+  exactly `tx_model_alloc_bytes(V, T, C, F)` bytes; since 1.4.0 **not** when it replaces
+  a loaded model of the same V, T, C, F, whose buffers it overwrites), and **in the
+  first `tx_dec_reset`** (1.4.0: the decode cache, `tx_dec_alloc_bytes(T, C)`, again
+  only for a model larger than any before). Each such call allocates fresh buffers;
+  call them a **bounded number of times per process**.
 - **Every forward, backward, and kernel path is allocation-free** and reuses the
   init-owned (or caller-passed) scratch: `tx_fwd`, `tx_fwd_q` (all modes),
   `bl_forward_*`, `block_fwd/bwd`, all `ternary_matmul_free*` kernels,
-  `act_quant_int`, `tsimd_pack_w`, `tpack2`/`tunpack2`. Repeated inference costs
-  zero allocation.
+  `act_quant_int`, `tsimd_pack_w`, `tpack2`/`tunpack2`, and (1.4.0) `tx_dec_step`.
+  Repeated inference costs zero allocation.
 - Module-global scratch families: `blk_*`/`mlp_*` (owned by `blk_init`), `tx_*`
   (owned by `tx_init`), `ki_*` (owned by `tx_int_init`). Re-calling an `*_init`
   re-points the family at fresh buffers (the old ones are unreachable, not freed).
@@ -172,12 +177,29 @@ Worked example: [`examples/quickstart.cyr`](../examples/quickstart.cyr) step 5.
 | `tx_model_alloc_bytes(V, T, C, F)` → i64 | the bytes a model of these dims allocates (the four `*_init` calls; what a load allocates); −1 for a dim outside [1, 2²⁰] | suite (against `alloc_used()`) |
 | `tx_pack_dims(dims)` | **1.3.0.** writes the live packed model's V, T (the longest context it serves), C, F to `dims[0..4)` — the `tx_fwd_packed` arguments of a model a consumer loaded but did not size; fails loud when no packed model is live | suite, example (`examples/serve.cyr`) |
 | `pk_err_length()` … `pk_err_param()` → i64 | the status codes: `length` −1, `magic` −2, `version` −3, `header` −4, `checksum` −5, `too_big` −6, `weights` −7, `gamma` −8, `param` −9 | suite (each one), fuzz |
+| `tx_pack_peek(buf, n, info)` → i64 | **1.4.0.** runs the load's header checks without loading; on success writes `info[0..5)` = V, T, C, F and the declared vocabulary and returns **0**, else returns the `pk_err_*` code the load would return for that header and writes nothing. Changes no state. A 0 does not promise the load succeeds (`max_bytes`, the checksum and every field are checked by the load) | suite, fuzz (P10: agrees with the load), example |
+| `tx_pack_vocab()` → i64 | **1.4.0.** the vocabulary the live packed model declares: `pk_vocab_none()` or `pk_vocab_bytes()`; a load sets it from the artifact's flags word; fails loud when no packed model is live | suite, fuzz |
+| `tx_pack_set_vocab(kind)` | **1.4.0.** declares the packed model's vocabulary for `tx_pack_serialize` to record: `pk_vocab_bytes()` (token id = byte value; needs V = 256) or `pk_vocab_none()`. `tx_pack_init` resets it to none and `tx_pack` keeps it. Fails loud on another kind, on bytes with V ≠ 256, or before `tx_pack_init` | suite, fuzz |
+| `pk_vocab_none()`, `pk_vocab_bytes()` → i64 | **1.4.0.** the vocabulary kinds, 0 and 1 (flags bit 0) | suite |
 
 **Decoding is an untrusted-input surface.** Bad *data* is a status code, never a
 `guard()` exit; the memory a load may take is the caller's `max_bytes`. A loaded
 model is **packed-only**: it has no latent weights, so `tx_fwd`, `tx_fwd_q`,
 `tx_bwd`, `tx_sgd` and `tx_pack` fail loud on it, while `tx_fwd_packed` serves any
 T up to the stored T. `tx_init` or `tx_param_init` makes an ordinary model again.
+
+**Reloading (1.4.0).** A load that replaces a *loaded* model of the same V, T, C, F
+overwrites its buffers and allocates nothing; any other load allocates
+`tx_model_alloc_bytes(V, T, C, F)` as before. Serving after either is bit-identical.
+A model built in the process (`tx_init`, `tx_param_init`, `tx_pack`) is never
+overwritten. The `max_bytes` check uses the model's figure either way, so whether a
+buffer loads does not depend on what was loaded before. The rule and its alternatives:
+[ADR 0003](adr/0003-a-load-reuses-only-a-loaded-models-buffers.md).
+
+**The vocabulary flag (1.4.0).** Flags bit 0 declares the byte vocabulary. The format
+stays version 1, and a model with none declared writes the bytes 1.2.0 – 1.3.1 wrote.
+1.2.0 – 1.3.1 decoders accept only flags 0, so they refuse a flagged artifact with
+`pk_err_header`.
 
 ## 1.3.0 — consuming tentib as a library (`dist/tentib.cyr`)
 
@@ -191,12 +213,31 @@ How-to: [`guides/consuming-tentib.md`](guides/consuming-tentib.md); the CI-gated
 example is [`examples/serve.cyr`](../examples/serve.cyr) (built with `--no-deps`,
 from the bundles alone; one process saves a model file, a second loads and serves it).
 
+## 1.4.0 — incremental decode (`src/decode.cyr`, additive)
+
+A server generates one token at a time. `tx_fwd_packed` recomputes the whole window
+for each token; the decoder runs one new position against a cache of the earlier
+positions' keys and values. The constraints (why it is bit-identical, the window,
+staleness, memory) are [`architecture/002-incremental-decode.md`](architecture/002-incremental-decode.md).
+
+| symbol | contract | tested by |
+|--------|----------|-----------|
+| `tx_dec_reset()` | start a sequence on the live packed model (the cache holds no positions). The first call allocates the cache, `tx_dec_alloc_bytes(T, C)`, and so does a call for a model larger than any before; any other call allocates nothing. Fails loud when no packed model is live | suite, fuzz, bench, example |
+| `tx_dec_step(tok)` → i64 | run position p = `tx_dec_len()` for token id `tok` and append its keys and values; returns p, logits → `ki_logits[0..V)`. **Bit-identical** to row p of `tx_fwd_packed` over the same p + 1 tokens (suite at every length; fuzz P11). Fails loud when no packed model is live, when the cache is older than the model (any `tx_init`, `tx_param_init`, `tx_sgd`, `tx_pack_init`, `tx_pack` or load since the reset), when the cache holds T positions, or on an id outside [0, V) | suite, fuzz, bench, example |
+| `tx_dec_len()` → i64 | positions in the cache, 0..T | suite, fuzz, example |
+| `tx_dec_alloc_bytes(T, C)` → i64 | the cache's bytes: keys and values, T·C f64 each (16·T·C); −1 for a dim outside [1, 2²⁰] | suite (against `alloc_used()`), bench |
+
+Internal (not frozen): `dec_*` globals, `tx_rev` (the model revision the staleness
+check reads), `_attn_row` / `_attn_scale` (`src/layers.cyr`; `attn_fwd` runs every
+row through `_attn_row`, the step runs its one row).
+
 ## Documented output cells (module globals, read-only for consumers)
 
 | global | written by | contents |
 |--------|-----------|----------|
 | `tx_logits` | `tx_fwd` / `tx_loss` | T×V f64 logits (f64 path) |
 | `ki_logits` | `tx_fwd_q` / `tx_fwd_packed` | T×V f64 logits (integer paths) |
+| `ki_logits` | `tx_dec_step` (1.4.0) | the new position's V logits, in row 0 |
 | `mlp_out` | `block_fwd` | T×C block output (feeds the final norm) |
 
 ## Performance contract

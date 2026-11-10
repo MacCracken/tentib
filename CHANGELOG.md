@@ -4,6 +4,136 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-11-09
+
+**What the first consumer asked for.** The three additive items that hoosh 2.11.0's
+integration put on the roadmap at 1.3.1, plus the one call a consumer needs to use the
+third:
+
+- incremental decode;
+- a reload that reuses the model's buffers;
+- a vocabulary in the artifact, and `tx_pack_peek` to read it before a load.
+
+No frozen signature or semantics changed, and on valid input every existing output is
+bit-identical to 1.3.1. Two checks prove it:
+
+- **A new 796,704-byte golden dump is byte-identical.** It covers, at four configs:
+  training, every forward mode at every window length, the backward, packing,
+  serialization, two loads, and the bare attention core with its gradients. It was
+  recorded from a 1.3.1 worktree before the first edit.
+- **The demo's output is identical, timings aside,** after the akshara bump below.
+
+### Added
+
+- **Incremental decode** (`src/decode.cyr`, a new library module; the constraints are
+  [`docs/architecture/002-incremental-decode.md`](docs/architecture/002-incremental-decode.md)).
+  - **The calls.** `tx_dec_reset()` starts a sequence on the live packed model.
+    `tx_dec_step(tok)` runs the next position against a cache of the earlier positions'
+    keys and values, writes its logits to `ki_logits[0..V)`, and returns the position.
+    `tx_dec_len()` gives the positions cached, and `tx_dec_alloc_bytes(T, C)` = 16·T·C
+    the cache's size.
+  - **Bit-identical** to row p of `tx_fwd_packed` over the same p + 1 tokens. Every stage
+    but attention is per position. The step computes its attention row with the function
+    `attn_fwd` now runs for every row (`_attn_row`, factored out of `attn_fwd`), so every
+    sum runs in the same order. The suite checks it at every window length on five
+    models: C = 20 / F = 40, a trained C = 4 model, C = 32 / F = 64, T = 1, and V = 256.
+    It also checks a loaded model, and interleaves full forwards between steps to show
+    the cache survives them. Fuzz property P11 checks it on every random model, before
+    and after the bytes round trip.
+  - **Speed.** Decoding a 32-token window at the bench config (V = 256, T = 32, C = 128,
+    F = 512) costs 73.5 µs per token, against 1.14 ms with a full forward per token
+    (15.5×). Stepping a prompt in costs what one forward over it does (2.35 vs 2.33 ms
+    for 32 tokens), so there is no separate prefill call.
+  - **The window.** Positions are absolute, so the cache holds at most T, and a step on a
+    full cache fails loud. Past T a consumer serves full forwards over the last T, which
+    is what a sliding window has always cost.
+  - **Staleness.** `tx_rev` is a model revision, bumped by `tx_init`, `tx_param_init`,
+    `tx_sgd`, `tx_pack_init`, `tx_pack` and every successful load. A step on a cache
+    older than the model fails loud.
+  - **Memory.** The first reset allocates the cache, and so does a reset for a model
+    larger than any before. Steps allocate nothing: the suite runs 50 sequences and
+    allocates 0 bytes.
+- **A load over a loaded model of the same dims reuses its buffers**
+  ([ADR 0003](docs/adr/0003-a-load-reuses-only-a-loaded-models-buffers.md)).
+  - **The rule.** `tx_pack_deserialize` allocates nothing when the live model is itself a
+    loaded one and every init family was last sized for exactly the artifact's V, T, C,
+    F. A server reloading a same-shaped model no longer keeps a model per reload: hoosh
+    measured 802,376 bytes per load at T = 30, C = 16.
+  - **Over a model built in the process,** a load allocates as before. That model's
+    latent and gradient buffers hold training state a fresh load would have zeroed.
+  - **The `max_bytes` check still uses the model's figure,** so whether a buffer loads
+    does not depend on what was loaded before.
+  - **Serving after a reuse load is bit-identical** to a fresh load. The suite runs 40
+    alternating loads of two models and then a re-serialize; fuzz P12 loads a second
+    model over the first and back, and checks that neither load allocates.
+  - **Faster:** 4.22 ms against 6.73 ms for a fresh load at the bench config.
+- **A vocabulary in the artifact.**
+  - **The flag.** The format's flags word defines bit 0, the byte vocabulary: token id =
+    byte value, V = 256. `tx_pack_set_vocab(kind)` declares it before
+    `tx_pack_serialize`, and `tx_pack_vocab()` reports it. The kinds are
+    `pk_vocab_none()` / `pk_vocab_bytes()`. `tx_pack_init` resets the declaration and
+    `tx_pack` keeps it.
+  - **The format stays version 1.** A model with no vocabulary declared writes the bytes
+    1.2.0 – 1.3.1 wrote. Setting the flag changes only the flags word and the checksum.
+  - **The decoder refuses any other bit, and bit 0 at V ≠ 256,** with `pk_err_header`. A
+    1.2.0 – 1.3.1 decoder accepts only flags 0, so it refuses a flagged artifact the same
+    way, as the format reserved.
+- **`tx_pack_peek(buf, n, info)`** runs the load's header checks without loading. On
+  success it writes V, T, C, F and the vocabulary; otherwise it returns the status the
+  load would return for that header and writes nothing. A server can now refuse a V or a
+  vocabulary it cannot serve before the load replaces its model. hoosh did this by
+  reading offset 24 by hand. Fuzz P10 checks on every mutated artifact that the peek
+  agrees with the load.
+- **`examples/serve.cyr`** now uses the new calls:
+  - load mode peeks the header first;
+  - both modes decode the tokens incrementally and require the full forward's digest
+    (exit 4 if not);
+  - both modes generate greedily from a one-token prompt.
+
+  It builds from the bundles alone, as before, on x86_64 and aarch64.
+- **Bench rows:** `deserialize same dims`, `decode, full fwd/token` and
+  `decode, cached step`. The `deserialize` row still measures an allocating load.
+  `scripts/bench-history.sh` parses `ns/tok`.
+- **Tests:**
+  - Suite 188 → 280 assertions, in three groups:
+    - decode: bit identity, allocation, eight guard paths and two controls;
+    - reload: allocation, alternating loads, the rule's edges, a refused load;
+    - vocabulary and peek: the round trip, the refusals, the peek's verdicts, five guards.
+  - Fuzz properties: P10 gains a byte-vocabulary base artifact and the peek check, and
+    P11 (decode) and P12 (same-dims reload) are new.
+  - Both pass on aarch64 under qemu.
+- **Mutation run:** 22 mutants of the new code.
+  - **The suite kills 20.** The two survivors are explained:
+    - dropping the `tx_T0` comparison from the reuse rule is equivalent, since the block
+      and scratch checks compare T too;
+    - a softmax max that skips one score changes both sides of every identity, and
+      softmax is shift-invariant, so only the golden dump sees it. It does.
+  - **The fuzz harness kills all 10 it was run against.**
+
+### Changed
+
+- **akshara 1.2.0 → 1.3.1** (test scope). 1.3.0 sped up `tok_encode`, and 1.3.1 checks
+  `stream_tok` ids against the vocabulary. tentib calls neither; it uses only `corpus_set`
+  / `gd_ld`, whose outputs are unchanged. `cyrius.lock` was regenerated with akshara
+  `523992e`; rosnet `af2bb1a` and tyche `cdb74e2` are unchanged. The toolchain (6.7.18),
+  rosnet (1.4.1) and tyche (1.2.2) were already the latest releases.
+- **`attn_fwd` runs each row through `_attn_row`** (internal, not frozen); no bit changed.
+- **`tx_pack_deserialize`'s header checks are now `_pk_header`,** shared with the peek. It
+  checks the dims before the flags word now. Both failures are `pk_err_header`, so no
+  status changed.
+- **`dist/tentib.cyr` includes `src/decode.cyr`** (`[lib].modules`), and CI's docs check
+  covers it.
+- **`tx_model_alloc_bytes` keeps its value.** What it means is now "what a load allocates
+  unless it reuses a loaded model's buffers" (`api.md`, the format doc).
+
+### Roadmap
+
+- The 1.3.x consumer asks are shipped. What remains of them is the 1.4.x band: a token
+  table in the artifact, for models trained on a tokenizer other than bytes. Adopting
+  1.4.0 in hoosh is a hoosh minor, and murti still waits for its port.
+- The later bands moved up one: serving from packed storage is 1.5.x, the Pi 5 is 1.6.x,
+  and GPU kernels via mabda are 1.7.x.
+
 ## [1.3.1] — 2026-11-09
 
 **The first consumer.** hoosh 2.11.0 serves tentib models in its own process: a

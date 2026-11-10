@@ -7,3 +7,4 @@ Not decisions (those live in [`../adr/`](../adr/)) and not guides (those live in
 ## Items
 
 - [001 — The packed-model format (version 1)](001-packed-model-format.md): the bytes `tx_pack_serialize` writes and `tx_pack_deserialize` reads, the decoder's checks and status codes, and the invariants (canonical, bit-identical serving, bounded memory).
+- [002 — Incremental decode](002-incremental-decode.md): why `tx_dec_step` is bit-identical to the full forward, why the cache stops at T, how a stale cache is caught (`tx_rev`), and what it costs in memory (1.4.0).

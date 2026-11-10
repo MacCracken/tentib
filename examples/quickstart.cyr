@@ -25,6 +25,7 @@ include "lib/akshara.cyr"    # corpus_set / gd_ld — the sovereign tokenizer
 include "src/block.cyr"      # the transformer + tx_train (M2)
 include "src/kernel.cyr"     # integer kernels + pack-once serving (M3 / 0.4.1 / 0.7.0)
 include "src/serial.cyr"     # the packed model as bytes (1.2.0)
+include "src/decode.cyr"     # tx_dec_reset / tx_dec_step — incremental decode (1.4.0)
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
 # This program's printer: a NUL-terminated string to stdout.

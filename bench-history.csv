@@ -73,3 +73,32 @@ date,version,commit,benchmark,time_ns
 2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model training step (f64)",22135112
 2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model serialize",3622736
 2026-11-09T23:43:33Z,1.2.0,247c727+dirty,"model deserialize",6364100
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 128x128 branchy",111898
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 128x128 branchless",92997
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 128x128 simd",1835
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 128x128 rosnet-f64",7504
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 256x256 branchy",592447
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 256x256 branchless",382282
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 256x256 simd",4623
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 256x256 rosnet-f64",27008
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 512x512 branchy",2564247
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 512x512 branchless",1674523
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 512x512 simd",13991
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 512x512 rosnet-f64",97735
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 768x768 branchy",5711588
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 768x768 branchless",3475400
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 768x768 simd",28540
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"layer 768x768 rosnet-f64",212796
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"prep 768x768 tsimd_pack_w",3453507
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"prep 768x768 act_quant_int",4567
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model f64 weight-only",7501850
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model integer scalar",67451317
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model integer SIMD (0.4.1)",6575686
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model PACKED serving (0.7.0)",2331196
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model tx_pack (one-time)",4223022
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model training step (f64)",23571627
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model serialize",3810024
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model deserialize",6731535
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model deserialize same dims",4217869
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model decode, full fwd/token",1140416
+2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model decode, cached step",73545

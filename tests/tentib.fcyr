@@ -24,7 +24,17 @@
 #       four with the checksum recomputed, to reach the field checks; NaN / Inf among
 #       the values), and one round in four a memory budget below the need: it returns 0
 #       or a documented code and never exits; a refused load leaves the current model
-#       serving bit-identically; an accepted buffer re-serializes to the same bytes
+#       serving bit-identically; an accepted buffer re-serializes to the same bytes.
+#       From 1.4.0 one round in four mutates a byte-vocabulary artifact (V = 256, flags
+#       bit 0), an accepted buffer declares exactly the vocabulary its flags word holds,
+#       and tx_pack_peek agrees with the load: a peek refusal is the load's status, and
+#       an accepted load peeks clean with the loaded dims and vocabulary
+#   P11 (1.4.0, with P8 and P9) incremental decode: after tx_dec_reset, each
+#       tx_dec_step returns its position and its logits are that row of the full
+#       forward, bit for bit, on the random model and on the model the bytes loaded
+#   P12 (1.4.0, with P9) a second model of the same dims loaded over the loaded one,
+#       then the first back over it: each serves its own logits bit for bit, and
+#       neither load allocates
 #
 # Deterministic: the seed sequence is fixed, so a failure names a reproducible
 # round. Exit 0 = every property held; exit 1 = a property failed (message on
@@ -40,6 +50,7 @@ include "lib/akshara.cyr"
 include "src/block.cyr"
 include "src/kernel.cyr"
 include "src/serial.cyr"  # tx_pack_serialize / tx_pack_deserialize — packed-model bytes (1.2.0)
+include "src/decode.cyr"  # tx_dec_reset / tx_dec_step — incremental decode (1.4.0)
 include "src/gpu.cyr"
 
 fn _putc(ch): i64 { var b[8]; store8(&b, ch); sys_write(1, &b, 1); return 0; }
@@ -248,6 +259,22 @@ fn same_b(a, b, n): i64 {
     return 1;
 }
 
+# P11: decode tok[0..T) step by step on the live packed model; every step's logits must
+# be row t of l0 (the full forward's T x V logits).
+fn decode_round(tok, l0, V, T): i64 {
+    tx_dec_reset();
+    var t = 0;
+    while (t < T) {
+        if (tx_dec_step(load64(tok + t * 8)) != t) { fail("P11 tx_dec_step returned the wrong position"); }
+        if (same(l0 + t * V * 8, ki_logits, V) == 0) {
+            fail("P11 a decode step differs from its row of the full forward");
+        }
+        t = t + 1;
+    }
+    if (tx_dec_len() != T) { fail("P11 tx_dec_len after T steps"); }
+    return 0;
+}
+
 # P9: the live packed model (whose mode-0 logits over tok are l0) through the bytes.
 fn serial_round(tok, l0, V, T, C, F): i64 {
     var n = tx_pack_serial_bytes();
@@ -259,29 +286,58 @@ fn serial_round(tok, l0, V, T, C, F): i64 {
     if (same(l0, ki_logits, T * V) == 0) { fail("P9 the loaded model serves differently"); }
     tx_pack_serialize(b, n);
     if (same_b(a, b, n) == 0) { fail("P9 re-serialized bytes differ"); }
+    decode_round(tok, l0, V, T);
+    # P12: model B, same dims, built in this process and written to bytes
+    var TV = T * V;
+    tx_init(V, T, C, F); fz_param_init(V, T, C, F, rint(1, 1000000));
+    tx_int_init(V, T, C, F); tx_pack_init(V, T, C, F); tx_pack(V, T, C, F);
+    var lb = t_alloc(TV);
+    tx_fwd_packed(tok, V, T, C, F); t_copy(lb, ki_logits, TV);
+    var bb = alloc(n + 8);
+    if (tx_pack_serialize(bb, n) != n) { fail("P12 tx_pack_serialize size"); }
+    if (tx_pack_deserialize(a, n, 1 << 30) != 0) { fail("P12 model A did not load over B"); }
+    var u = alloc_used();
+    if (tx_pack_deserialize(bb, n, 1 << 30) != 0) { fail("P12 model B did not load over A"); }
+    tx_fwd_packed(tok, V, T, C, F);
+    if (same(lb, ki_logits, TV) == 0) { fail("P12 B loaded over A serves differently"); }
+    if (tx_pack_deserialize(a, n, 1 << 30) != 0) { fail("P12 model A did not load back over B"); }
+    tx_fwd_packed(tok, V, T, C, F);
+    if (same(l0, ki_logits, TV) == 0) { fail("P12 A loaded back over B serves differently"); }
+    if (alloc_used() != u) { fail("P12 a same-dims load allocated"); }
+    decode_round(tok, l0, V, T);
     return 0;
 }
 
-# P10 state: one valid artifact of fixed small dims, and zero-id tokens to serve with.
+# P10 state: two valid artifacts of fixed small dims (the second, from 1.4.0, declares the
+# byte vocabulary at V = 256), the dims of the one a round mutates, and zero-id tokens.
 var fz_art = 0; var fz_art_n = 0; var fz_tok0 = 0;
+var fz_bart = 0; var fz_bart_n = 0;
 var fz_V = 7; var fz_T = 4; var fz_C = 5; var fz_F = 9;
+var zb_V = 0; var zb_T = 0; var zb_C = 0; var zb_F = 0;
 
-# Build P10's base artifact.
+# Build P10's base artifacts.
 fn decoder_setup(): i64 {
     tx_init(fz_V, fz_T, fz_C, fz_F); fz_param_init(fz_V, fz_T, fz_C, fz_F, 4242);
     tx_int_init(fz_V, fz_T, fz_C, fz_F); tx_pack_init(fz_V, fz_T, fz_C, fz_F); tx_pack(fz_V, fz_T, fz_C, fz_F);
     fz_art_n = tx_pack_serial_bytes();
     fz_art = alloc(fz_art_n + 8);
     tx_pack_serialize(fz_art, fz_art_n);
+    tx_init(256, 3, 4, 6); fz_param_init(256, 3, 4, 6, 4243);
+    tx_int_init(256, 3, 4, 6); tx_pack_init(256, 3, 4, 6); tx_pack(256, 3, 4, 6);
+    tx_pack_set_vocab(pk_vocab_bytes());
+    fz_bart_n = tx_pack_serial_bytes();
+    fz_bart = alloc(fz_bart_n + 8);
+    tx_pack_serialize(fz_bart, fz_bart_n);
+    if (tx_pack_deserialize(fz_art, fz_art_n, 1 << 30) != 0) { fail("P10 setup: the base artifact did not load"); }
     fz_tok0 = t_alloc(64);                                 # id 0 is valid for any V
     return 0;
 }
 
-# Byte offset of layer i's gamma in an artifact of P10's dims.
+# Byte offset of layer i's gamma in an artifact of the mutated base's dims.
 fn fz_gamma_off(i): i64 {
     var o = 64; var j = 0;
     while (j < i) {
-        o = o + 8 + _pk_code_bytes(_pk_layer_k(j, fz_C, fz_F) * _pk_layer_n(j, fz_C, fz_F, fz_V));
+        o = o + 8 + _pk_code_bytes(_pk_layer_k(j, zb_C, zb_F) * _pk_layer_n(j, zb_C, zb_F, zb_V));
         j = j + 1;
     }
     return o;
@@ -303,12 +359,14 @@ fn fz_bits(): i64 {
     return rng_u64();
 }
 
-# P10: one mutation of the base artifact through the decoder.
+# P10: one mutation of a base artifact through the decoder.
 fn decoder_round(): i64 {
-    var n = fz_art_n;
+    var base = fz_art; var n = fz_art_n;
+    zb_V = fz_V; zb_T = fz_T; zb_C = fz_C; zb_F = fz_F;
+    if (rint(0, 3) == 0) { base = fz_bart; n = fz_bart_n; zb_V = 256; zb_T = 3; zb_C = 4; zb_F = 6; }
     var m = alloc(n + 64);
     var i = 0;
-    while (i < n) { store8(m + i, load8(fz_art + i)); i = i + 1; }
+    while (i < n) { store8(m + i, load8(base + i)); i = i + 1; }
     while (i < n + 64) { store8(m + i, rint(0, 255)); i = i + 1; }
     var len = n;
     var kind = rint(0, 5);
@@ -338,17 +396,36 @@ fn decoder_round(): i64 {
         store64(m + n - 8, _pk_fnv(m, n - 8));
     }
     if (kind == 5) {
-        var np = fz_V * fz_C + fz_T * fz_C + 3 * fz_C + fz_V;
+        var np = zb_V * zb_C + zb_T * zb_C + 3 * zb_C + zb_V;
         store64(m + n - 8 - 8 * rint(1, np), fz_bits());
         store64(m + n - 8, _pk_fnv(m, n - 8));
     }
     var before = t_alloc(tx_T0 * tx_V0);
     fz_serve(before);
     var cap = 1 << 26;                                     # one round in four: a budget below the need
-    if (rint(0, 3) == 0) { cap = rint(0, tx_model_alloc_bytes(fz_V, fz_T, fz_C, fz_F) - 1); }
+    if (rint(0, 3) == 0) { cap = rint(0, tx_model_alloc_bytes(zb_V, zb_T, zb_C, zb_F) - 1); }
+    var info[40];
+    store64(&info, 0 - 7);
+    var pr = tx_pack_peek(m, len, &info);
+    if ((pr != 0) & (load64(&info) != (0 - 7))) { fail("P10 a refused peek wrote its info"); }
     var rc = tx_pack_deserialize(m, len, cap);
     if ((rc > 0) | (rc < (0 - 9))) { fail("P10 a status outside the documented codes"); }
+    if ((pr != 0) & (rc != pr)) { fail("P10 a peek refusal is not the load's status"); }
+    var hdr = (rc == pk_err_length()) | (rc == pk_err_magic()) | (rc == pk_err_version()) | (rc == pk_err_header());
+    if ((pr == 0) & hdr) {
+        fail("P10 a clean peek, but the load refused the header");
+    }
     if (rc == 0) {
+        var pok = (pr == 0) & (load64(&info) == tx_V0) & (load64(&info + 8) == tx_T0);
+        pok = pok & (load64(&info + 16) == tx_C0) & (load64(&info + 24) == tx_F0);
+        if ((pok & (load64(&info + 32) == tx_pack_vocab())) == 0) {
+            fail("P10 the peek disagrees with the loaded model");
+        }
+        # an independent oracle: the vocabulary is the flags word, 0 or 1, and 1 only at V = 256
+        var fw = load64(m + 56);
+        if ((fw != 0) & (fw != 1)) { fail("P10 an accepted flags word is not 0 or 1"); }
+        if ((fw == 1) & (tx_V0 != 256)) { fail("P10 an accepted byte vocabulary at V other than 256"); }
+        if (tx_pack_vocab() != fw) { fail("P10 the loaded vocabulary is not the flags word"); }
         if (tx_pack_serial_bytes() != len) { fail("P10 an accepted buffer has a different length"); }
         var re = alloc(len + 8);
         tx_pack_serialize(re, len);
@@ -361,7 +438,7 @@ fn decoder_round(): i64 {
             if ((gv < 0) | (((gv >> 52) & 0x7FF) == 0x7FF)) { fail("P10 an accepted gamma is not a valid scale"); }
             gi = gi + 1;
         }
-        if ((f64_is_finite(tget(tx_tokemb, 0)) & f64_is_finite(tget(tx_bhead, fz_V - 1))) == 0) {
+        if ((f64_is_finite(tget(tx_tokemb, 0)) & f64_is_finite(tget(tx_bhead, zb_V - 1))) == 0) {
             fail("P10 an accepted parameter is not finite");
         }
         var after_ok = t_alloc(tx_T0 * tx_V0);
@@ -393,6 +470,7 @@ fn model_round(): i64 {
     var Tp = rint(1, T);
     tx_fwd_packed(tok, V, Tp, C, F);
     if (same(l0, ki_logits, Tp * V) == 0) { fail("P8 prefix serve != prefix rows"); }
+    decode_round(tok, l0, V, T);
     if ((fz_round % 16) == 0) { serial_round(tok, l0, V, T, C, F); }
     return 0;
 }
@@ -409,7 +487,7 @@ fn main(): i64 {
         if ((fz_round % 2) == 0) { decoder_round(); }
         fz_round = fz_round + 1;
     }
-    puts("fuzz: 5000 rounds, P1-P10 held\n");
+    puts("fuzz: 5000 rounds, P1-P12 held\n");
     return 0;
 }
 

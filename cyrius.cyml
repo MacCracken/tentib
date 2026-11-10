@@ -20,7 +20,7 @@ output = "build/tentib"
 # [deps.tyche] too. It does not need akshara (only tentib's own demo and tests
 # tokenize), and since 1.1.2 it calls no consumer-defined printer.
 [lib]
-modules = ["src/ternary.cyr", "src/bitlinear.cyr", "src/layers.cyr", "src/model.cyr", "src/block.cyr", "src/kernel.cyr", "src/serial.cyr"]
+modules = ["src/ternary.cyr", "src/bitlinear.cyr", "src/layers.cyr", "src/model.cyr", "src/block.cyr", "src/kernel.cyr", "src/serial.cyr", "src/decode.cyr"]
 
 # The AGNOS GPU tile path (ternary_matmul_free_gpu, 1.0.1) is a SEPARATE profile, as
 # rosnet's GPU backend is: `cyrius distlib gpu` bundles it into dist/tentib-gpu.cyr.
@@ -62,6 +62,6 @@ modules = ["dist/rosnet.cyr"]
 # neither akshara nor its four consumer hooks.
 [deps.akshara]
 git = "https://github.com/MacCracken/akshara"
-tag = "1.2.0"
+tag = "1.3.1"
 modules = ["dist/akshara.cyr"]
 scope = "test"

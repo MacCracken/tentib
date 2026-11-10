@@ -131,43 +131,54 @@ fn gelu_loss(x, n, yscr): i64 {
 # ctx[i] = sum_j P[i,j] V[j]. Math cross-checked vs attn11/src/attn_core_fwd/bwd
 # (single head, nh=1). P is T x T (the upper triangle stays 0).
 
+# The 1/sqrt(d) score scale.
+fn _attn_scale(d): i64 { return f64_div(f64_from(1), f64_sqrt(f64_from(d))); }
+
+# One query row of the causal attention: query qb (d values) against keys and values
+# K[0..i], V[0..i] (rows of d). Writes the probabilities prow[0..i] and the context
+# cb[0..d). attn_fwd runs it for every row; the incremental decode step (1.4.0,
+# src/decode.cyr) runs it for the newest position against its cached keys and values.
+# One function for both is what keeps the step bit-identical to the full forward's row.
+fn _attn_row(qb, K, V, prow, cb, i, d, scale): i64 {
+    var j = 0;
+    while (j <= i) {                                    # raw scaled scores, j = 0..i
+        var kb = K + j * d * 8;
+        var dot = f64_from(0); var dd = 0;
+        while (dd < d) { dot = f64_add(dot, f64_mul(load64(qb + dd * 8), load64(kb + dd * 8))); dd = dd + 1; }
+        store64(prow + j * 8, f64_mul(dot, scale));
+        j = j + 1;
+    }
+    var mx = load64(prow); j = 1;                        # softmax over j = 0..i (max-subtract)
+    while (j <= i) { var s = load64(prow + j * 8); if (f64_gt(s, mx) == 1) { mx = s; } j = j + 1; }
+    var sum = f64_from(0); j = 0;
+    while (j <= i) {
+        var e = f64_exp(f64_sub(load64(prow + j * 8), mx));
+        store64(prow + j * 8, e); sum = f64_add(sum, e); j = j + 1;
+    }
+    var inv = f64_div(f64_from(1), sum); j = 0;
+    while (j <= i) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
+    var c0 = 0;                                          # ctx[i] = sum_j P[i,j] V[j]
+    while (c0 < d) { store64(cb + c0 * 8, f64_from(0)); c0 = c0 + 1; }
+    j = 0;
+    while (j <= i) {
+        var pij = load64(prow + j * 8); var vb = V + j * d * 8; var cd = 0;
+        while (cd < d) {
+            store64(cb + cd * 8, f64_add(load64(cb + cd * 8), f64_mul(pij, load64(vb + cd * 8))));
+            cd = cd + 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
 # Forward: writes the T x T probabilities P (zeroed first) and ctx (T x d).
 fn attn_fwd(Q, K, V, P, ctx, T, d): i64 {
-    var scale = f64_div(f64_from(1), f64_sqrt(f64_from(d)));
+    var scale = _attn_scale(d);
     var Tsz = T * T; var z = 0;
     while (z < Tsz) { store64(P + z * 8, f64_from(0)); z = z + 1; }
     var i = 0;
     while (i < T) {
-        var prow = P + i * T * 8;
-        var qb = Q + i * d * 8;
-        var j = 0;
-        while (j <= i) {                                    # raw scaled scores, j = 0..i
-            var kb = K + j * d * 8;
-            var dot = f64_from(0); var dd = 0;
-            while (dd < d) { dot = f64_add(dot, f64_mul(load64(qb + dd * 8), load64(kb + dd * 8))); dd = dd + 1; }
-            store64(prow + j * 8, f64_mul(dot, scale));
-            j = j + 1;
-        }
-        var mx = load64(prow); j = 1;                        # softmax over j = 0..i (max-subtract)
-        while (j <= i) { var s = load64(prow + j * 8); if (f64_gt(s, mx) == 1) { mx = s; } j = j + 1; }
-        var sum = f64_from(0); j = 0;
-        while (j <= i) {
-            var e = f64_exp(f64_sub(load64(prow + j * 8), mx));
-            store64(prow + j * 8, e); sum = f64_add(sum, e); j = j + 1;
-        }
-        var inv = f64_div(f64_from(1), sum); j = 0;
-        while (j <= i) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
-        var cb = ctx + i * d * 8; var c0 = 0;                # ctx[i] = sum_j P[i,j] V[j]
-        while (c0 < d) { store64(cb + c0 * 8, f64_from(0)); c0 = c0 + 1; }
-        j = 0;
-        while (j <= i) {
-            var pij = load64(prow + j * 8); var vb = V + j * d * 8; var cd = 0;
-            while (cd < d) {
-                store64(cb + cd * 8, f64_add(load64(cb + cd * 8), f64_mul(pij, load64(vb + cd * 8))));
-                cd = cd + 1;
-            }
-            j = j + 1;
-        }
+        _attn_row(Q + i * d * 8, K, V, P + i * T * 8, ctx + i * d * 8, i, d, scale);
         i = i + 1;
     }
     return 0;
