@@ -134,6 +134,13 @@ above and [`../api.md`](../api.md).
   over the last T, as a sliding window always cost, or reset and re-feed a shorter tail
   (cheaper, but a different context). Before 1.4.0 every token was a full forward; hoosh
   measured about 50 µs per token that way at C = 16, T ≤ 25.
+- **One cache per process: give it to one sequence at a time.** The cache is module-global
+  like the model. A server that interleaves replies can't hold a cache per reply, so let it
+  belong to the reply that last reset it. When another reply's turn comes, that reply takes
+  it over: `tx_dec_reset`, then its own window stepped in, which costs the full forward it
+  stands in for. A lone reply then decodes one position per token, and interleaved replies
+  cost what full forwards did, never more. hoosh 2.11.1 does exactly this (an owner id
+  checked under its lock, with `tx_dec_len()` as a cross-check).
 - **A same-shaped reload keeps no memory; a change of shape still does.** A load over a
   *loaded* model of the same V, T, C, F overwrites its buffers and allocates nothing
   (1.4.0, [ADR 0003](../adr/0003-a-load-reuses-only-a-loaded-models-buffers.md)). Any

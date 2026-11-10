@@ -163,11 +163,14 @@ STE), **0.1.0** (M0 — ternary quantizer).
   full forward's digest, and greedy generation); `examples/quickstart.cyr` — the in-repo walk-through (train → pack →
   serve → serialize → reload).
 - `scripts/bench-history.sh` — builds the bench harness once, runs it pinned (core 4)
-  RUNS times, appends the medians to `bench-history.csv` (1.1.2).
+  RUNS times, appends the medians to `bench-history.csv` (1.1.2). With `BENCH_HOST=<ssh host>`
+  (after 1.4.0) it builds for aarch64, runs on that board (pinned to its last core) and labels the
+  rows `<BENCH_LABEL>: …`; the Raspberry Pi 4's rows are `rpi4: …` (`docs/benchmarks.md` §6).
 
 ## Tests
 
-- `tests/tentib.tcyr` — **280/280** green (x86_64 and aarch64): rosnet smoke, M0 quantization, BitLinear
+- `tests/tentib.tcyr` — **280/280** green (x86_64, aarch64 under qemu in CI, and since 2026-11-09 a real
+  Raspberry Pi 4, Cortex-A72): rosnet smoke, M0 quantization, BitLinear
   forward, the **M1 STE FD-gate** (dW vs surrogate, dx vs Weff, γ-cancellation @ γ=3,
   falsifiers, descent), int8 activation quant; **M2** — softmax-CE FD gate, the
   **end-to-end gradient gate** (head dW vs surrogate w/ softmax-CE dy, embedding
@@ -204,7 +207,8 @@ STE), **0.1.0** (M0 — ternary quantizer).
   (1.2.0) serialize / deserialize + (1.4.0) a same-dims load, and a 32-token window
   decoded with a full forward per token vs the cached step.
   B-series fairness; ratios reproduce, absolute ns vary with boost.
-- `tests/tentib.fcyr` — **seeded property fuzzer** (1.1.2): 5,000 rounds, ~9 s,
+- `tests/tentib.fcyr` — **seeded property fuzzer** (1.1.2): 5,000 rounds, ~9 s (33 s on the
+  Raspberry Pi 4, where it also holds),
   properties P1–P12 (kernel agreement, code range, pack round-trip, Weff = code·γ,
   integer vs f64 within the summation bound, NaN rows, mask identity, whole-model
   modes + prefix serving, from 1.2.0 the bytes round trip (P9) and the decoder on
@@ -234,13 +238,17 @@ gets rosnet + tyche (checked with a throwaway consumer project, 1.3.0).
   `type = "tentib"` provider serves one packed model per process with byte tokens (V = 256), greedy
   decoding, buffered and streamed; `src/lib/tentib_local.cyr`, ADR 014 there. Its suite trains, writes and
   serves tentib models; its bench has a reply, a load and an unchanged reload.
+- **hoosh 2.11.1** (2026-11-09): pins **1.4.0**.
+  - **Decoding:** a token is one `tx_dec_step` until the window slides.
+  - **One cache, shared:** tentib's one cache is shared by hoosh's interleaved replies. It
+    belongs to the reply that last reset it, and another reply takes it over by re-feeding
+    its window, at the cost of the full forward it replaces.
+  - **Loads:** `tx_pack_peek` replaces reading the header by hand, the log says whether the
+    file declares the byte vocabulary, and a same-shape reload keeps no memory.
+  - **Checked:** byte for byte against its 2.11.0 decode; an 8-token reply is 448 → 99 µs and
+    a 22-token one 2.74 ms → 263 µs. ADR 014's 2.11.1 update there.
 - **murti**: not yet. It is still a Rust tree; it adopts `[deps.tentib]` once it has a Cyrius port.
 
-hoosh 2.11.0 does not use 1.4.0's additions yet (incremental decode, `tx_pack_peek`, the
-vocabulary flag); adopting them is a hoosh minor. Its same-shaped reloads keep no memory as
-soon as it pins 1.4.0, with no code change. Its suite's reload test and its `tentib_load`
-bench row both switch between models of different T (25 → 18, and 26 ↔ 25), so both still
-exercise the allocating load.
 
 ## Next
 
@@ -248,8 +256,9 @@ tentib is stable (1.x, API frozen); the open work is in [`roadmap.md`](roadmap.m
 proposed in order (1.2.0, 1.3.0 and 1.4.0 shipped, and hoosh adopted 1.3.x): **1.3.x** murti once ported ·
 **1.4.x** the rest of what the first consumer asked for (a token table in the artifact) ·
 **1.5.x** serving from 2-bit / trit packed storage, with a serving-only allocation for loaded
-models · **1.6.x** the Pi 5 edge measurement (NEON
-`iv_dp8` already runs on aarch64) · **1.7.x** GPU kernels via mabda · later 1.x minors
+models · **1.6.x** the edge target, the Raspberry Pi 4 at `ssh pi` (retargeted from a Pi 5): measured after
+1.4.0 (`docs/benchmarks.md` §6: packed serving 1,241 tok/s, 2.85× the board's f64 path; a cached
+decode step 1,249 tok/s); sizing a model for its 2 GB waits on 1.5.x, and power is unmeasured · **1.7.x** GPU kernels via mabda · later 1.x minors
 (a matched-recipe quality ablation, the token-mixer research watch) · a **2.0.0
 backlog** (model handles instead of module globals, among others). Maintenance rides
 any patch: the benchmark re-baseline (maintainer's call), re-proving `/bin/gputern` on iron, pin sweeps (latest: 6.7.18 at 1.1.1).

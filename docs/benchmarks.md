@@ -155,11 +155,87 @@ references, **cited, not re-demonstrated**:
   SSE2-2-wide f64 baseline, not fp16 AVX2, so the numbers are not directly
   comparable; the *mechanism* is).
 
+## 6. On a Raspberry Pi 4 (aarch64, the 1.6.x edge target)
+
+The same harness, built `--aarch64` and run on the board (`BENCH_HOST=pi BENCH_LABEL=rpi4
+./scripts/bench-history.sh`), median of 3. The rows are `rpi4: …` in `bench-history.csv`.
+
+- **The board:** Raspberry Pi 4 Model B Rev 1.2. BCM2711, 4 × Cortex-A72 at 1.5 GHz,
+  2 GB, Linux 7.0 (raspi). The `ondemand` governor held 1,500 MHz before and after the
+  runs, at 51–56 °C (the firmware's throttle flags are not readable without `/dev/vcio`).
+  Pinned to core 3, the other cores idle; the A72 has no SMT.
+- **Build:** tentib 1.4.0 (`b29ae7c`), cyrius 6.7.18, 2026-11-09. The x86_64 column is
+  the same day's run of record, on the Ryzen 7 5800H, core 4.
+- **The kernel needs only base NEON.** The A72 has no dot-product extension
+  (`fp asimd`, no `asimddp`). cyrius lowers `iv_dp8` to base ARMv8.0 NEON (`uxtl` /
+  `sxtl` + `smlal`), so the SIMD rows run the same kernel CI checks under qemu.
+- **Correctness on the board, the same day:**
+  - the suite passed 280/280;
+  - the fuzz harness held P1–P12 over 5,000 rounds (33 s);
+  - a model file written on x86_64 loaded and served with the x86_64 digest.
+
+**Whole model** (V = 256, T = 32, C = 128, F = 512; 266,880 params; T tokens per forward):
+
+| path | Pi 4 | tok/s | x86_64 | tok/s |
+|------|-----:|------:|-------:|------:|
+| f64 weight-only (`tx_fwd`) | 73.58 ms | 434 | 7.50 ms | 4,265 |
+| integer scalar (`tx_fwd_q` mode 0) | 472.5 ms | 67 | 67.45 ms | 474 |
+| integer SIMD (`tx_fwd_q` mode 2) | 69.17 ms | 462 | 6.58 ms | 4,866 |
+| **packed serving** (`tx_fwd_packed`) | **25.78 ms** | **1,241** | 2.33 ms | 13,726 |
+| a training step (f64) | 229.6 ms | | 23.57 ms | |
+
+**Packed serving is 2.85× the f64 path on the Pi** (3.2× on x86_64), and the whole board
+runs about 10–11× slower than the 5800H core on every whole-model row.
+
+**Decoding a 32-token window**, one token at a time (1.4.0):
+
+| | Pi 4 | per second | x86_64 |
+|---|---:|---:|---:|
+| a full `tx_fwd_packed` per token | 12.57 ms | 80 tok/s | 1.14 ms |
+| `tx_dec_step`, cached | **800.7 µs** | **1,249 tok/s** | 73.5 µs |
+
+The cached step is 15.7× faster per token. Stepping the 32 tokens in takes 25.6 ms, the
+same as one 32-position forward (25.8 ms), as on x86_64.
+
+**Per layer** (M = 1, ns/call):
+
+| K×N | branchy | branchless | SIMD (pack-once) | rosnet f64 | SIMD vs f64 (Pi / x86_64) |
+|-----|--------:|-----------:|-----------------:|-----------:|--------------------------:|
+| 128×128 | 886,124 | 825,030 | 19,437 | 84,618 | 4.4× / 4.1× |
+| 256×256 | 3,963,468 | 3,693,084 | 55,218 | 257,504 | 4.7× / 5.8× |
+| 512×512 | 18,277,112 | 17,494,516 | 175,732 | 1,060,017 | 6.0× / 7.0× |
+| 768×768 | 88,444,097 | 86,160,542 | 357,850 | 2,352,412 | 6.6× / 7.5× |
+
+**Load and serialization:**
+- a fresh `tx_pack_deserialize` takes 81.6 ms;
+- a same-dims reload takes 31.2 ms;
+- serialization takes 27.1 ms;
+- the one-time `tx_pack` takes 43.3 ms.
+
+**What the board shows that x86_64 did not:**
+- **The branchless scalar kernel buys almost nothing on the A72.** It runs at 0.93–0.97 of
+  branchy's time; on the 5800H it was 0.61–0.83. It is a reference kernel, not the serving
+  path, so nothing changes. M3b's premise, that unpredictable branches dominate, holds
+  on Zen 3 but much less on this core.
+- **The scalar kernels fall off a cliff at 768×768:** 15–25× the x86_64 time, against
+  about 10× elsewhere. Their weights are i64, 4.7 MB at 768², more than the A72's 1 MB L2,
+  and the board has no L3 (the 5800H has 16 MB). The SIMD kernel's i8 copy is 0.6 MB and
+  stays at 12.5×. That is consistent with the memory story in §4, though it has not been
+  profiled.
+
+**Not measured yet:**
+- **Power.** No meter is on the board, so the integer-native plan's "under ~15 W" is
+  untested.
+- **A model sized for the board.** These are the bench's toy dims. A b1.58-shaped model
+  near the plan's sizes needs 1.5.x's packed storage to fit 2 GB, and a fresh load still
+  allocates the training buffers (12.2 MB here) until 1.5.x's serving-only allocation.
+
 ## Reproduction
 
 ```sh
 cyrius build tests/tentib.bcyr build/bench
 taskset -c <idle-core> ./build/bench          # §1–§4
+BENCH_HOST=pi BENCH_LABEL=rpi4 ./scripts/bench-history.sh   # §6, on an aarch64 board over ssh
 cyrius build src/main.cyr build/tentib && ./build/tentib   # the bite-F ternary CE (§5)
 # the f64 sibling (attn11 ≥1.13.0):
 printf 'hello world' > /tmp/hello.txt

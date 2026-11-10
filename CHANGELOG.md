@@ -4,6 +4,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Benchmarks on a Raspberry Pi 4, the 1.6.x edge target's first half.**
+  `docs/benchmarks.md` §6 has the results, and `bench-history.csv` the `rpi4: …` rows (median
+  of 3).
+  - **The board:** Cortex-A72, 4 × 1.5 GHz, 2 GB, held at 1,500 MHz and 51–56 °C, pinned to
+    core 3.
+  - **Packed serving:** 25.8 ms per 32-token forward, 1,241 tok/s, against 434 for the f64
+    path on the same board (2.85×; 3.2× on x86_64).
+  - **Decoding a 32-token window:** 800.7 µs per cached step (1,249 tok/s), against 12.57 ms
+    with a full forward per token (15.7×).
+  - **Every whole-model row** runs about 10–11× slower than the Ryzen 7 5800H core.
+  - **Two board-specific findings:**
+    - the branchless scalar kernel gains almost nothing on the A72 (0.93–0.97 of branchy's
+      time, against 0.61–0.83 on Zen 3);
+    - the i64-weight scalar kernels fall off a cliff at 768² (15–25×, with no L3 behind the
+      1 MB L2), while the SIMD kernel's i8 weights stay at 12.5×.
+  - **The same day on the board:**
+    - the fuzz harness held P1–P12 over 5,000 rounds (33 s);
+    - a model file written on x86_64 served with its x86_64 digest;
+    - a model trained on the board matched the qemu-trained digest.
+  - **Not measured:** power (no meter), and a model sized for the board's 2 GB (that needs
+    1.5.x's packed storage).
+- **`scripts/bench-history.sh` runs on another machine.** `BENCH_HOST=<ssh host>` builds the
+  harness `--aarch64`, copies it to a temporary file on the host, runs it RUNS times there
+  (pinned to `BENCH_CPU`, default the host's last CPU), and removes it. It records the rows as
+  `<BENCH_LABEL>: <row>`, so different machines' rows never mix. It prints the host's model,
+  governor, clock, temperature and load before and after the runs. The host name is checked
+  to be a plain ssh name, not something ssh would read as an option.
+
+### Documented
+
+- **hoosh 2.11.1 adopts 1.4.0.** It decodes with the cache, reads the header with
+  `tx_pack_peek`, logs the declared vocabulary, and reloads same-shaped models without
+  keeping memory. It shares the one decode cache between its interleaved replies: the
+  cache belongs to the reply that last reset it, and another reply takes it over by
+  stepping its window in.
+  - The consuming guide's §4 gains that pattern, and `state.md` lists the release.
+  - The 1.4.0 docs said hoosh's adoption would be a minor. It shipped as hoosh's patch
+    2.11.1, in the band its roadmap had planned for it.
+- **tentib ran on real ARM hardware for the first time.** The 1.4.0 aarch64 suite passed
+  280/280 on a Raspberry Pi 4 (Cortex-A72), whose NEON lacks the dot-product extension.
+  cyrius lowers `iv_dp8` to base ARMv8.0 NEON (`uxtl` / `sxtl` + `smlal`), so nothing
+  needs it.
+
+### Roadmap
+
+- **The edge band (1.6.x) targets the Raspberry Pi 4 at hand, not a Pi 5.** The Pi 5 came
+  from the agnosticos plan's target figure, not from anything tentib needs.
+  - Its measuring half needs nothing from 1.5.x and no new hardware.
+  - Sizing a b1.58-shaped model for the board's 2 GB needs 1.5.x's packed storage.
+  - A Pi 5 is a second data point when one is available.
+  - The plan's figure ("a 2B model at ~5–7 tok/s on a Pi 5 under ~15 W") has no source
+    there, and the band says to check it before citing it.
+
 ## [1.4.0] — 2026-11-09
 
 **What the first consumer asked for.** The three additive items that hoosh 2.11.0's

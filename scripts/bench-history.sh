@@ -16,6 +16,16 @@
 # the runs. Compare rows only when they were recorded in the same session on the
 # same host.
 #
+# Another machine (1.6.x, the edge target): BENCH_HOST=<ssh host> builds the
+# harness for aarch64 here, copies it to a temporary file on that host, runs it
+# there RUNS times (pinned to BENCH_CPU, default the host's last CPU, when the
+# host has taskset), and removes it. Every row is recorded as "<label>: <row>",
+# the label being BENCH_LABEL (default: the host name), so the rows of different
+# machines never mix. The host must be aarch64 Linux and reachable without a
+# password prompt (ssh BatchMode); the script prints its model, clock governor
+# and temperature before and after the runs, for the record.
+#   BENCH_HOST=pi ./scripts/bench-history.sh
+#
 # Parsed line shapes (tests/tentib.bcyr):
 #   "128x128  branchy=105726  branchless=85944  simd=1663  rosnet-f64=6646  ns/call ..."
 #   "  tsimd_pack_w=4846511  act_quant_int=6632"            (after the [2] header)
@@ -31,7 +41,23 @@ cd "$(dirname "$0")/.."
 CSV="bench-history.csv"
 BENCH="tests/tentib.bcyr"
 RUNS="${RUNS:-3}"
-CPU="${BENCH_CPU:-4}"
+HOST="${BENCH_HOST:-}"
+LABEL="${BENCH_LABEL:-$HOST}"
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10)
+if [ -n "$HOST" ]; then
+    # The host name goes to ssh as an argument: a leading '-' would be read as an option.
+    case "$HOST" in
+        -*|*[!A-Za-z0-9._@-]*) echo "BENCH_HOST must be a plain ssh host name, got '$HOST'" >&2; exit 2 ;;
+    esac
+    case "$LABEL" in
+        ''|*[!A-Za-z0-9._@\ -]*) echo "BENCH_LABEL must be letters, digits, space, '.', '_', '@' or '-', got '$LABEL'" >&2; exit 2 ;;
+    esac
+    ARCH="$("${SSH[@]}" "$HOST" uname -m)" || { echo "cannot reach $HOST over ssh" >&2; exit 1; }
+    [ "$ARCH" = "aarch64" ] || { echo "$HOST is $ARCH; only aarch64 hosts are supported" >&2; exit 2; }
+    CPU="${BENCH_CPU:-$(( $("${SSH[@]}" "$HOST" nproc) - 1 ))}"
+else
+    CPU="${BENCH_CPU:-4}"
+fi
 case "$RUNS" in
     ''|*[!0-9]*) echo "RUNS must be a positive integer, got '$RUNS'" >&2; exit 2 ;;
 esac
@@ -52,21 +78,51 @@ if [ ! -f "$CSV" ]; then
 fi
 
 TMPDIR_B="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_B"' EXIT
+REMOTE=""
+cleanup() {
+    rm -rf "$TMPDIR_B"
+    if [ -n "$REMOTE" ]; then "${SSH[@]}" "$HOST" rm -f "$REMOTE" || true; fi
+}
+trap cleanup EXIT
 
-echo "Building: CYRIUS_DCE=1 cyrius build $BENCH"
-CYRIUS_DCE=1 cyrius build "$BENCH" "$TMPDIR_B/bench" > "$TMPDIR_B/build.log" 2>&1 \
+TARGET=()
+if [ -n "$HOST" ]; then TARGET=(--aarch64); fi
+echo "Building: CYRIUS_DCE=1 cyrius build ${TARGET[*]:+${TARGET[*]} }$BENCH"
+CYRIUS_DCE=1 cyrius build "${TARGET[@]}" "$BENCH" "$TMPDIR_B/bench" > "$TMPDIR_B/build.log" 2>&1 \
     || { cat "$TMPDIR_B/build.log" >&2; echo "build failed" >&2; exit 1; }
 
+# The host's state, before and after the runs: a throttled or busy board reads slow.
+host_state() {
+    "${SSH[@]}" "$HOST" 'printf "%s; " "$(tr -d "\0" < /proc/device-tree/model 2>/dev/null || uname -m)";
+        printf "governor %s, " "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)";
+        printf "%s MHz now, " "$(( $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo 0) / 1000 ))";
+        printf "%s C, " "$(( $(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0) / 1000 ))";
+        printf "load %s\n" "$(cut -d " " -f 1-3 /proc/loadavg)"'
+}
+
 PIN=()
-if command -v taskset > /dev/null 2>&1; then PIN=(taskset -c "$CPU"); fi
+if [ -n "$HOST" ]; then
+    REMOTE="$("${SSH[@]}" "$HOST" mktemp /tmp/tentib-bench.XXXXXX)"
+    scp -q -o BatchMode=yes "$TMPDIR_B/bench" "$HOST:$REMOTE"
+    "${SSH[@]}" "$HOST" chmod 700 "$REMOTE"
+    if "${SSH[@]}" "$HOST" command -v taskset > /dev/null 2>&1; then PIN=(taskset -c "$CPU"); fi
+    echo "Host $HOST ($LABEL): $(host_state)"
+elif command -v taskset > /dev/null 2>&1; then
+    PIN=(taskset -c "$CPU")
+fi
 
 # One "<label>\t<ns>" line per benchmark per run.
 i=1
 while [ "$i" -le "$RUNS" ]; do
-    echo "Run $i of $RUNS: ${PIN[*]:-} $TMPDIR_B/bench"
-    "${PIN[@]}" "$TMPDIR_B/bench" > "$TMPDIR_B/out" 2>&1 \
-        || { cat "$TMPDIR_B/out" >&2; echo "benchmark run failed" >&2; exit 1; }
+    if [ -n "$HOST" ]; then
+        echo "Run $i of $RUNS: $HOST: ${PIN[*]:-} $REMOTE"
+        "${SSH[@]}" "$HOST" "${PIN[@]}" "$REMOTE" > "$TMPDIR_B/out" 2>&1 \
+            || { cat "$TMPDIR_B/out" >&2; echo "benchmark run failed on $HOST" >&2; exit 1; }
+    else
+        echo "Run $i of $RUNS: ${PIN[*]:-} $TMPDIR_B/bench"
+        "${PIN[@]}" "$TMPDIR_B/bench" > "$TMPDIR_B/out" 2>&1 \
+            || { cat "$TMPDIR_B/out" >&2; echo "benchmark run failed" >&2; exit 1; }
+    fi
     awk '
         /^[0-9]+x[0-9]+ / {
             shape = $1
@@ -99,6 +155,7 @@ while [ "$i" -le "$RUNS" ]; do
 done
 
 [ -s "$TMPDIR_B/rows" ] || { echo "no benchmark results parsed" >&2; exit 1; }
+if [ -n "$HOST" ]; then echo "Host $HOST after the runs: $(host_state)"; fi
 
 # Median per benchmark, in first-seen order. With an even RUNS it takes the
 # lower middle value, so every recorded number is one that was measured.
@@ -114,8 +171,10 @@ awk -F '\t' '
         }
     }' "$TMPDIR_B/rows" > "$TMPDIR_B/median"
 
-awk -F '\t' -v date="$DATE" -v ver="$VERSION" -v c="$COMMIT" '
-    { name = $1; gsub(/"/, "\"\"", name); printf "%s,%s,%s,\"%s\",%s\n", date, ver, c, name, $2 }
+PREFIX=""
+if [ -n "$HOST" ]; then PREFIX="$LABEL: "; fi
+awk -F '\t' -v date="$DATE" -v ver="$VERSION" -v c="$COMMIT" -v pre="$PREFIX" '
+    { name = pre $1; gsub(/"/, "\"\"", name); printf "%s,%s,%s,\"%s\",%s\n", date, ver, c, name, $2 }
 ' "$TMPDIR_B/median" >> "$CSV"
 
 echo
@@ -130,4 +189,4 @@ awk -F '\t' '{
     printf "| %s | %s |\n", $1, s
 }' "$TMPDIR_B/median"
 echo
-echo "Appended $(wc -l < "$TMPDIR_B/median") rows to $CSV ($VERSION, $COMMIT, median of $RUNS runs)"
+echo "Appended $(wc -l < "$TMPDIR_B/median") rows to $CSV ($VERSION, $COMMIT, median of $RUNS runs${HOST:+, on $HOST})"

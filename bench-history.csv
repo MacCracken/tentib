@@ -102,3 +102,32 @@ date,version,commit,benchmark,time_ns
 2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model deserialize same dims",4217869
 2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model decode, full fwd/token",1140416
 2026-11-10T02:51:11Z,1.4.0,5cd3a06+dirty,"model decode, cached step",73545
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 128x128 branchy",886124
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 128x128 branchless",825030
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 128x128 simd",19437
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 128x128 rosnet-f64",84618
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 256x256 branchy",3963468
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 256x256 branchless",3693084
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 256x256 simd",55218
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 256x256 rosnet-f64",257504
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 512x512 branchy",18277112
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 512x512 branchless",17494516
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 512x512 simd",175732
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 512x512 rosnet-f64",1060017
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 768x768 branchy",88444097
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 768x768 branchless",86160542
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 768x768 simd",357850
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: layer 768x768 rosnet-f64",2352412
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: prep 768x768 tsimd_pack_w",35852140
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: prep 768x768 act_quant_int",69918
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model f64 weight-only",73577756
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model integer scalar",472522455
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model integer SIMD (0.4.1)",69166540
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model PACKED serving (0.7.0)",25779303
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model tx_pack (one-time)",43305129
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model training step (f64)",229628755
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model serialize",27065961
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model deserialize",81643222
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model deserialize same dims",31182619
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model decode, full fwd/token",12566938
+2026-11-10T04:05:01Z,1.4.0,b29ae7c+dirty,"rpi4: model decode, cached step",800664

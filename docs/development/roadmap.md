@@ -81,8 +81,9 @@ reuses a loaded model's buffers when the dims match, and the byte vocabulary as 
 bit 0 (with `tx_pack_peek` to read it before a load). See the CHANGELOG,
 [`../architecture/002-incremental-decode.md`](../architecture/002-incremental-decode.md)
 and [`../adr/0003-a-load-reuses-only-a-loaded-models-buffers.md`](../adr/0003-a-load-reuses-only-a-loaded-models-buffers.md).
-**hoosh adopting them** (decode with the cache, peek instead of reading offset 24,
-check the flag) is hoosh's work, a hoosh minor.
+**hoosh adopted them in 2.11.1**: decode with the cache (one cache shared by its
+interleaved replies), `tx_pack_peek` instead of reading offset 24, the declared vocabulary
+logged, and same-shape reloads that keep no memory.
 
 What remains, additive, so a 1.x minor; proposed, not scheduled:
 
@@ -118,19 +119,42 @@ new kernel); benchmarked against the i8 path at the four layer sizes and whole-m
 reporting the memory/speed trade honestly if it is slower; resident weight memory
 measured.
 
-## 1.6.x — the edge target (Pi 5, for seema)
+## 1.6.x — the edge target (Raspberry Pi 4, for seema)
 
-**Goal.** The Pi-class tok/s result the integer-native plan is aimed at. The SIMD kernel
-already runs NEON on aarch64 (cyrius SIMD Phase 5, 6.4.32, lowers `iv_dp8` natively), and
-the suite and fuzz harness pass under qemu in CI. Nothing has been measured on real ARM
-hardware.
+**Goal.** The Pi-class tok/s result the integer-native plan is aimed at, measured on the board
+at hand: a **Raspberry Pi 4 Model B** (Cortex-A72, 4 × 1.5 GHz, 2 GB, `ssh pi`). It was
+retargeted from a Pi 5 after 1.4.0. The Pi 5 came from the agnosticos plan's target figure,
+not from anything tentib needs.
 
-**Scope.** Benchmark on a Pi 5 (an aarch64 path for `scripts/bench-history.sh`), and size
-a b1.58-shaped model the Pi can serve (with 1.2.0's format to ship it and 1.5.x's storage
-to fit it).
+**Why a Pi 4 is enough.**
+- **The kernel needs only base NEON.** cyrius lowers `iv_dp8` on aarch64 (since 6.4.30) to
+  base ARMv8.0 NEON: `uxtl` / `sxtl` + `smlal`, with no `SDOT`. The A72 has no dot-product
+  extension (its CPU features are `fp asimd`, no `asimddp`), and it needs none.
+- **It already runs.** On 2026-11-09 the 1.4.0 suite passed 280/280 on the board. That was
+  tentib's first run on real ARM hardware; CI runs aarch64 under qemu.
 
-**Gate.** `docs/benchmarks.md` gains an aarch64 section: host, pin, model size, tok/s, and
-the f64 path on the same board for comparison.
+**Scope.**
+1. **Measure: done (unreleased, after 1.4.0).**
+   - `scripts/bench-history.sh` runs on the board with `BENCH_HOST=pi`.
+   - `docs/benchmarks.md` §6 has the results: packed serving 1,241 tok/s, against 434 for
+     f64 on the board (2.85×); a cached decode step 1,249 tok/s, against 80 with a full
+     forward per token.
+   - The fuzz harness also held there, and an x86_64 model file served with its x86_64
+     digest.
+   - This meets the gate below for the bench config.
+2. **Size a b1.58-shaped model the Pi 4 can serve.** With 2 GB of RAM, a model near the
+   plan's sizes needs 1.5.x's packed storage: 2B weights at 1 byte each is the whole memory,
+   and at 2 bits it is 0.5 GB. Ship it with 1.2.0's format.
+
+**A Pi 5** (Cortex-A76, which has `SDOT`) is a second data point whenever one is available.
+It is also the only reason to add an `SDOT` path, which would keep the current one as the
+A72's fallback. **Power** is still unmeasured, since there is no meter on the board.
+
+**Check the plan's figure before citing it.** The figure is "a 2B model at ~5–7 tok/s on a
+Pi 5 under ~15 W" (agnosticos `integer-native-ml.md`), and the plan gives no source for it.
+
+**Gate.** `docs/benchmarks.md` gains an aarch64 section: the board (model, CPU, clock, RAM),
+the pin, the model size, tok/s, and the f64 path on the same board for comparison.
 
 ## 1.7.x — GPU ternary kernels via mabda
 
