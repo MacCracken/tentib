@@ -2,7 +2,9 @@
 
 How a program (hoosh, murti, or your own) depends on tentib, ships a trained ternary
 model as a file, and serves it. Since 1.3.0. The worked, CI-gated example is
-[`examples/serve.cyr`](../../examples/serve.cyr).
+[`examples/serve.cyr`](../../examples/serve.cyr). A server that stays up, reloads and
+answers many callers has more to get right: see [§4](#4-serve-from-a-long-running-process),
+written from hoosh 2.11.0's adoption (1.3.1).
 
 ## 1. Declare the dependency
 
@@ -12,7 +14,7 @@ is enough:
 ```toml
 [deps.tentib]
 git = "https://github.com/MacCracken/tentib"
-tag = "1.3.0"
+tag = "1.3.1"
 modules = ["dist/tentib.cyr"]
 ```
 
@@ -72,3 +74,42 @@ tx_fwd_packed(tokens, V, T_used, C, F);                 # T_used in [1, T]; logi
 The format, every check and every status code are specified in
 [`../architecture/001-packed-model-format.md`](../architecture/001-packed-model-format.md);
 the full API is [`../api.md`](../api.md).
+
+## 4. Serve from a long-running process
+
+What hoosh 2.11.0 had to handle to serve a tentib model in a gateway that stays up, answers
+several callers at once and reloads its config (its `src/lib/tentib_local.cyr` and ADR 014
+are the worked example). None of it is new behavior; all of it follows from the contract
+above and [`../api.md`](../api.md).
+
+- **One model per process, one caller at a time.** Every tentib family is module-global
+  (`tx_*`, `blk_*`, `ki_*`, `pk_*`), so a process holds one model, and no call is
+  reentrant. Serialize every call into tentib, loads included, under one lock. Hold it for
+  one forward, not a whole reply, so callers interleave, and read what you need from
+  `ki_logits` before you release it: the next forward overwrites it. Freeable model
+  handles, and with them more than one model, are the 2.0.0 backlog's first item.
+- **A bad argument ends the process.** Bad *file data* is a status code, but a bad *call*
+  fails loud: `guard()` exits the process on a token id outside [0, V), a T outside
+  [1, the model's T], or a forward before a load. A server cannot catch that, so it has to
+  make those calls impossible: map every id into [0, V), keep its window at most the T
+  that `tx_pack_dims` reports, and call nothing before a load succeeds.
+- **The vocabulary is yours.** Format version 1 stores V but no tokenizer, so the
+  consumer decides what token ids mean. hoosh uses byte identity (V = 256, token id = byte
+  value) and refuses any other V. It reads the V header word (offset 24) before it calls
+  `tx_pack_deserialize`, so a model it cannot serve never replaces the one serving. A model
+  trained on another tokenizer has to ship that tokenizer beside the file.
+- **Each token is a full forward.** There is no incremental decode yet: a reply of n new
+  tokens is n calls to `tx_fwd_packed`, each over the whole window (up to T positions),
+  with the next token from `logits_argmax` over the window's last row. hoosh measured about
+  50 µs per token at C = 16, T ≤ 25. Slide the window once it holds T tokens.
+- **Every load keeps its memory.** A successful load allocates exactly
+  `tx_model_alloc_bytes(V, T, C, F)` bytes, and the model it replaces is not freed (rosnet's
+  allocator never frees; see the api's *Allocation & lifetime*). So reload only when the
+  bytes changed: hoosh compares the file's SHA-256 with the loaded file's and skips the
+  load when they match, which is most reloads, since a config reload rarely changes the
+  model. Budget one model's memory per reload that does. A refused load allocates nothing.
+  Read the file into a buffer you reuse, or that buffer leaks per reload as well.
+- **A load swaps the model under its readers.** It replaces the model in place, so a reply
+  begun on the old model must not go on with the new one. hoosh keeps an epoch it bumps
+  under the lock at each load, and a decode step that finds a different epoch ends its
+  reply (a buffered one is retried, a stream ends with an error).

@@ -4,6 +4,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-11-09
+
+**The first consumer.** hoosh 2.11.0 serves tentib models in its own process: a
+`type = "tentib"` provider loads a packed-model file through `dist/tentib.cyr` and answers
+chat completions with `tx_fwd_packed`, buffered and streamed. That is the roadmap's 1.3.x
+item. murti, the other planned consumer, is still a Rust tree, so its adoption waits for its
+Cyrius port. **No code changed.** The library and every output are 1.3.0's, and the bundles
+differ only in their version stamp. What the integration found is documentation.
+
+### Integration
+
+- hoosh 2.11.0 declares `[deps.tentib]` (tag 1.3.0; this release's code is the same) with
+  `modules = ["dist/tentib.cyr"]`. `cyrius deps` vendored tentib, rosnet 1.4.1 and tyche
+  1.2.2, and no akshara, as 1.3.0 promised. No function or global name collides with hoosh,
+  its vendored bundles or its stdlib set: 181 names on tentib's side, 3,007 on hoosh's.
+  The gateway builds with no new warning on x86_64, aarch64 and AGNOS, and grows by 1.9%
+  under DCE.
+- hoosh's suite trains models through tentib's API, writes them, and serves them back
+  through its provider: a known-answer reply, refused files (missing, V = 8, a flipped byte
+  that tentib reports as `pk_err_checksum`), a stream, reloads, and the memory each load
+  keeps, which matches `tx_model_alloc_bytes` to within 4 KiB.
+- No accessor was missing: `tx_pack_dims` (1.3.0) gave hoosh the dims of a model it did
+  not size.
+
+### Documented
+
+- **Serving from a long-running process**, a new §4 in
+  [`docs/guides/consuming-tentib.md`](docs/guides/consuming-tentib.md), with hoosh as the
+  worked example. Each point follows from the existing contract, and each was something
+  hoosh had to handle:
+  - one model per process, and no call is reentrant: serialize every call, hold the lock
+    for one forward, and read `ki_logits` before releasing it;
+  - `guard()` ends the process on a bad call, so a server makes bad calls impossible (ids in
+    [0, V), a window of at most the model's T, nothing before a load);
+  - format v1 has no tokenizer, so the consumer owns the vocabulary (hoosh: byte identity,
+    V = 256, checked from the header before loading);
+  - each new token is a full forward over the window (about 50 µs per token at C = 16 in
+    hoosh);
+  - each load keeps its `tx_model_alloc_bytes` for the life of the process, so reload only
+    when the bytes change (hoosh compares SHA-256s) and reuse the read buffer;
+  - a load replaces the model under its readers (hoosh's epoch check).
+- The guide's dependency example pins `1.3.1`.
+
+### Roadmap
+
+- 1.3.x records hoosh's adoption and keeps murti's open until its port.
+- Three things the integration asked for, proposed as additive 1.x work: **incremental
+  decode** (a KV-cached step, bit-identical to the last row of a full forward), **a load
+  that reuses the live model's buffers** when the dims match (no reload leak, no signature
+  change), and **a vocabulary in the artifact** (through the reserved flags word).
+- The 2.0.0 model-handles item now cites the measured cost of the global state: a server
+  keeps every model it has loaded (802,376 bytes each at T = 30, C = 16).
+
 ## [1.3.0] — 2026-11-09
 
 **tentib as a library.** Consumers (hoosh / murti, or any program) depend on tentib

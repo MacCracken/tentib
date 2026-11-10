@@ -5,6 +5,13 @@
 
 ## Version
 
+**1.3.1** (2026-11-09): **the first consumer.** hoosh 2.11.0 serves tentib models in its own process
+through `dist/tentib.cyr` (a `type = "tentib"` provider, buffered and streamed). No code changed: the
+library and every output are 1.3.0's, and the bundles differ only in their version stamp. What the
+integration found is the consuming guide's new §4 (serving from a long-running process) and three
+additive roadmap items (incremental decode, a reload that reuses the model's buffers, a vocabulary in
+the artifact). murti's adoption waits for its Cyrius port. Suite **188**.
+
 **1.3.0** (2026-11-09): **tentib as a library.** `dist/tentib.cyr` (+ `dist/tentib-gpu.cyr`)
 is a distlib bundle that consumers import with one `[deps.tentib]` entry, and it brings
 rosnet + tyche, no akshara and no hooks. Also: `tx_pack_dims` for a model a consumer loads;
@@ -45,7 +52,7 @@ carry the 1.1.1 and 1.1.2 numbers, and a full re-baseline is still open.
 Releases since 1.0.0: 1.0.1 (AGNOS GPU integer offload, `ternary_matmul_free_gpu`) ·
 1.0.2 (pin 6.5.27, deps to their 1.x freezes) · 1.0.3 (pin 6.6.2) · 1.0.4 (pin 6.6.20) ·
 1.1.0 (pin 6.7.9) · 1.1.1 (pin 6.7.18, latest deps) · 1.1.2 (P(-1) sweep) ·
-1.2.0 (packed-model serialization) · 1.3.0 (library bundle, consumer example).
+1.2.0 (packed-model serialization) · 1.3.0 (library bundle, consumer example) · 1.3.1 (hoosh adopts it).
 
 **1.0.0 — STABLE**, cut 2026-07-06 (user-named; user tags). The clean cut
 (tarka/prajna/anukūlana precedent): **no code change from 0.8.0** — all six v1.0
@@ -194,13 +201,17 @@ gets rosnet + tyche (checked with a throwaway consumer project, 1.3.0).
 
 ## Consumers
 
-_None yet._ The bundle and the consumer example are ready (1.3.0); hoosh / murti adopting
-`[deps.tentib]` is the roadmap's 1.3.x item and lands in their repos.
+- **hoosh 2.11.0** (2026-11-09): `[deps.tentib]` tag 1.3.0, `modules = ["dist/tentib.cyr"]`. A
+  `type = "tentib"` provider serves one packed model per process with byte tokens (V = 256), greedy
+  decoding, buffered and streamed; `src/lib/tentib_local.cyr`, ADR 014 there. Its suite trains, writes and
+  serves tentib models; its bench has a reply, a load and an unchanged reload.
+- **murti**: not yet. It is still a Rust tree; it adopts `[deps.tentib]` once it has a Cyrius port.
 
 ## Next
 
 tentib is stable (1.x, API frozen); the open work is in [`roadmap.md`](roadmap.md),
-proposed in order (1.2.0 and 1.3.0 shipped): **1.3.x** the first consumer (hoosh / murti, in their repos) · **1.4.x**
+proposed in order (1.2.0 and 1.3.0 shipped, and hoosh adopted 1.3.x): **1.3.x** murti once ported, and what
+the first consumer asks for (incremental decode, a buffer-reusing reload, a vocabulary in the artifact) · **1.4.x**
 serving from 2-bit / trit packed storage, with a serving-only allocation for loaded
 models · **1.5.x** the Pi 5 edge measurement (NEON
 `iv_dp8` already runs on aarch64) · **1.6.x** GPU kernels via mabda · later 1.x minors

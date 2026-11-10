@@ -63,11 +63,37 @@ see the CHANGELOG. What remains in the 1.2.x line is maintenance.
 `tx_pack_dims`, and the CI-gated consumer example `examples/serve.cyr`; see the
 CHANGELOG and [`../guides/consuming-tentib.md`](../guides/consuming-tentib.md).
 
-**Open.** hoosh / murti declare `[deps.tentib]` and serve a model file through
-`tx_fwd_packed`. That work lands in their repos. tentib's part is to answer what the
-integration finds: a missing accessor, a contract that needs a sentence, or a bundle
-that does not build under their pin (hoosh pins 6.7.18, as tentib does). Any additive
-API it needs is a 1.3.x minor here.
+**hoosh: adopted** in hoosh 2.11.0 (1.3.1 records it). hoosh serves a model file in its
+own process through `tx_fwd_packed`, buffered and streamed. The integration needed no new
+accessor; what it found became the consuming guide's §4 (one caller at a time, `guard()`
+ends the process, the consumer owns the vocabulary, a load keeps its memory). See the
+CHANGELOG.
+
+**murti: open, waiting for its port.** murti is still a Rust tree, and tentib is consumed
+from Cyrius only (no FFI). When murti has a Cyrius port, it declares `[deps.tentib]` the
+way hoosh did, and tentib answers what that integration finds, as here.
+
+**What the first consumer asks for.** Additive, so each is a 1.x minor; proposed, not
+scheduled, and the order is the maintainer's:
+
+- **Incremental decode.** A server decodes one token at a time, and each token is a full
+  `tx_fwd_packed` over the window: n new tokens cost n forwards of up to T positions
+  (about 50 µs per token at C = 16 in hoosh). A KV-cached step that runs one new position
+  against cached keys and values makes it one position per token. **Gate:** the step's
+  logits are bit-identical to the last row of the full forward at every window length
+  (suite + a fuzz property), and the cache's memory is counted in a stated figure.
+- **A load that reuses the live model's buffers.** Every load runs the four `*_init`
+  calls, so a server that reloads keeps every model it has loaded (802,376 bytes each at
+  T = 30, C = 16 in hoosh). A load whose dims match the live model's can overwrite its
+  buffers instead, with no signature change. **Gate:** `alloc_used()` does not grow across
+  a same-dims reload, and serving is bit-identical to a fresh load's. 1.4.x's serving-only
+  allocation changes what a load allocates and may take this with it.
+- **A vocabulary in the artifact.** Format v1 stores V but no tokenizer, so every consumer
+  invents a convention (hoosh: byte identity, V = 256). The flags word is reserved for
+  additive variants: a flag can declare the byte vocabulary, or a section can carry a
+  token table. A v1 decoder refuses any flag, as it should. **Gate:** the format doc
+  specifies it, the decoder checks it like every other field, and P10's mutation fuzzer
+  covers it.
 
 ## 1.4.x — serve from packed ternary storage
 
@@ -130,9 +156,11 @@ tested on a host (rosnet's `gpu_host` pattern).
 - **Model handles instead of module-global state.** Every family (`tx_*`, `blk_*`,
   `ki_*`, `pk_*`) is module-global, so a process holds one model. Every call re-passes
   V, T, C, F, which the 1.1.2 dims guards have to police. Re-calling an `*_init` leaks the
-  previous buffers (the bump allocator never frees). Outputs land in globals
-  (`tx_logits`, `ki_logits`). An arena-owned, freeable handle fixes all four and changes
-  every `tx_*` signature.
+  previous buffers (the bump allocator never frees); a server that reloads models keeps
+  every one it has loaded (hoosh 2.11.0: 802,376 bytes per load at T = 30, C = 16), and
+  must serialize every call. Outputs land in globals (`tx_logits`, `ki_logits`). An
+  arena-owned, freeable handle fixes all four, allows more than one model per process, and
+  changes every `tx_*` signature.
 - **Compute the STE weight mask in the forward.** `bl_backward_wonly` divides `W/γ` again
   for every weight, and the forward already computed it. Keeping it changes the frozen
   signature (a new entry point in a 1.x minor is the non-breaking alternative).
